@@ -1,0 +1,101 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import { SkillDefinition, BaseSkill } from './base-skill';
+
+export class SkillRegistry {
+  private skills: Map<string, SkillDefinition> = new Map();
+  private skillsDir: string;
+
+  constructor(skillsDir?: string) {
+    this.skillsDir = skillsDir || path.join(process.cwd(), 'src', 'skills');
+  }
+
+  /**
+   * Auto-discover and load all skill files from src/skills/.
+   * Any .ts/.js file that exports a default class extending BaseSkill is loaded.
+   */
+  async discover(): Promise<void> {
+    console.log(`[SkillRegistry] Scanning for skills in ${this.skillsDir}...`);
+
+    const skipFiles = new Set(['base-skill', 'registry', 'index']);
+
+    const files = fs.readdirSync(this.skillsDir).filter(f => {
+      const ext = path.extname(f);
+      const name = path.basename(f, ext);
+      return (ext === '.ts' || ext === '.js') && !skipFiles.has(name);
+    });
+
+    for (const file of files) {
+      try {
+        const modulePath = path.join(this.skillsDir, file);
+        const mod = await import(modulePath);
+        const SkillClass = mod.default;
+
+        if (!SkillClass) {
+          console.warn(`[SkillRegistry] ${file}: no default export, skipping.`);
+          continue;
+        }
+
+        const instance: BaseSkill = new SkillClass();
+        const definition = await instance.define();
+
+        this.skills.set(definition.id, definition);
+        console.log(`[SkillRegistry] Loaded skill: ${definition.name} (${definition.id}) - ${definition.enabled ? 'enabled' : 'disabled'}`);
+      } catch (err: any) {
+        console.error(`[SkillRegistry] Failed to load skill from ${file}:`, err.message);
+      }
+    }
+
+    console.log(`[SkillRegistry] Discovery complete. ${this.skills.size} skill(s) loaded.`);
+  }
+
+  getSkill(id: string): SkillDefinition | undefined {
+    return this.skills.get(id);
+  }
+
+  getEnabledSkills(): SkillDefinition[] {
+    return Array.from(this.skills.values()).filter(s => s.enabled);
+  }
+
+  getAllSkills(): SkillDefinition[] {
+    return Array.from(this.skills.values());
+  }
+
+  enableSkill(id: string): boolean {
+    const skill = this.skills.get(id);
+    if (skill) {
+      skill.enabled = true;
+      return true;
+    }
+    return false;
+  }
+
+  disableSkill(id: string): boolean {
+    const skill = this.skills.get(id);
+    if (skill) {
+      skill.enabled = false;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Build a routing description string for the main agent to decide which skill to use.
+   * The LLM reads this to decide routing.
+   */
+  buildRoutingPrompt(): string {
+    const enabled = this.getEnabledSkills();
+    if (enabled.length === 0) return '';
+
+    const lines = enabled.map(s =>
+      `- SKILL_ID: "${s.id}" | NAME: "${s.name}" | WHEN TO USE: ${s.triggerDescription}`
+    );
+
+    return (
+      '\n\nYou have access to specialized skills. If the user\'s request matches a skill, ' +
+      'respond ONLY with the JSON: {"route_to_skill": "<SKILL_ID>", "query": "<user\'s original question>"}. ' +
+      'If no skill matches, answer directly.\n\nAvailable Skills:\n' +
+      lines.join('\n')
+    );
+  }
+}

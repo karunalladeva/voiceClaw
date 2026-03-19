@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+# Currently, qwen-tts isn't published directly under that simple name on PyPI.
+# In a real scenario, this would likely be transformers and torch to run the model, 
+# or a specific clone repo's requirements. We'll stub the required libraries:
+transformers
+torch
+torchaudio
+soundfile
