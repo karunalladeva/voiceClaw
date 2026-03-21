@@ -84,14 +84,50 @@ class MemoryConfig {
   Map<String, dynamic> toJson() => {'enabled': enabled};
 }
 
+class LearningConfig {
+  bool autoMemoryStore;
+  bool autoSkillCreate;
+  bool retryOnFail;
+  int maxRetries;
+
+  LearningConfig({
+    required this.autoMemoryStore,
+    required this.autoSkillCreate,
+    required this.retryOnFail,
+    required this.maxRetries,
+  });
+
+  factory LearningConfig.fromJson(Map<String, dynamic> json) => LearningConfig(
+        autoMemoryStore: json['autoMemoryStore'] ?? true,
+        autoSkillCreate: json['autoSkillCreate'] ?? true,
+        retryOnFail: json['retryOnFail'] ?? true,
+        maxRetries: (json['maxRetries'] as num?)?.toInt() ?? 3,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'autoMemoryStore': autoMemoryStore,
+        'autoSkillCreate': autoSkillCreate,
+        'retryOnFail': retryOnFail,
+        'maxRetries': maxRetries,
+      };
+}
+
 class AppConfig {
   LlmConfig llm;
   SttConfig stt;
   TtsConfig tts;
   AgentConfig agent;
   MemoryConfig memory;
+  LearningConfig learning;
 
-  AppConfig({required this.llm, required this.stt, required this.tts, required this.agent, required this.memory});
+  AppConfig({
+    required this.llm,
+    required this.stt,
+    required this.tts,
+    required this.agent,
+    required this.memory,
+    required this.learning,
+  });
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
     return AppConfig(
@@ -100,6 +136,7 @@ class AppConfig {
       tts: TtsConfig.fromJson(json['tts'] ?? {}),
       agent: AgentConfig.fromJson(json['agent'] ?? {}),
       memory: MemoryConfig.fromJson(json['memory'] ?? {}),
+      learning: LearningConfig.fromJson(json['learning'] ?? {}),
     );
   }
 
@@ -110,6 +147,7 @@ class AppConfig {
       'tts': tts.toJson(),
       'agent': agent.toJson(),
       'memory': memory.toJson(),
+      'learning': learning.toJson(),
     };
   }
 }

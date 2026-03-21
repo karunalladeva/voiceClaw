@@ -8,23 +8,66 @@ import { STTModule } from '../stt/whisper';
 import { TTSSwitcher as TTSModule } from '../tts/index';
 import { ReactAgent, StreamEvent } from '../agents/react-agent';
 import { configManager } from '../config/index';
+import { modelRegistry } from '../models/model-registry';
+import { modelRouter } from '../models/model-router';
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const agent = new ReactAgent();
 
 /**
- * Responses longer than this many characters get summarized before TTS.
+ * Max characters spoken aloud. Responses beyond this are trimmed to the
+ * nearest sentence boundary — no LLM call needed, so TTS starts instantly.
  * The full text is still sent to the client for display.
  */
-const AUDIO_SUMMARY_THRESHOLD = 400;
+const AUDIO_MAX_CHARS = 500;
+
+/**
+ * Returns the text that should be spoken aloud.
+ * Trims long responses to the nearest sentence end within AUDIO_MAX_CHARS.
+ * This is instant — avoids a second LLM round-trip before TTS.
+/**
+ * Strip markdown syntax so TTS reads clean natural text.
+ * Handles: headers, bold, italic, code, bullets, links, horizontal rules.
+ */
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/#{1,6}\s+/g, '')           // ## headings
+    .replace(/\*\*(.+?)\*\*/g, '$1')     // **bold**
+    .replace(/\*(.+?)\*/g, '$1')         // *italic*
+    .replace(/__(.+?)__/g, '$1')         // __bold__
+    .replace(/_(.+?)_/g, '$1')           // _italic_
+    .replace(/`{1,3}[^`]*`{1,3}/g, '')  // `inline code` / ```blocks```
+    .replace(/!\[.*?\]\(.*?\)/g, '')     // images
+    .replace(/\[(.+?)\]\(.*?\)/g, '$1') // [link text](url) → just the text
+    .replace(/^[-*+]\s+/gm, '')         // bullet points
+    .replace(/^\d+\.\s+/gm, '')         // numbered lists
+    .replace(/^-{3,}$/gm, '')           // horizontal rules ---
+    .replace(/>{1,}\s?/g, '')           // blockquotes >
+    .replace(/\s{2,}/g, ' ')            // collapse extra spaces
+    .trim();
+}
+
+function ttsTextFor(_userInput: string | any, fullText: string): string {
+  const plain = stripMarkdown(fullText);
+  if (plain.length <= AUDIO_MAX_CHARS) return plain;
+  console.log(`[API] Response is ${plain.length} chars — trimming for audio.`);
+  const slice = plain.substring(0, AUDIO_MAX_CHARS);
+  const lastBreak = Math.max(
+    slice.lastIndexOf('. '),
+    slice.lastIndexOf('! '),
+    slice.lastIndexOf('? '),
+    slice.lastIndexOf('.\n'),
+  );
+  return lastBreak > 80 ? slice.substring(0, lastBreak + 1).trim() : slice.trim();
+}
+
 
 app.use(cors());
 app.use(express.json());
 
 function sendSSE(res: express.Response, event: StreamEvent) {
   res.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
-  // Flush immediately so the client receives each event without buffering delay
   if (typeof (res as any).flush === 'function') (res as any).flush();
 }
 
@@ -35,17 +78,6 @@ function initSSE(res: express.Response) {
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-}
-
-/**
- * Returns the text that should be spoken aloud.
- * When the full response exceeds AUDIO_SUMMARY_THRESHOLD characters the LLM
- * produces a short, question-focused summary; otherwise the full text is used.
- */
-async function ttsTextFor(userInput: string | any, fullText: string): Promise<string> {
-  if (fullText.length <= AUDIO_SUMMARY_THRESHOLD) return fullText;
-  console.log(`[API] Response is ${fullText.length} chars — summarizing for audio.`);
-  return agent.summarizeForAudio(userInput, fullText);
 }
 
 /**
@@ -76,11 +108,23 @@ async function handleStreamingChat(
     }
   });
 
+  // Send a SSE comment heartbeat every 5s to keep the connection alive while
+  // Ollama loads the model from disk (cold-start can take 15-30s).
+  const keepalive = setInterval(() => {
+    if (!controller.signal.aborted && !res.writableEnded) {
+      res.write(': keepalive\n\n');
+      if (typeof (res as any).flush === 'function') (res as any).flush();
+    } else {
+      clearInterval(keepalive);
+    }
+  }, 5000);
+
   let fullText = '';
   let ttsPromise: Promise<Buffer> | null = null;
 
   try {
     for await (const event of agent.processStream(input, controller.signal)) {
+      clearInterval(keepalive); // Stop keepalive once real events start
       if (controller.signal.aborted) break;
 
       sendSSE(res, event);
@@ -90,9 +134,8 @@ async function handleStreamingChat(
         // Start summarise-then-synthesise immediately — runs in parallel with
         // any remaining SSE housekeeping.
         sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
-        ttsPromise = ttsTextFor(input, fullText)
-          .then((ttsText) => synthToBuffer(ttsText))
-          .catch((err) => {
+        ttsPromise = synthToBuffer(ttsTextFor(input, fullText))
+          .catch((err: any) => {
             console.error('[API] TTS pre-synthesis failed:', err);
             return null as any;
           });
@@ -193,9 +236,8 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
         if (event.type === 'text_done' && event.data) {
           fullText = event.data;
           sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
-          ttsPromise = ttsTextFor(userQuestion, fullText)
-            .then((ttsText) => synthToBuffer(ttsText))
-            .catch((err) => {
+          ttsPromise = synthToBuffer(ttsTextFor(userQuestion, fullText))
+            .catch((err: any) => {
               console.error('[API] TTS pre-synthesis failed:', err);
               return null as any;
             });
@@ -358,6 +400,29 @@ app.get('/skills', (req, res) => {
   res.json({ skills });
 });
 
+// 5b. Learned Skills API (workspace/learned-skills SKILL.md files)
+app.get('/skills/learned', async (req, res) => {
+  try {
+    const { learningEngine } = await import('../agents/learning-engine');
+    const skills = await learningEngine.listLearnedSkills();
+    res.json({ skills: skills.map(s => ({ name: s.name, description: s.description, content: s.content })) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/skills/learned/:name', async (req, res) => {
+  try {
+    const { learningEngine } = await import('../agents/learning-engine');
+    const ok = await learningEngine.deleteLearnedSkill(req.params.name);
+    if (ok) { res.json({ success: true }); }
+    else { res.status(404).json({ error: 'Skill not found' }); }
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.post('/skills/:id/enable', (req, res) => {
   const registry = agent.getSkillRegistry();
   if (registry.enableSkill(req.params.id)) {
@@ -428,6 +493,81 @@ app.delete('/memory/:id', async (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// 8. Multi-model Management API ──────────────────────────────────────────────
+
+/** List all models with their capabilities. */
+app.get('/models', (_req, res) => {
+  res.json({ models: modelRegistry.getAll() });
+});
+
+/** Add or update a model configuration. */
+app.post('/models', async (req, res) => {
+  try {
+    const config = req.body;
+    if (!config?.id || !config?.provider || !config?.model) {
+      return res.status(400).json({ error: 'id, provider and model are required.' });
+    }
+    // Default sensible fields if not provided
+    config.enabled = config.enabled ?? true;
+    config.isMaster = config.isMaster ?? false;
+    config.name = config.name || `${config.provider}/${config.model}`;
+    config.role = config.role || 'general';
+
+    const saved = await modelRegistry.addOrUpdate(config);
+    modelRouter.invalidate(config.id);
+    res.json({ success: true, model: saved });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to save model.', details: err.message });
+  }
+});
+
+/** Delete a model by ID. */
+app.delete('/models/:id', async (req, res) => {
+  try {
+    const ok = await modelRegistry.delete(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Model not found.' });
+    modelRouter.invalidate(req.params.id);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Promote a model to master. */
+app.post('/models/:id/master', async (req, res) => {
+  try {
+    const ok = await modelRegistry.setMaster(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Model not found or disabled.' });
+    modelRouter.invalidate();
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Trigger capability detection for a specific model. */
+app.post('/models/:id/detect', async (req, res) => {
+  try {
+    const caps = await modelRegistry.detectAndSave(req.params.id);
+    if (!caps) return res.status(404).json({ error: 'Model not found.' });
+    modelRouter.invalidate(req.params.id);
+    res.json({ success: true, capabilities: caps });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Capability detection failed.', details: err.message });
+  }
+});
+
+/** Re-detect capabilities for ALL stale models. */
+app.post('/models/detect-all', async (_req, res) => {
+  try {
+    await modelRegistry.refreshStale();
+    modelRouter.invalidate();
+    res.json({ success: true, models: modelRegistry.getAll() });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export const startServer = async (port: number = 3000) => {

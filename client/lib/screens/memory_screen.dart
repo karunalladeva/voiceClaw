@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:provider/provider.dart';
 import '../providers/app_state.dart';
 
@@ -101,6 +104,22 @@ class _MemoryScreenState extends State<MemoryScreen> {
     }
   }
 
+  /// Safely parse the `tags` field regardless of whether the backend sent a
+  /// `List`, a JSON-encoded array string (`'["a","b"]'`), or a plain
+  /// comma-separated string (`'a, b'`).
+  List<String> _parseTags(dynamic raw) {
+    if (raw == null) return [];
+    if (raw is List) return raw.map((e) => e.toString()).toList();
+    if (raw is String && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is List) return decoded.map((e) => e.toString()).toList();
+      } catch (_) {}
+      return raw.split(',').map((t) => t.trim()).where((t) => t.isNotEmpty).toList();
+    }
+    return [];
+  }
+
   Future<void> _deleteMemory(String id) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -128,6 +147,51 @@ class _MemoryScreenState extends State<MemoryScreen> {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     }
+  }
+
+  Widget _renderContent(String content) {
+    if (content.isEmpty) return const SizedBox.shrink();
+
+    // Try to detect/format JSON
+    try {
+      if (content.trim().startsWith('{') || content.trim().startsWith('[')) {
+        final decoded = jsonDecode(content);
+        if (decoded is Map || decoded is List) {
+          final pretty = const JsonEncoder.withIndent('  ').convert(decoded);
+          return Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            width: double.infinity,
+            child: Text(
+              pretty,
+              style: TextStyle(
+                fontSize: 12,
+                fontFamily: 'monospace',
+                color: Colors.blue.shade900,
+              ),
+            ),
+          );
+        }
+      }
+    } catch (_) {}
+
+    // Fallback to Markdown
+    return MarkdownBody(
+      data: content,
+      shrinkWrap: true,
+      selectable: true,
+      styleSheet: MarkdownStyleSheet(
+        p: const TextStyle(fontSize: 14, height: 1.4),
+        code: TextStyle(
+          backgroundColor: Colors.grey.shade200,
+          fontFamily: 'monospace',
+          fontSize: 12,
+        ),
+      ),
+    );
   }
 
   @override
@@ -201,7 +265,7 @@ class _MemoryScreenState extends State<MemoryScreen> {
               separatorBuilder: (_, __) => const SizedBox(height: 8),
               itemBuilder: (context, index) {
                 final m = _memories[index];
-                final tags = (m['tags'] as List?)?.cast<String>() ?? [];
+                final tags = _parseTags(m['tags']);
                 final ts = m['timestamp'] as String? ?? '';
                 final date = ts.isNotEmpty
                     ? DateTime.tryParse(ts)?.toLocal().toString().substring(0, 16) ?? ts
@@ -216,10 +280,7 @@ class _MemoryScreenState extends State<MemoryScreen> {
                         Row(
                           children: [
                             Expanded(
-                              child: Text(
-                                m['content'] ?? '',
-                                style: const TextStyle(fontSize: 14),
-                              ),
+                              child: _renderContent(m['content']?.toString() ?? ''),
                             ),
                             IconButton(
                               icon: const Icon(Icons.delete_outline, color: Colors.red),

@@ -40,8 +40,17 @@ export default class OsControllerSkill extends BaseSkill {
         '  • windows_browser_status — check if browser is open and see all tabs with URLs.\n' +
         '  • windows_browser_navigate — open a URL with full CDP verification.\n' +
         '  • windows_browser_close_tab — close a tab by ID or URL keyword.\n\n' +
-        'UI TASKS: windows_press_key, windows_type_text, windows_mouse_move, windows_mouse_click.\n' +
-        'SCREEN: windows_take_screenshot to see what is on screen when needed.';
+        'UI / MOUSE-FIRST NAVIGATION (use BEFORE shell):\n' +
+        '  If a dedicated tool fails or the target cannot be opened via its name, SWITCH TO MOUSE MODE:\n' +
+        '  1. windows_take_screenshot — see what is on screen right now.\n' +
+        '  2. windows_mouse_move + windows_mouse_click — move to a visible button/icon and click it.\n' +
+        '  3. windows_press_key (e.g. Win, Tab, Enter, Escape) — navigate menus or dialogs.\n' +
+        '  4. windows_type_text — type into a search box, address bar, or dialog.\n' +
+        '  Repeat screenshot → click → verify until the task is complete.\n\n' +
+        'SHELL (last resort only — use mouse first if shell is unavailable):\n' +
+        '  Use shell_exec ONLY when no GUI tool can accomplish the task.\n' +
+        '  If shell_exec fails with a "not found" error, do NOT retry shell — switch to mouse navigation instead.';
+
     }
 
     return {

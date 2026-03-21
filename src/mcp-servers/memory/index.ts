@@ -115,6 +115,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["id"],
         },
       },
+      {
+        name: "save_skill",
+        description: "Save a learned skill as a SKILL.md file in workspace/learned-skills/.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Kebab-case skill name (e.g. python-env-setup)" },
+            description: { type: "string", description: "One-line description of the skill" },
+            content: { type: "string", description: "Full markdown content of the skill" },
+          },
+          required: ["name", "description", "content"],
+        },
+      },
     ],
   };
 });
@@ -129,7 +142,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     if (name === "store_memory") {
       const content = args.content as string;
-      const tags = (args.tags as string[]) || [];
+      let tags: string[] = [];
+      if (Array.isArray(args.tags)) {
+        tags = args.tags.map(String);
+      } else if (typeof args.tags === 'string' && args.tags.length > 0) {
+        try {
+          // If it looks like a JSON array, try parsing it
+          if (args.tags.trim().startsWith('[')) {
+            const parsed = JSON.parse(args.tags);
+            if (Array.isArray(parsed)) {
+              tags = parsed.map(String);
+            } else {
+              tags = [args.tags];
+            }
+          } else {
+            // Otherwise treat as comma-separated
+            tags = args.tags.split(',').map(t => t.trim()).filter(Boolean);
+          }
+        } catch (_) {
+          tags = args.tags.split(',').map(t => t.trim()).filter(Boolean);
+        }
+      }
       
       const newItem: MemoryItem = {
         id: Date.now().toString(),
@@ -218,8 +251,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{ type: "text", text: `Memory ${id} deleted.` }],
       };
 
+    } else if (name === "save_skill") {
+      const skillName = (args.name as string).toLowerCase().replace(/[^a-z0-9-]/g, '-');
+      const skillDir = path.join(process.cwd(), "workspace", "learned-skills", skillName);
+      await fs.mkdir(skillDir, { recursive: true });
+      const skillPath = path.join(skillDir, "SKILL.md");
+      const content =
+        `---\nname: ${skillName}\ndescription: ${args.description as string}\ncreated: ${new Date().toISOString().split('T')[0]}\n---\n\n${args.content as string}`;
+      await fs.writeFile(skillPath, content, "utf-8");
+      return {
+        content: [{ type: "text", text: `Skill saved to ${skillPath}` }],
+      };
+
     } else {
       throw new Error(`Unknown tool: ${name}`);
+
     }
   } catch (error: any) {
     return {

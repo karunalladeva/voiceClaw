@@ -21,6 +21,12 @@ export interface AppConfig {
   memory: {
     enabled: boolean;
   };
+  learning: {
+    autoMemoryStore: boolean;
+    autoSkillCreate: boolean;
+    retryOnFail: boolean;
+    maxRetries: number;
+  };
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -40,6 +46,12 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   memory: {
     enabled: true,
+  },
+  learning: {
+    autoMemoryStore: true,
+    autoSkillCreate: true,
+    retryOnFail: true,
+    maxRetries: 3,
   },
 };
 
@@ -116,6 +128,7 @@ class ConfigManager extends EventEmitter {
       tts: { ...this.currentConfig.tts, ...(newSettings.tts || {}) },
       agent: { ...this.currentConfig.agent, ...(newSettings.agent || {}) },
       memory: { ...this.currentConfig.memory, ...(newSettings.memory || {}) },
+      learning: { ...this.currentConfig.learning, ...(newSettings.learning || {}) },
     };
     
     await this.saveConfig(this.currentConfig);

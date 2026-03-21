@@ -3,6 +3,8 @@ import 'package:provider/provider.dart';
 import '../providers/app_state.dart';
 import '../models/app_config.dart';
 import 'memory_screen.dart';
+import 'models_screen.dart';
+import 'skills_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({Key? key}) : super(key: key);
@@ -19,6 +21,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late double _temperature;
   late bool _enableInternet;
   late bool _enableMemory;
+  late bool _autoMemoryStore;
+  late bool _autoSkillCreate;
+  late bool _retryOnFail;
+  late double _maxRetries;
 
   @override
   void initState() {
@@ -31,6 +37,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _temperature = config?.llm.temperature ?? 0.2;
     _enableInternet = config?.agent.enableInternet ?? true;
     _enableMemory = config?.memory.enabled ?? true;
+    _autoMemoryStore = config?.learning.autoMemoryStore ?? true;
+    _autoSkillCreate = config?.learning.autoSkillCreate ?? true;
+    _retryOnFail = config?.learning.retryOnFail ?? true;
+    _maxRetries = (config?.learning.maxRetries ?? 3).toDouble();
   }
 
   @override
@@ -48,6 +58,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       tts: TtsConfig(engine: _engine, defaultVoice: _voiceController.text),
       agent: AgentConfig(enableInternet: _enableInternet),
       memory: MemoryConfig(enabled: _enableMemory),
+      learning: LearningConfig(
+        autoMemoryStore: _autoMemoryStore,
+        autoSkillCreate: _autoSkillCreate,
+        retryOnFail: _retryOnFail,
+        maxRetries: _maxRetries.round(),
+      ),
     );
     await appState.updateConfig(newConfig);
     if (mounted) {
@@ -115,6 +131,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
             decoration: const InputDecoration(labelText: 'Default Voice'),
           ),
           const Divider(height: 48),
+          const Text('Model Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          ListTile(
+            leading: const Icon(Icons.smart_toy_outlined),
+            title: const Text('Manage AI Models'),
+            subtitle: const Text('Add, configure, and switch between providers'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ModelsScreen()),
+            ),
+          ),
+          const Divider(height: 48),
           const Text('Memory Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           SwitchListTile(
             title: const Text('Enable Long-Term Memory'),
@@ -133,10 +161,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           const SizedBox(height: 32),
+          const Divider(height: 48),
+          const Text('Self-Learning', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          SwitchListTile(
+            title: const Text('Auto Memory Store'),
+            subtitle: const Text('Automatically saves important facts from every conversation.'),
+            value: _autoMemoryStore,
+            onChanged: (val) => setState(() => _autoMemoryStore = val),
+          ),
+          SwitchListTile(
+            title: const Text('Auto Skill Creation'),
+            subtitle: const Text('Creates SKILL.md files when the agent encounters tasks it cannot do.'),
+            value: _autoSkillCreate,
+            onChanged: (val) => setState(() => _autoSkillCreate = val),
+          ),
+          SwitchListTile(
+            title: const Text('Retry Until Done'),
+            subtitle: const Text('Agent retries failed tasks and learns from each attempt.'),
+            value: _retryOnFail,
+            onChanged: (val) => setState(() => _retryOnFail = val),
+          ),
+          if (_retryOnFail) ...[
+            Text('Max Retries: ${_maxRetries.round()}'),
+            Slider(
+              value: _maxRetries,
+              min: 1,
+              max: 5,
+              divisions: 4,
+              onChanged: (val) => setState(() => _maxRetries = val),
+            ),
+          ],
+          ListTile(
+            leading: const Icon(Icons.auto_stories_outlined),
+            title: const Text('View Learned Skills'),
+            subtitle: const Text('Browse and delete skills the agent has taught itself.'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SkillsScreen()),
+            ),
+          ),
+          const SizedBox(height: 32),
           ElevatedButton(
             onPressed: _save,
             child: const Text('Save Configuration'),
-          )
+          ),
         ],
       ),
     );

@@ -11,7 +11,7 @@ class OnboardingScreen extends StatefulWidget {
 }
 
 class _OnboardingScreenState extends State<OnboardingScreen> {
-  final TextEditingController _urlController = TextEditingController(text: 'http://10.0.2.2:3000');
+  final TextEditingController _urlController = TextEditingController(text: 'http://localhost:3000');
   bool _isLoading = false;
 
   Future<void> _connect() async {

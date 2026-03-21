@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../models/app_config.dart';
+import '../models/model_config.dart';
 
 class SSEEvent {
   final String type;
@@ -11,7 +12,7 @@ class SSEEvent {
 }
 
 class ApiService {
-  String baseUrl = 'http://10.0.2.2:3000';
+  String baseUrl = 'http://localhost:3000';
 
   /// The active streaming HTTP client. Kept as a field so it can be
   /// force-closed via [abort] to cancel an in-progress SSE stream.
@@ -97,7 +98,20 @@ class ApiService {
   Future<List<dynamic>> listMemories() async {
     final response = await http.get(Uri.parse('$baseUrl/memory'));
     if (response.statusCode == 200) {
-      return (jsonDecode(response.body)['memories'] as List?) ?? [];
+      final data = jsonDecode(response.body);
+      if (data is! Map) return [];
+      final raw = data['memories'];
+      if (raw is List) return raw;
+      if (raw is String && raw.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is List) return decoded;
+        } catch (_) {}
+        return [
+          {'id': 'string-content', 'content': raw, 'timestamp': DateTime.now().toIso8601String(), 'tags': []}
+        ];
+      }
+      return [];
     }
     throw Exception('Failed to list memories');
   }
@@ -114,6 +128,62 @@ class ApiService {
   Future<void> deleteMemory(String id) async {
     final response = await http.delete(Uri.parse('$baseUrl/memory/$id'));
     if (response.statusCode != 200) throw Exception('Failed to delete memory');
+  }
+
+  // ── Models API ────────────────────────────────────────────────────────────
+
+  Future<List<ModelConfig>> listModels() async {
+    final response = await http.get(Uri.parse('$baseUrl/models'));
+    if (response.statusCode == 200) {
+      final list = (jsonDecode(response.body)['models'] as List?) ?? [];
+      return list.map((m) => ModelConfig.fromJson(m as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Failed to list models');
+  }
+
+  Future<ModelConfig> saveModel(ModelConfig config) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/models'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(config.toJson()),
+    );
+    if (response.statusCode == 200) {
+      return ModelConfig.fromJson(jsonDecode(response.body)['model'] as Map<String, dynamic>);
+    }
+    final detail = jsonDecode(response.body)['error'] ?? 'Unknown error';
+    throw Exception('Failed to save model: $detail');
+  }
+
+  Future<void> deleteModel(String id) async {
+    final response = await http.delete(Uri.parse('$baseUrl/models/$id'));
+    if (response.statusCode != 200) throw Exception('Failed to delete model');
+  }
+
+  Future<void> setMasterModel(String id) async {
+    final response = await http.post(Uri.parse('$baseUrl/models/$id/master'));
+    if (response.statusCode != 200) throw Exception('Failed to set master model');
+  }
+
+  Future<ModelCapabilities> detectModelCapabilities(String id) async {
+    final response = await http
+        .post(Uri.parse('$baseUrl/models/$id/detect'))
+        .timeout(const Duration(seconds: 60));
+    if (response.statusCode == 200) {
+      return ModelCapabilities.fromJson(
+          jsonDecode(response.body)['capabilities'] as Map<String, dynamic>);
+    }
+    throw Exception('Capability detection failed');
+  }
+
+  Future<List<ModelConfig>> detectAllCapabilities() async {
+    final response = await http
+        .post(Uri.parse('$baseUrl/models/detect-all'))
+        .timeout(const Duration(seconds: 120));
+    if (response.statusCode == 200) {
+      final list = (jsonDecode(response.body)['models'] as List?) ?? [];
+      return list.map((m) => ModelConfig.fromJson(m as Map<String, dynamic>)).toList();
+    }
+    throw Exception('Bulk detection failed');
   }
 
   // ── Session API ────────────────────────────────────────────────────────────
@@ -137,7 +207,9 @@ class ApiService {
 
   /// Stream text chat via SSE. Yields SSEEvent objects as they arrive.
   Stream<SSEEvent> streamTextChat(String text) async* {
-    final client = HttpClient();
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 30)
+      ..idleTimeout = const Duration(seconds: 120);
     _activeClient = client;
     try {
       final request = await client.postUrl(Uri.parse('$baseUrl/chat/text'));
@@ -155,7 +227,9 @@ class ApiService {
 
   /// Stream audio chat via SSE. Yields SSEEvent objects as they arrive.
   Stream<SSEEvent> streamAudioChat(String filePath) async* {
-    final client = HttpClient();
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 30)
+      ..idleTimeout = const Duration(seconds: 120);
     _activeClient = client;
     try {
       final file = File(filePath);
@@ -197,6 +271,9 @@ class ApiService {
         final eventEnd = buffer.indexOf('\n\n');
         final rawEvent = buffer.substring(0, eventEnd);
         buffer = buffer.substring(eventEnd + 2);
+
+        // Skip SSE comment lines (keepalive: ': keepalive')
+        if (rawEvent.trim().startsWith(':')) continue;
 
         String? eventType;
         String? eventData;

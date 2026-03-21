@@ -162,7 +162,19 @@ export class MCPClientManager {
   async listMemories(): Promise<any[]> {
     try {
       const text = await this.callMemoryTool('list_memories');
-      return text ? JSON.parse(text) : [];
+      if (!text) return [];
+      
+      // Attempt to find the JSON array if mixed with text
+      const firstBracket = text.indexOf('[');
+      const lastBracket = text.lastIndexOf(']');
+      if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+        const jsonPart = text.substring(firstBracket, lastBracket + 1);
+        try {
+          return JSON.parse(jsonPart);
+        } catch (_) {}
+      }
+      
+      return JSON.parse(text);
     } catch {
       return [];
     }
