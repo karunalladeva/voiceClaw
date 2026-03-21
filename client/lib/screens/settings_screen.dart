@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/app_state.dart';
 import '../models/app_config.dart';
+import 'memory_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({Key? key}) : super(key: key);
@@ -17,6 +18,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late String _engine;
   late double _temperature;
   late bool _enableInternet;
+  late bool _enableMemory;
 
   @override
   void initState() {
@@ -28,6 +30,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _engine = config?.tts.engine ?? 'kokoro';
     _temperature = config?.llm.temperature ?? 0.2;
     _enableInternet = config?.agent.enableInternet ?? true;
+    _enableMemory = config?.memory.enabled ?? true;
   }
 
   @override
@@ -44,6 +47,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       stt: SttConfig(mode: _sttMode),
       tts: TtsConfig(engine: _engine, defaultVoice: _voiceController.text),
       agent: AgentConfig(enableInternet: _enableInternet),
+      memory: MemoryConfig(enabled: _enableMemory),
     );
     await appState.updateConfig(newConfig);
     if (mounted) {
@@ -109,6 +113,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
           TextField(
             controller: _voiceController,
             decoration: const InputDecoration(labelText: 'Default Voice'),
+          ),
+          const Divider(height: 48),
+          const Text('Memory Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          SwitchListTile(
+            title: const Text('Enable Long-Term Memory'),
+            subtitle: const Text('Agent searches past memories and stores new facts automatically.'),
+            value: _enableMemory,
+            onChanged: (val) => setState(() => _enableMemory = val),
+          ),
+          ListTile(
+            leading: const Icon(Icons.memory_outlined),
+            title: const Text('Manage Memories'),
+            subtitle: const Text('View, add, or delete stored memories'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const MemoryScreen()),
+            ),
           ),
           const SizedBox(height: 32),
           ElevatedButton(

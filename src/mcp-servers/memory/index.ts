@@ -78,10 +78,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            content: {
-              type: "string",
-              description: "The information to remember",
-            },
+            content: { type: "string", description: "The information to remember" },
             tags: {
               type: "array",
               items: { type: "string" },
@@ -97,12 +94,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            query: {
-              type: "string",
-              description: "The keyword to search for",
-            },
+            query: { type: "string", description: "The keyword to search for" },
           },
           required: ["query"],
+        },
+      },
+      {
+        name: "list_memories",
+        description: "List all stored memories.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "delete_memory",
+        description: "Delete a stored memory by its ID.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "The ID of the memory to delete" },
+          },
+          required: ["id"],
         },
       },
     ],
@@ -179,6 +189,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{ type: "text", text: `Found ${results.length} memories:\n${formattedResults}` }],
       };
       
+    } else if (name === "list_memories") {
+      let results: MemoryItem[] = [];
+
+      if (memoryCollection) {
+        results = await memoryCollection.find({}).sort({ timestamp: -1 }).toArray() as any;
+      } else {
+        results = await getMemory();
+        results.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(results) }],
+      };
+
+    } else if (name === "delete_memory") {
+      const id = args.id as string;
+
+      if (memoryCollection) {
+        await memoryCollection.deleteOne({ id });
+      } else {
+        const memories = await getMemory();
+        const filtered = memories.filter(m => m.id !== id);
+        await saveMemory(filtered);
+      }
+
+      return {
+        content: [{ type: "text", text: `Memory ${id} deleted.` }],
+      };
+
     } else {
       throw new Error(`Unknown tool: ${name}`);
     }

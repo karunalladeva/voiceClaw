@@ -7,6 +7,7 @@ import * as path from "path";
 export class MCPClientManager {
   private clients: Map<string, Client> = new Map();
   private tools: DynamicStructuredTool[] = [];
+  private memoryServerId: string | null | undefined = undefined; // undefined = not yet discovered
 
   /**
    * Start a local MCP server script and connect to it
@@ -108,5 +109,72 @@ export class MCPClientManager {
   
   getTools() {
     return this.tools;
+  }
+
+  /**
+   * Find which connected server exposes the memory tools (cached after first discovery).
+   */
+  private async findMemoryServerId(): Promise<string | null> {
+    if (this.memoryServerId !== undefined) return this.memoryServerId;
+
+    for (const [serverId, client] of this.clients.entries()) {
+      try {
+        const { tools } = await client.listTools();
+        if (tools.some(t => t.name === 'search_memory')) {
+          this.memoryServerId = serverId;
+          return serverId;
+        }
+      } catch { /* server may not be ready */ }
+    }
+
+    this.memoryServerId = null;
+    return null;
+  }
+
+  private async callMemoryTool(toolName: string, args: Record<string, any> = {}): Promise<string> {
+    const serverId = await this.findMemoryServerId();
+    if (!serverId) return '';
+    try {
+      const client = this.clients.get(serverId)!;
+      const result = await client.callTool({ name: toolName, arguments: args });
+      if (result.isError) return '';
+      return (result.content as any[])
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text)
+        .join('\n');
+    } catch {
+      return '';
+    }
+  }
+
+  /** Returns true if the memory MCP server is reachable. */
+  async isMemoryAvailable(): Promise<boolean> {
+    return (await this.findMemoryServerId()) !== null;
+  }
+
+  /** Search long-term memory. Returns formatted results or empty string. */
+  async searchMemory(query: string): Promise<string> {
+    const text = await this.callMemoryTool('search_memory', { query });
+    return text.includes('No memories found') ? '' : text;
+  }
+
+  /** List all stored memories as a parsed array. */
+  async listMemories(): Promise<any[]> {
+    try {
+      const text = await this.callMemoryTool('list_memories');
+      return text ? JSON.parse(text) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Store a new memory. */
+  async addMemory(content: string, tags: string[] = []): Promise<string> {
+    return this.callMemoryTool('store_memory', { content, tags });
+  }
+
+  /** Delete a memory by ID. */
+  async deleteMemory(id: string): Promise<string> {
+    return this.callMemoryTool('delete_memory', { id });
   }
 }

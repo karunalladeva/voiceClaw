@@ -18,6 +18,9 @@ export interface AppConfig {
   agent: {
     enableInternet: boolean;
   };
+  memory: {
+    enabled: boolean;
+  };
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -34,7 +37,10 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   agent: {
     enableInternet: true,
-  }
+  },
+  memory: {
+    enabled: true,
+  },
 };
 
 class ConfigManager extends EventEmitter {
@@ -108,7 +114,8 @@ class ConfigManager extends EventEmitter {
       llm: { ...this.currentConfig.llm, ...(newSettings.llm || {}) },
       stt: { ...this.currentConfig.stt, ...(newSettings.stt || {}) },
       tts: { ...this.currentConfig.tts, ...(newSettings.tts || {}) },
-      agent: { ...this.currentConfig.agent, ...(newSettings.agent || {}) }
+      agent: { ...this.currentConfig.agent, ...(newSettings.agent || {}) },
+      memory: { ...this.currentConfig.memory, ...(newSettings.memory || {}) },
     };
     
     await this.saveConfig(this.currentConfig);

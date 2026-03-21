@@ -13,6 +13,10 @@ class SSEEvent {
 class ApiService {
   String baseUrl = 'http://10.0.2.2:3000';
 
+  /// The active streaming HTTP client. Kept as a field so it can be
+  /// force-closed via [abort] to cancel an in-progress SSE stream.
+  HttpClient? _activeClient;
+
   ApiService({String? initialUrl}) {
     if (initialUrl != null && initialUrl.isNotEmpty) {
       baseUrl = initialUrl;
@@ -24,6 +28,14 @@ class ApiService {
       url = 'http://$url';
     }
     baseUrl = url;
+  }
+
+  /// Abort the currently active SSE stream (if any).
+  /// Closing the client causes the server to receive a connection-close event
+  /// and cancel its own processing.
+  void abort() {
+    _activeClient?.close(force: true);
+    _activeClient = null;
   }
 
   Future<bool> checkHealth() async {
@@ -72,9 +84,61 @@ class ApiService {
     throw Exception('Failed to update config');
   }
 
+  // ── Memory API ────────────────────────────────────────────────────────────
+
+  Future<Map<String, dynamic>> getMemoryStatus() async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/memory/status')).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) return jsonDecode(response.body);
+    } catch (_) {}
+    return {'available': false, 'enabled': false};
+  }
+
+  Future<List<dynamic>> listMemories() async {
+    final response = await http.get(Uri.parse('$baseUrl/memory'));
+    if (response.statusCode == 200) {
+      return (jsonDecode(response.body)['memories'] as List?) ?? [];
+    }
+    throw Exception('Failed to list memories');
+  }
+
+  Future<void> addMemory(String content, List<String> tags) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/memory'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'content': content, 'tags': tags}),
+    );
+    if (response.statusCode != 200) throw Exception('Failed to add memory');
+  }
+
+  Future<void> deleteMemory(String id) async {
+    final response = await http.delete(Uri.parse('$baseUrl/memory/$id'));
+    if (response.statusCode != 200) throw Exception('Failed to delete memory');
+  }
+
+  // ── Session API ────────────────────────────────────────────────────────────
+
+  Future<void> resetConversation() async {
+    try {
+      await http.post(Uri.parse('$baseUrl/chat/reset')).timeout(const Duration(seconds: 5));
+    } catch (_) {}
+  }
+
+  Future<int> getHistoryTurns() async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/chat/history')).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return (data['turns'] as num?)?.toInt() ?? 0;
+      }
+    } catch (_) {}
+    return 0;
+  }
+
   /// Stream text chat via SSE. Yields SSEEvent objects as they arrive.
   Stream<SSEEvent> streamTextChat(String text) async* {
     final client = HttpClient();
+    _activeClient = client;
     try {
       final request = await client.postUrl(Uri.parse('$baseUrl/chat/text'));
       request.headers.set('Content-Type', 'application/json');
@@ -84,6 +148,7 @@ class ApiService {
 
       yield* _parseSSEStream(response);
     } finally {
+      _activeClient = null;
       client.close();
     }
   }
@@ -91,6 +156,7 @@ class ApiService {
   /// Stream audio chat via SSE. Yields SSEEvent objects as they arrive.
   Stream<SSEEvent> streamAudioChat(String filePath) async* {
     final client = HttpClient();
+    _activeClient = client;
     try {
       final file = File(filePath);
       final fileBytes = await file.readAsBytes();
@@ -114,6 +180,7 @@ class ApiService {
 
       yield* _parseSSEStream(response);
     } finally {
+      _activeClient = null;
       client.close();
     }
   }

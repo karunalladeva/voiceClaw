@@ -69,11 +69,19 @@ class AgentConfig {
     );
   }
 
-  Map<String, dynamic> toJson() {
-    return {
-      'enableInternet': enableInternet,
-    };
+  Map<String, dynamic> toJson() => {'enableInternet': enableInternet};
+}
+
+class MemoryConfig {
+  bool enabled;
+
+  MemoryConfig({required this.enabled});
+
+  factory MemoryConfig.fromJson(Map<String, dynamic> json) {
+    return MemoryConfig(enabled: json['enabled'] ?? true);
   }
+
+  Map<String, dynamic> toJson() => {'enabled': enabled};
 }
 
 class AppConfig {
@@ -81,8 +89,9 @@ class AppConfig {
   SttConfig stt;
   TtsConfig tts;
   AgentConfig agent;
+  MemoryConfig memory;
 
-  AppConfig({required this.llm, required this.stt, required this.tts, required this.agent});
+  AppConfig({required this.llm, required this.stt, required this.tts, required this.agent, required this.memory});
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
     return AppConfig(
@@ -90,6 +99,7 @@ class AppConfig {
       stt: SttConfig.fromJson(json['stt'] ?? {}),
       tts: TtsConfig.fromJson(json['tts'] ?? {}),
       agent: AgentConfig.fromJson(json['agent'] ?? {}),
+      memory: MemoryConfig.fromJson(json['memory'] ?? {}),
     );
   }
 
@@ -99,6 +109,7 @@ class AppConfig {
       'stt': stt.toJson(),
       'tts': tts.toJson(),
       'agent': agent.toJson(),
+      'memory': memory.toJson(),
     };
   }
 }

@@ -84,10 +84,29 @@ class _ChatScreenState extends State<ChatScreen> {
           break;
 
         case 'thinking':
-          setState(() => _statusText = event.data);
+          // Server signals "Generating audio..." via thinking — suppress it here
+          // because the status bar already shows it.
+          if (event.data != 'Generating audio...') {
+            setState(() => _statusText = event.data);
+          }
           break;
 
         case 'tool_call':
+          // Clear any partial pre-tool text the agent may have already streamed
+          // so only the final clean response appears in the bubble.
+          if (agentMsgAdded && agentText.isNotEmpty) {
+            agentText = '';
+            agentMsgAdded = false;
+            // Remove the incomplete agent bubble that held pre-tool tokens
+            setState(() {
+              for (int i = _messages.length - 1; i >= 0; i--) {
+                if (_messages[i]['sender'] == 'Agent') {
+                  _messages.removeAt(i);
+                  break;
+                }
+              }
+            });
+          }
           setState(() => _statusText = 'Using tool: ${event.data}...');
           break;
 
@@ -103,6 +122,7 @@ class _ChatScreenState extends State<ChatScreen> {
         case 'text_done':
           if (!agentMsgAdded) {
             _addMessage('Agent', event.data);
+            agentMsgAdded = true;
           } else {
             _updateLastAgentMessage(event.data);
           }
@@ -111,6 +131,7 @@ class _ChatScreenState extends State<ChatScreen> {
           break;
 
         case 'audio':
+          setState(() => _statusText = '');
           await _playBase64Audio(event.data);
           break;
 
@@ -120,6 +141,7 @@ class _ChatScreenState extends State<ChatScreen> {
           } else {
             _updateLastAgentMessage(event.data);
           }
+          setState(() => _statusText = '');
           break;
 
         case 'done':
@@ -127,6 +149,32 @@ class _ChatScreenState extends State<ChatScreen> {
           break;
       }
     }
+  }
+
+  /// Stop an in-progress stream. Aborts the HTTP connection, stops audio,
+  /// and resets UI state. The server detects the disconnect and cancels its
+  /// own LLM processing via AbortController.
+  void _stopProcessing() {
+    final appState = Provider.of<AppState>(context, listen: false);
+    appState.apiService.abort();
+    _audioPlayer.stop();
+    if (mounted) {
+      setState(() {
+        _isProcessing = false;
+        _statusText = '';
+      });
+    }
+  }
+
+  /// Returns true if [error] was caused by an intentional abort (not a real error).
+  bool _isAbortError(Object e) {
+    final msg = e.toString().toLowerCase();
+    return msg.contains('connection closed') ||
+        msg.contains('software caused connection abort') ||
+        msg.contains('connection reset') ||
+        msg.contains('broken pipe') ||
+        msg.contains('clientexception') ||
+        msg.contains('socketexception');
   }
 
   Future<void> _sendText() async {
@@ -142,7 +190,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final stream = appState.apiService.streamTextChat(text);
       await _handleSSEStream(stream);
     } catch (e) {
-      _addMessage('System', 'Error: $e');
+      if (!_isAbortError(e)) _addMessage('System', 'Error: $e');
     } finally {
       if (mounted) {
         setState(() {
@@ -217,7 +265,7 @@ class _ChatScreenState extends State<ChatScreen> {
         await _handleSSEStream(stream);
       }
     } catch (e) {
-      _addMessage('System', 'Error processing audio: $e');
+      if (!_isAbortError(e)) _addMessage('System', 'Error processing audio: $e');
     } finally {
       if (mounted) {
         setState(() {
@@ -240,12 +288,39 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _resetConversation() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New Conversation'),
+        content: const Text('Clear the current conversation and start fresh?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Clear')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final appState = Provider.of<AppState>(context, listen: false);
+    await appState.apiService.resetConversation();
+    setState(() {
+      _messages.clear();
+      _statusText = '';
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Local Voice AI'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.add_comment_outlined),
+            tooltip: 'New Conversation',
+            onPressed: _isProcessing ? null : _resetConversation,
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => Navigator.push(
@@ -305,16 +380,17 @@ class _ChatScreenState extends State<ChatScreen> {
               },
             ),
           ),
+          // Status bar with spinner + stop button
           if (_isProcessing || _statusText.isNotEmpty)
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               color: Colors.grey[100],
               child: Row(
                 children: [
                   if (_isProcessing)
                     const SizedBox(
-                      width: 16,
-                      height: 16,
+                      width: 14,
+                      height: 14,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
                   if (_statusText.isNotEmpty) ...[
@@ -330,7 +406,20 @@ class _ChatScreenState extends State<ChatScreen> {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                  ],
+                  ] else
+                    const Spacer(),
+                  // Stop button — always visible while processing
+                  if (_isProcessing)
+                    TextButton.icon(
+                      onPressed: _stopProcessing,
+                      icon: const Icon(Icons.stop_circle_outlined, size: 18),
+                      label: const Text('Stop'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.red,
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -353,13 +442,13 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: TextField(
                       controller: _textController,
                       decoration: InputDecoration(
-                        hintText: 'Type a message...',
+                        hintText: _isProcessing ? 'Tap Stop to cancel...' : 'Type a message...',
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(24),
                         ),
                         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                       ),
-                      onSubmitted: (_) => _sendText(),
+                      onSubmitted: (_) => _isProcessing ? null : _sendText(),
                       enabled: !_isProcessing,
                     ),
                   ),
@@ -374,16 +463,12 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: _isProcessing
-                            ? Colors.grey
-                            : _isRecording
-                                ? Colors.red
-                                : Colors.blue,
+                        color: _isRecording ? Colors.red : Colors.blue,
                         shape: BoxShape.circle,
                       ),
                       child: Icon(
                         _isRecording ? Icons.stop : Icons.mic,
-                        color: Colors.white,
+                        color: _isProcessing ? Colors.white54 : Colors.white,
                       ),
                     ),
                   ),

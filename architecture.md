@@ -4,19 +4,20 @@
 
 ```mermaid
 flowchart TD
-    subgraph userInteraction [User Interaction / Inputs]
+    subgraph userInteraction [User Interaction]
         userVoice["User Speaks (Microphone)"]
         apiVoice["Audio via API (POST /listen)"]
         speakerOut["Speaker Output"]
+        apiOutput["API Response (e.g. GET /speak)"]
     end
 
-    subgraph mcpNetwork [Model Context Protocol (MCP) Network]
+    subgraph mcpNetwork [MCP Network]
         mcpClient["MCP Client (Agent)"]
         mcpTools["MCP Tool Servers (Web, Files)"]
         mcpMemory["MCP Memory Server (Vector DB/Mongo)"]
     end
     
-    subgraph nodeApp [Node.js Application]
+    subgraph nodeApp [Node Application]
         stt["STT Module (whisper-node)"]
         agent["ReAct Agent (Ollama Model)"]
         ttsEngine["TTS Engine Switcher"]
@@ -39,34 +40,34 @@ flowchart TD
     end
 
     %% Connections
-    userVoice -->|"Audio Buffer"| stt
-    apiVoice -->|"Audio File/Buffer"| stt
-    stt -->|"Transcribed Text"| agent
+    userVoice -->|Audio Buffer| stt
+    apiVoice -->|Audio File/Buffer| stt
+    stt -->|Transcribed Text| agent
     
-    agent <-->|"Integrates"| mcpClient
-    mcpClient <-->|"MCP Protocol"| mcpMemory
-    mcpClient <-->|"MCP Protocol"| mcpTools
+    agent <-->|Integrates| mcpClient
+    mcpClient <-->|MCP Protocol| mcpMemory
+    mcpClient <-->|MCP Protocol| mcpTools
     
-    mcpMemory <-->|"Read/Write Context"| db
-    mcpTools <-->|"Fetch Data"| internet
-    mcpTools <-->|"Read/Write"| fileSystem
+    mcpMemory <-->|Read/Write Context| db
+    mcpTools <-->|Fetch Data| internet
+    mcpTools <-->|Read/Write| fileSystem
     
-    agent -->|"Context + Prompt"| llmThink
-    llmThink <-->|"Query via Client"| mcpClient
+    agent -->|Context + Prompt| llmThink
+    llmThink <-->|Query via Client| mcpClient
     
-    llmThink -->|"Requires LLM Eval"| ollamaService
-    ollamaService -->|"LLM Response"| llmThink
+    llmThink -->|Requires LLM Eval| ollamaService
+    ollamaService -->|LLM Response| llmThink
 
-    llmThink -->|"Final Answer Text"| ttsEngine
+    llmThink -->|Final Answer Text| ttsEngine
     
-    ttsEngine -->|"Use Configured Option"| kokoro
-    ttsEngine -->|"Use Configured Option"| qwen
+    ttsEngine -->|Use Configured Option| kokoro
+    ttsEngine -->|Use Configured Option| qwen
     
-    kokoro -->|"Audio Data"| speakerOut
-    qwen -->|"Audio Data"| speakerOut
+    kokoro -->|Audio Data| speakerOut
+    qwen -->|Audio Data| speakerOut
     
-    kokoro -->|"Audio File/Stream"| apiOutput["API Response (e.g. GET /speak)"]
-    qwen -->|"Audio File/Stream"| apiOutput
+    kokoro -->|Audio File/Stream| apiOutput
+    qwen -->|Audio File/Stream| apiOutput
 ```
 
 ## System Components

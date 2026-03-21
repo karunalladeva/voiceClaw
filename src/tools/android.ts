@@ -1,18 +1,28 @@
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
-import Adb from '@u4/adbkit';
 
+let Adb: any = null;
 let client: any = null;
 
-function getClient() {
+// Native dynamic import to avoid ts-node converting `import()` to `require()`
+async function getAdb() {
+  if (!Adb) {
+    const mod = await new Function("return import('@u4/adbkit')")();
+    Adb = mod.default || mod;
+  }
+  return Adb;
+}
+
+async function getClient() {
+  const adbLib = await getAdb();
   if (!client) {
-    client = Adb.createClient();
+    client = adbLib.createClient();
   }
   return client;
 }
 
 async function getDevice(serial?: string) {
-  const adb = getClient();
+  const adb = await getClient();
   const devices = await adb.listDevices();
   if (devices.length === 0) throw new Error('No Android devices connected. Connect via USB or WiFi ADB.');
   if (serial) {
@@ -26,7 +36,7 @@ async function getDevice(serial?: string) {
 export const adbListDevicesTool = tool(
   async () => {
     try {
-      const adb = getClient();
+      const adb = await getClient();
       const devices = await adb.listDevices();
       if (devices.length === 0) return 'No Android devices connected.';
       return devices.map((d: any) => `${d.id} (${d.type})`).join('\n');
@@ -46,7 +56,8 @@ export const adbShellTool = tool(
     try {
       const device = await getDevice(serial);
       const output = await device.shell(command);
-      const result = await Adb.util.readAll(output);
+      const adbLib = await getAdb();
+      const result = await adbLib.util.readAll(output);
       return result.toString().trim() || '(no output)';
     } catch (e: any) {
       return `Error: ${e.message}`;
@@ -154,7 +165,8 @@ export const adbOpenAppTool = tool(
     try {
       const device = await getDevice(serial);
       const output = await device.shell(`monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`);
-      const result = await Adb.util.readAll(output);
+      const adbLib = await getAdb();
+      const result = await adbLib.util.readAll(output);
       return `Launched ${packageName}`;
     } catch (e: any) {
       return `Error: ${e.message}`;
@@ -178,7 +190,8 @@ export const adbListAppsTool = tool(
                   filter === 'third-party' ? 'pm list packages -3' :
                   'pm list packages -3';
       const output = await device.shell(cmd);
-      const result = await Adb.util.readAll(output);
+      const adbLib = await getAdb();
+      const result = await adbLib.util.readAll(output);
       const packages = result.toString().trim().split('\n')
         .map((line: string) => line.replace('package:', '').trim())
         .filter(Boolean);
@@ -202,7 +215,8 @@ export const adbScreenshotTool = tool(
     try {
       const device = await getDevice(serial);
       const output = await device.shell('screencap -p /sdcard/screenshot_tmp.png');
-      await Adb.util.readAll(output);
+      const adbLib = await getAdb();
+      await adbLib.util.readAll(output);
       
       const stream = await device.pull('/sdcard/screenshot_tmp.png');
       const chunks: Buffer[] = [];
@@ -237,14 +251,16 @@ export const adbGetScreenInfoTool = tool(
   async ({ serial }) => {
     try {
       const device = await getDevice(serial);
+      const adbLib = await getAdb();
+
       const sizeOut = await device.shell('wm size');
-      const size = (await Adb.util.readAll(sizeOut)).toString().trim();
+      const size = (await adbLib.util.readAll(sizeOut)).toString().trim();
       
       const densityOut = await device.shell('wm density');
-      const density = (await Adb.util.readAll(densityOut)).toString().trim();
+      const density = (await adbLib.util.readAll(densityOut)).toString().trim();
       
       const activityOut = await device.shell('dumpsys activity activities | grep mResumedActivity');
-      const activity = (await Adb.util.readAll(activityOut)).toString().trim();
+      const activity = (await adbLib.util.readAll(activityOut)).toString().trim();
 
       return `${size}\n${density}\nCurrent Activity: ${activity || 'unknown'}`;
     } catch (e: any) {
