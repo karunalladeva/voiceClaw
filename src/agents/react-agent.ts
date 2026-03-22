@@ -197,7 +197,28 @@ If you need information or need to perform an action, use your tools.
           skillId: z.string().describe(`The exact ID of the skill to trigger. Must be one of: ${validSkills}`),
           query: z.string().describe('The specific natural language instruction for the skill')
         }),
-        func: async () => 'Routing initiated...'
+        func: async ({ skillId, query }, runManager, config) => {
+          const skill = this.skillRegistry.getSkill(skillId);
+          if (!skill || !skill.enabled) return `Skill ${skillId} not found or disabled.`;
+          
+          console.log(`[Agent: Skill (${skill.name})] Executing nested sub-graph logic...`);
+          let finalOutput = '';
+          
+          try {
+            // We use runStream natively. To prevent visual UI freezes, we map custom 'token' events 
+            // from the sub-graph onto the custom callback manager or stdout. 
+            // Full integration with LangGraph nested callback tracing handles context.
+            for await (const skillEvent of this.agentFactory.runStream(skill, query)) {
+              if (skillEvent.type === 'text_done' || skillEvent.type === 'error') {
+                finalOutput = skillEvent.data;
+              }
+            }             
+          } catch (e: any) {
+            finalOutput = `Skill crashed: ${e.message}`;
+          }
+          
+          return `[Sub-Agent Result from ${skill.name}]:\n${finalOutput || 'No text output produced.'}`;
+        }
       })
     ];
   }
@@ -212,17 +233,47 @@ If you need information or need to perform an action, use your tools.
     }
 
     const llm = this.llm;
-    const allTools = [...tools, ...this.getSystemTools()];
+    const sysTools = this.getSystemTools();
+    const allTools = [...tools, ...sysTools];
     const llmWithTools: any = allTools.length > 0 ? (llm as any).bindTools(allTools) : llm;
 
     const callModel = async (state: typeof MessagesAnnotation.State) => {
-      const response = await llmWithTools.invoke(state.messages);
+      // ── Phase 2: Rolling Vision Context Manager ──
+      // Prevent OOM by ensuring only the single most recent screenshot is sent to the local LLM per turn.
+      let hasRetainedImage = false;
+      
+      const optimizedMessages = [...state.messages].reverse().map((msg: any) => {
+        if (Array.isArray(msg.content)) {
+          let modified = false;
+          const optimizedContent = msg.content.map((block: any) => {
+            if (block.type === 'image_url') {
+              if (!hasRetainedImage) {
+                hasRetainedImage = true;
+                return block; // Keep the newest
+              } else {
+                modified = true;
+                return { type: 'text', text: '\n[System: Prior screenshot automatically evicted from context window to preserve VRAM]\n' };
+              }
+            }
+            return block;
+          });
+          
+          if (modified) {
+            const Ctor = msg.constructor;
+            return new Ctor({ ...msg, content: optimizedContent });
+          }
+        }
+        return msg;
+      }).reverse();
+
+      const response = await llmWithTools.invoke(optimizedMessages);
       return { messages: [response] };
     };
 
     // ── Tool Node with Summarization (Noise Reduction) ────────────────────────
+    // We pass allTools here so ToolNode knows how to execute route_to_skill natively!
     const toolNodeWithTruncation = async (state: typeof MessagesAnnotation.State) => {
-      const output = await new ToolNode(tools).invoke(state);
+      const output = await new ToolNode(allTools).invoke(state);
       // Prune massive tool results for the current turn to avoid single-turn overflow
       for (const msg of output.messages) {
         if (msg.content && msg.content.length > 12000) {
@@ -377,26 +428,7 @@ If you need information or need to perform an action, use your tools.
     return this.skillRegistry;
   }
 
-  /**
-   * Produce a short, spoken-word summary of `fullText` that directly answers
-   * the user's question. Uses the 'summarize' task route (fast model if configured,
-   * otherwise master).
-   */
-  async summarizeForAudio(userInput: string | any, fullText: string): Promise<string> {
-    const question = typeof userInput === 'string' ? userInput : 'the user question';
-    const prompt =
-      `The user asked: "${question}"\n\n` +
-      `Full response:\n${fullText}\n\n` +
-      `Summarize in 1–2 short sentences that directly answer the question. ` +
-      `Conversational, natural for speech. No markdown, no bullet points.`;
-    try {
-      const llm = await modelRouter.getModel('summarize');
-      const result = await (llm as any).invoke([new HumanMessage({ content: prompt })]);
-      return result.content.toString().trim();
-    } catch {
-      return fullText.substring(0, 400);
-    }
-  }
+
 
   // ── Non-streaming process ──────────────────────────────────────────────────
 
@@ -468,8 +500,35 @@ If you need information or need to perform an action, use your tools.
     const modelId = this.activeModelId;
     console.log(`[Agent: ReAct] [Model: ${modelId}] Streaming response for input…`);
 
-
     const cfg = configManager.getConfig().learning ?? {};
+    
+    // ── Phase 3: Macro Bypass Execution ──
+    if (typeof input === 'string') {
+      const macro = await learningEngine.matchMacro(input);
+      if (macro) {
+        console.log(`[ReAct Agent] Macro matched: ${macro.name}`);
+        yield { type: 'thinking', data: `Executing learned Macro shortcut: ${macro.name}…` };
+        
+        const allCoreTools = [...(this.lastTools || []), ...this.getSystemTools()];
+        for (const step of macro.steps) {
+          const tool = allCoreTools.find(t => t.name === step.tool);
+          if (tool) {
+            yield { type: 'thinking', data: `Macro executing step: [${step.tool}]…` };
+            try {
+              await tool.invoke(step.args);
+            } catch (e: any) {
+              console.warn(`[Macro Execution] Step failed: ${e.message}`);
+            }
+          }
+        }
+        
+        const successMsg = `Successfully executed deterministic macro shortcut: ${macro.name}`;
+        this.appendToHistory(input, successMsg);
+        yield { type: 'text_done', data: successMsg };
+        return;
+      }
+    }
+
     const maxRetries = cfg.retryOnFail ? (cfg.maxRetries ?? 3) : 0;
     const attemptHistory: Array<{ attempt: number; response: string }> = [];
 
@@ -503,6 +562,7 @@ If you need information or need to perform an action, use your tools.
         let fullText = '';
         let inThinkingBlock = false;
         let thinkingBuffer = '';
+        const toolTrace: Array<{ tool: string; args: any }> = [];
 
         console.log('Input messages:', inputMessages);
         let toolWasCalled = false;
@@ -565,22 +625,12 @@ If you need information or need to perform an action, use your tools.
               const toolInput = event.data?.input;
               const skill = this.skillRegistry.getSkill(toolInput?.skillId);
               if (skill?.enabled) {
-                console.log(`[Agent: Skill (${skill.name})] Routing to specialized skill…`);
-                yield { type: 'thinking', data: `Using skill: ${skill.name}…` };
-
-                fullText = '';
-                for await (const skillEvent of this.agentFactory.runStream(skill, toolInput?.query)) {
-                  yield skillEvent;
-                  if (skillEvent.type === 'text_done') fullText = skillEvent.data;
-                  if (skillEvent.type === 'error') fullText = skillEvent.data;
-                }
-
-                if (fullText) this.appendToHistory(input, fullText);
-                if (cfg.autoMemoryStore && fullText) {
-                  learningEngine.autoExtractAndStore(input, fullText, this.mcpManager).catch(() => { });
-                }
-                return;
+                console.log(`[Agent: Skill (${skill.name})] Routing to specialized skill natively...`);
+                yield { type: 'thinking', data: `Delegating to Sub-Agent: ${skill.name}…` };
               }
+            } else {
+              // Record all actual tool calls for potential Macro Extraction later
+              toolTrace.push({ tool: event.name || 'unknown', args: event.data?.input });
             }
 
             if (fullText) fullText = '';
@@ -619,9 +669,15 @@ If you need information or need to perform an action, use your tools.
           await cache.set(cacheKey, fullText, ReactAgent.RESPONSE_CACHE_TTL);
         }
 
-
         if (cfg.autoMemoryStore && fullText) {
           learningEngine.autoExtractAndStore(input, fullText, this.mcpManager).catch(() => { });
+        }
+
+        if (cfg.autoMacroCreate && toolTrace.length > 0) {
+          const inputStr = typeof input === 'string' ? input : '[audio input]';
+          learningEngine.extractMacroFromSuccess(inputStr, toolTrace).catch((e: any) => {
+             console.error('[React Agent] Macro extraction failed:', e);
+          });
         }
 
         yield { type: 'text_done', data: fullText };

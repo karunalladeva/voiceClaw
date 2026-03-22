@@ -24,6 +24,7 @@ export interface AppConfig {
   learning: {
     autoMemoryStore: boolean;
     autoSkillCreate: boolean;
+    autoMacroCreate: boolean;
     retryOnFail: boolean;
     maxRetries: number;
   };
@@ -61,6 +62,7 @@ const DEFAULT_CONFIG: AppConfig = {
   learning: {
     autoMemoryStore: true,
     autoSkillCreate: true,
+    autoMacroCreate: true,
     retryOnFail: true,
     maxRetries: 3,
   },

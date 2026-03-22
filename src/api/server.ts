@@ -131,13 +131,12 @@ async function handleStreamingChat(
 
       if (event.type === 'text_done' && event.data) {
         fullText = event.data;
-        sendSSE(res, { type: 'thinking', data: 'Preparing high-quality summary for voice...' });
         
         // Start summarise-then-synthesise immediately — runs in parallel with
         // any remaining SSE housekeeping.
-        const ttsText = fullText.length > 500 
-          ? await agent.summarizeForAudio(input, fullText)
-          : ttsTextFor(input, fullText);
+        sendSSE(res, { type: 'thinking', data: 'Preparing audio...' });
+        
+        const ttsText = ttsTextFor(input, fullText);
           
         sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
         ttsPromise = synthToBuffer(ttsText)
@@ -242,11 +241,9 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
         sendSSE(res, event);
         if (event.type === 'text_done' && event.data) {
           fullText = event.data;
-          sendSSE(res, { type: 'thinking', data: 'Preparing high-quality summary for voice...' });
+          sendSSE(res, { type: 'thinking', data: 'Preparing audio...' });
           
-          const ttsText = fullText.length > 500
-            ? await agent.summarizeForAudio(userQuestion, fullText)
-            : ttsTextFor(userQuestion, fullText);
+          const ttsText = ttsTextFor(userQuestion, fullText);
 
           sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
           ttsPromise = synthToBuffer(ttsText)

@@ -244,24 +244,28 @@ except ImportError:
 );
 
 export const macMouseClickTool = tool(
-  async ({ button, doubleClick }) => {
+  async ({ button, doubleClick, x, y }) => {
     const clickType = button === 'right' ? 'Quartz.kCGMouseButtonRight' : 'Quartz.kCGMouseButtonLeft';
     const eventDown = button === 'right' ? 'Quartz.kCGEventRightMouseDown' : 'Quartz.kCGEventLeftMouseDown';
     const eventUp = button === 'right' ? 'Quartz.kCGEventRightMouseUp' : 'Quartz.kCGEventLeftMouseUp';
     
     const clickCountLine = doubleClick ? 'Quartz.CGEventSetIntegerValueField(eventDown, Quartz.kCGMouseEventClickState, 2)' : '';
 
+    const hasCoords = x !== undefined && y !== undefined;
+
     const pythonScript = `
 import sys
 import time
 try:
     import Quartz
-    # Get current mouse pos
-    loc = Quartz.NSEvent.mouseLocation()
-    # macOS coordinates for NSEvent are bottom-left origin; CGEvent is top-left origin.
-    # We will use CGEventGetLocation of a dummy event to get accurate active top-left coordinated mouse pos.
-    dummy = Quartz.CGEventCreate(None)
-    loc = Quartz.CGEventGetLocation(dummy)
+    if ${hasCoords ? 'True' : 'False'}:
+        loc = (${x || 0}, ${y || 0})
+        moveEvt = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, loc, 0)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, moveEvt)
+        time.sleep(0.05)
+    else:
+        dummy = Quartz.CGEventCreate(None)
+        loc = Quartz.CGEventGetLocation(dummy)
     
     evtDown = Quartz.CGEventCreateMouseEvent(None, ${eventDown}, loc, ${clickType})
     ${clickCountLine}
@@ -301,6 +305,8 @@ except ImportError:
     schema: z.object({
       button: z.enum(['left', 'right']).optional().default('left').describe('Which button to click'),
       doubleClick: z.boolean().optional().default(false).describe('Whether to double click'),
+      x: z.number().optional().describe('X coordinate to click (optional. If omitted, clicks current location)'),
+      y: z.number().optional().describe('Y coordinate to click (optional)'),
     }),
   }
 );

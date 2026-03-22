@@ -1,4 +1,4 @@
-# Node.js Local Talking LLM Architecture
+# VoiceClaw 2.0 Architecture
 
 ## 🏗️ Architecture Diagram
 
@@ -8,72 +8,72 @@ flowchart TD
         userVoice["User Speaks (Microphone)"]
         apiVoice["Audio via API (POST /listen)"]
         speakerOut["Speaker Output"]
-        apiOutput["API Response (e.g. GET /speak)"]
     end
 
-    subgraph mcpNetwork [MCP Network]
-        mcpClient["MCP Client (Agent)"]
-        mcpTools["MCP Tool Servers (Web, Files)"]
-        mcpMemory["MCP Memory Server (Vector DB/Mongo)"]
+    subgraph external [External Systems & Models]
+        ollamaService["Ollama Daemon (Llama 3 / LlaVA)"]
+        internet["Internet (Search API)"]
+        db["Vector DB / Memory SQLite"]
+        fileSystem["Local File System"]
+        osSystem["Host OS (Win/Mac/Android)"]
     end
     
-    subgraph nodeApp [Node Application]
+    subgraph nodeApp [VoiceClaw Application]
         stt["STT Module (whisper-node)"]
-        agent["ReAct Agent (Ollama Model)"]
-        ttsEngine["TTS Engine Switcher"]
+        ttsEngine["TTS Engine (Kokoro / Qwen)"]
+        macroEngine{"Macro Bypass Engine"}
         
-        subgraph agentLoop [Agent Think Loop]
-            llmThink["LLM Predicts Next Step"]
+        subgraph hierarchicalGraph [Hierarchical Multi-Agent Graph]
+            masterAgent["Master ReAct Agent"]
+            visionMemory["Rolling Vision Context Manager"]
+            
+            subgraph subAgents [Specialized Sub-Agent Skills]
+                osSkill["OS Controller Skill"]
+                browserSkill["Browser Controller Skill"]
+                learnedSkills["User-Learned Skills"]
+            end
+            
+            masterAgent <-->|Route & Bubble State| subAgents
+            visionMemory -.->|Evict old screenshots| masterAgent
         end
         
-        subgraph ttsOptions [TTS Implementations]
-            kokoro["Kokoro-JS (Native Node/ONNX)"]
-            qwen["Qwen-TTS (Python API)"]
+        subgraph nativeTools [Precision OS Controllers]
+            winTools["Windows C# Coordinates"]
+            macTools["macOS PyObjC Quartz API"]
+            androidTools["Android UIAutomator XML"]
         end
-    end
-
-    subgraph external [External Systems]
-        ollamaService["Ollama Daemon"]
-        internet["Internet (Search API)"]
-        db["MongoDB / Vector DB"]
-        fileSystem["Local File System"]
     end
 
     %% Connections
     userVoice -->|Audio Buffer| stt
-    apiVoice -->|Audio File/Buffer| stt
-    stt -->|Transcribed Text| agent
+    apiVoice -->|Audio Buffer| stt
+    stt -->|Transcribed Text| macroEngine
     
-    agent <-->|Integrates| mcpClient
-    mcpClient <-->|MCP Protocol| mcpMemory
-    mcpClient <-->|MCP Protocol| mcpTools
+    %% The Bypass Route
+    macroEngine -->|Matched Deterministic Trace| nativeTools
+    macroEngine -->|No Match / Complex| masterAgent
     
-    mcpMemory <-->|Read/Write Context| db
-    mcpTools <-->|Fetch Data| internet
-    mcpTools <-->|Read/Write| fileSystem
+    %% Graph Execution
+    masterAgent <-->|LLM Prediction| ollamaService
+    subAgents <-->|LLM Prediction| ollamaService
     
-    agent -->|Context + Prompt| llmThink
-    llmThink <-->|Query via Client| mcpClient
+    subAgents -->|Invoke Tool| nativeTools
+    nativeTools <-->|Physical Execution| osSystem
     
-    llmThink -->|Requires LLM Eval| ollamaService
-    ollamaService -->|LLM Response| llmThink
-
-    llmThink -->|Final Answer Text| ttsEngine
+    masterAgent <-->|Fetch/Save| db
+    subAgents <-->|Fetch| internet
+    subAgents <-->|Read/Write| fileSystem
     
-    ttsEngine -->|Use Configured Option| kokoro
-    ttsEngine -->|Use Configured Option| qwen
-    
-    kokoro -->|Audio Data| speakerOut
-    qwen -->|Audio Data| speakerOut
-    
-    kokoro -->|Audio File/Stream| apiOutput
-    qwen -->|Audio File/Stream| apiOutput
+    %% Audio Out Pipeline
+    masterAgent -->|Zero-Latency Regex Truncator| ttsEngine
+    ttsEngine -->|Audio Data| speakerOut
 ```
 
 ## System Components
 
-1. **Hearing (STT)**: Receives raw audio via microphone OR via an exposed API endpoint (`POST /listen`) and transforms it to text using the local `whisper-node` bindings.
-2. **Thinking (Agent/MCP)**: The Agent acts as an MCP Client. It consults with the `Ollama Daemon` and connected MCP servers for memory and tool utilization, executing a "think-act-observe" loop.
-3. **Memory / Context**: MCP server handling transient (rolling context) and persistent (MongoDB/Vector DB) chat history.
-4. **Tools & Skills**: Discrete MCP servers for local file system operations and web connectivity.
-5. **Speaking (TTS)**: Dual-engine setup that delegates speech synthesis to either lightweight Node.js `kokoro-js` or high-fidelity Python-based Qwen-TTS based on configuration and availability. The resulting audio buffer can be played on local speakers OR returned as an API stream (`GET /speak`).
+1. **Hearing (STT)**: Receives raw audio via microphone OR via an exposed API endpoint and transforms it to text using the local `whisper-node` bindings.
+2. **Macro Bypass Engine**: The lightning-fast gatekeeper. If the user's intent matches a previously learned deterministic physical shortcut (Macro), it routes execution natively to OS controllers instantly (0ms latency), completely bypassing the LLM.
+3. **Thinking (Hierarchical Graph)**: The main brain. The Master Agent evaluates context and dynamically routes execution into isolated `CompiledStateGraph` Sub-Agents (Skills) for hyper-focused tasks. State bubbles back up flawlessly.
+4. **Precision OS Controllers**: The physical interactors. Unlike basic wrappers, VoiceClaw interacts exactly like a mouse using high-level native bridging: C# `user32` for Windows, PyObjC Quartz for macOS, and ADB XML tree extractions for Android.
+5. **Rolling Context Manager**: Intercepts the conversational history to aggressively summarize or drop old `image_url` payloads, preventing Out-Of-Memory system crashes during dense visual analysis loops.
+6. **Speaking (TTS)**: Instantaneous text-to-speech. By stripping Markdown using native regex instead of a secondary LLM summarization pass, it feeds text directly to `kokoro-js` with zero algorithmic latency.

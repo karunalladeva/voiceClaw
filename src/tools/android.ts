@@ -276,6 +276,54 @@ export const adbGetScreenInfoTool = tool(
   }
 );
 
+export const adbUiAutomatorDumpTool = tool(
+  async ({ summarize, serial }) => {
+    try {
+      const device = await getDevice(serial);
+      await device.shell('uiautomator dump /sdcard/window_dump.xml');
+      
+      const stream = await device.pull('/sdcard/window_dump.xml');
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const xmlBuffer = Buffer.concat(chunks);
+      let xmlOutput = xmlBuffer.toString('utf-8');
+      
+      // Clean up device
+      await device.shell('rm /sdcard/window_dump.xml').catch(() => {});
+
+      if (summarize) {
+        // Simple regex map to extract interactive nodes to save tokens instead of pure massive XML
+        const nodes: string[] = [];
+        const regex = /<node[^>]*?text="([^"]*?)"[^>]*?content-desc="([^"]*?)"[^>]*?clickable="(true)"[^>]*?bounds="([^"]*?)"/g;
+        let match;
+        while ((match = regex.exec(xmlOutput)) !== null) {
+          const text = match[1] || match[2] || 'Button';
+          const bounds = match[4]; // e.g. [32,156][1048,276]
+          nodes.push(`[${bounds}] ${text}`);
+        }
+        
+        if (nodes.length > 0) {
+           return "Interactive Elements:\n" + nodes.join('\n');
+        }
+      }
+
+      return xmlOutput;
+    } catch (e: any) {
+      return `Error generating UI Automator Dump: ${e.message}`;
+    }
+  },
+  {
+    name: 'adb_uiautomator_dump',
+    description: 'Extract the complete structural XML tree of the current Android screen. If summarize=true, it returns a hyper-compact list of clickable bounds and text designed exactly for precise LLM tapping.',
+    schema: z.object({
+      summarize: z.boolean().optional().default(true).describe('If true, filters the XML down to only clickable targets and their [X,Y] bounds to save context tokens.'),
+      serial: z.string().optional().describe('Device serial'),
+    }),
+  }
+);
+
 export const allAdbTools = [
   adbListDevicesTool,
   adbShellTool,
@@ -287,4 +335,5 @@ export const allAdbTools = [
   adbListAppsTool,
   adbScreenshotTool,
   adbGetScreenInfoTool,
+  adbUiAutomatorDumpTool,
 ];

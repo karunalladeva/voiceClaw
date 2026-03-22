@@ -5,7 +5,15 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { MCPClientManager } from './mcp-client';
 import { modelRouter } from '../models/model-router';
 
-const LEARNED_SKILLS_DIR = path.join(process.cwd(), 'workspace', 'learned-skills');
+const WORKSPACE = path.join(process.cwd(), 'workspace');
+const LEARNED_SKILLS_DIR = path.join(WORKSPACE, 'learned', 'skills');
+const MACROS_DIR = path.join(WORKSPACE, 'learned', 'macros');
+
+export interface Macro {
+  name: string;
+  trigger: string;
+  steps: Array<{ tool: string; args: any }>;
+}
 
 // Known failure phrases that indicate the agent cannot complete the task
 const FAILURE_PHRASES = [
@@ -93,6 +101,64 @@ export class LearningEngine {
     } catch (err: any) {
       console.error('[LearningEngine] Auto-store failed (non-critical):', err.message);
     }
+  }
+
+  // ── Macro Extraction (Phase 3) ─────────────────────────────────────────────
+
+  async extractMacroFromSuccess(userIntent: string, toolTrace: Array<{ tool: string; args: any }>): Promise<void> {
+    // Only extract macros if the sequence relies exclusively on physical interaction tools.
+    // If it uses web_search or python scripts, it is non-deterministic.
+    const allowedMacroTools = ['windows_mouse_click', 'windows_type_text', 'windows_press_key', 'windows_mouse_move', 'mac_mouse_move', 'mac_mouse_click', 'mac_type_text'];
+    const isDeterministic = toolTrace.every(t => allowedMacroTools.includes(t.tool));
+    if (!isDeterministic || toolTrace.length < 2) return;
+
+    try {
+      await fs.mkdir(MACROS_DIR, { recursive: true });
+      const llm = await this.getLlm();
+      const prompt = `The AI successfully completed the task: "${userIntent}" using the following physical tool trace:\n` +
+        JSON.stringify(toolTrace, null, 2) + `\n\n` +
+        `Generate a short, concise, unique kebab-case slug for this macro shortcut (e.g., "open-calculator", "mute-volume").\n` +
+        `Return ONLY the exact slug string and absolutely nothing else.`;
+
+      const result = await llm.invoke([new HumanMessage(prompt)]);
+      let slug = result.content.toString().trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+      if (!slug) slug = 'macro-' + Date.now();
+
+      const macro: Macro = {
+        name: slug,
+        trigger: userIntent.toLowerCase().trim(),
+        steps: toolTrace
+      };
+
+      const macroPath = path.join(MACROS_DIR, `${slug}.json`);
+      await fs.writeFile(macroPath, JSON.stringify(macro, null, 2), 'utf-8');
+      console.log(`[LearningEngine] Successfully extracted macro shortcut: ${slug}`);
+    } catch (e: any) {
+      console.warn(`[LearningEngine] Failed to save macro:`, e.message);
+    }
+  }
+
+  async matchMacro(userIntent: string): Promise<Macro | null> {
+    try {
+      if (!fsSync.existsSync(MACROS_DIR)) return null;
+      const files = await fs.readdir(MACROS_DIR);
+      const normalizedIntent = userIntent.toLowerCase().trim();
+
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue;
+        const raw = await fs.readFile(path.join(MACROS_DIR, file), 'utf-8');
+        try {
+          const macro: Macro = JSON.parse(raw);
+          // Very strict matching to avoid misfiring
+          if (macro.trigger === normalizedIntent) {
+            return macro;
+          }
+        } catch {}
+      }
+    } catch {
+      // Ignored
+    }
+    return null;
   }
 
   // ── Auto Skill Creation ────────────────────────────────────────────────────
