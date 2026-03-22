@@ -17,6 +17,7 @@ export async function createProvider(config: ModelConfig): Promise<BaseChatModel
       return new ChatOllama({
         model,
         baseUrl: baseUrl || 'http://localhost:11434',
+        keepAlive: -1,
         ...(auth?.customHeaders ? { headers: auth.customHeaders } : {}),
       }) as unknown as BaseChatModel;
     }
@@ -24,9 +25,10 @@ export async function createProvider(config: ModelConfig): Promise<BaseChatModel
     case 'lmstudio': {
       // LM Studio exposes an OpenAI-compatible REST API
       const { ChatOpenAI } = await import('@langchain/openai');
+      console.log('LM Studio config:', { model, baseUrl, auth });
       return new ChatOpenAI({
         modelName: model,
-        openAIApiKey: auth?.apiKey || 'lm-studio',
+        apiKey: auth?.apiKey || 'lm-studio',
         configuration: {
           baseURL: baseUrl || 'http://localhost:1234/v1',
           defaultHeaders: auth?.customHeaders,
@@ -40,7 +42,7 @@ export async function createProvider(config: ModelConfig): Promise<BaseChatModel
       const { ChatOpenAI } = await import('@langchain/openai');
       return new ChatOpenAI({
         modelName: model,
-        openAIApiKey: auth?.apiKey,
+        apiKey: auth?.apiKey,
         configuration: {
           ...(baseUrl ? { baseURL: baseUrl } : {}),
           defaultHeaders: buildAuthHeaders(auth),
@@ -79,7 +81,7 @@ export async function createProvider(config: ModelConfig): Promise<BaseChatModel
       const { ChatOpenAI } = await import('@langchain/openai');
       return new ChatOpenAI({
         modelName: model,
-        openAIApiKey: auth?.apiKey,
+        apiKey: auth?.apiKey,
         configuration: {
           baseURL: baseUrl || 'https://api.deepseek.com/v1',
           defaultHeaders: auth?.customHeaders,
@@ -92,7 +94,7 @@ export async function createProvider(config: ModelConfig): Promise<BaseChatModel
       const { ChatOpenAI } = await import('@langchain/openai');
       return new ChatOpenAI({
         modelName: model,
-        openAIApiKey: auth?.apiKey || auth?.bearer || 'custom',
+        apiKey: auth?.apiKey || auth?.bearer || 'custom',
         configuration: {
           ...(baseUrl ? { baseURL: baseUrl } : {}),
           defaultHeaders: buildAuthHeaders(auth),

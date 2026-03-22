@@ -112,6 +112,55 @@ class LearningConfig {
       };
 }
 
+class CacheConfig {
+  String mode;
+  String? redisUrl;
+
+  CacheConfig({required this.mode, this.redisUrl});
+
+  factory CacheConfig.fromJson(Map<String, dynamic> json) {
+    return CacheConfig(
+      mode: json['mode'] ?? 'memory',
+      redisUrl: json['redisUrl'],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'mode': mode,
+      'redisUrl': redisUrl,
+    };
+  }
+}
+
+class VoiceHandlingConfig {
+  bool vadEnabled;
+  bool wakeWordEnabled;
+  bool autoListen;
+
+  VoiceHandlingConfig({
+    required this.vadEnabled,
+    required this.wakeWordEnabled,
+    required this.autoListen,
+  });
+
+  factory VoiceHandlingConfig.fromJson(Map<String, dynamic> json) {
+    return VoiceHandlingConfig(
+      vadEnabled: json['vadEnabled'] ?? true,
+      wakeWordEnabled: json['wakeWordEnabled'] ?? false,
+      autoListen: json['autoListen'] ?? false,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'vadEnabled': vadEnabled,
+      'wakeWordEnabled': wakeWordEnabled,
+      'autoListen': autoListen,
+    };
+  }
+}
+
 class AppConfig {
   LlmConfig llm;
   SttConfig stt;
@@ -119,6 +168,9 @@ class AppConfig {
   AgentConfig agent;
   MemoryConfig memory;
   LearningConfig learning;
+  CacheConfig cache;
+  VoiceHandlingConfig voiceHandling;
+  String assistantName;
 
   AppConfig({
     required this.llm,
@@ -127,6 +179,9 @@ class AppConfig {
     required this.agent,
     required this.memory,
     required this.learning,
+    required this.cache,
+    required this.voiceHandling,
+    required this.assistantName,
   });
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
@@ -137,6 +192,9 @@ class AppConfig {
       agent: AgentConfig.fromJson(json['agent'] ?? {}),
       memory: MemoryConfig.fromJson(json['memory'] ?? {}),
       learning: LearningConfig.fromJson(json['learning'] ?? {}),
+      cache: CacheConfig.fromJson(json['cache'] ?? {}),
+      voiceHandling: VoiceHandlingConfig.fromJson(json['voiceHandling'] ?? {}),
+      assistantName: json['assistantName'] ?? 'Claw',
     );
   }
 
@@ -148,6 +206,9 @@ class AppConfig {
       'agent': agent.toJson(),
       'memory': memory.toJson(),
       'learning': learning.toJson(),
+      'cache': cache.toJson(),
+      'voiceHandling': voiceHandling.toJson(),
+      'assistantName': assistantName,
     };
   }
 }

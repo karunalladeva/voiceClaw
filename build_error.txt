@@ -1,0 +1,16 @@
+src/skills/browser-controller.ts(28,40): error TS1005: ';' expected.
+src/skills/browser-controller.ts(28,60): error TS1005: ';' expected.
+src/skills/browser-controller.ts(28,68): error TS1434: Unexpected keyword or identifier.
+src/skills/browser-controller.ts(28,79): error TS1434: Unexpected keyword or identifier.
+src/skills/browser-controller.ts(28,83): error TS1434: Unexpected keyword or identifier.
+src/skills/browser-controller.ts(28,89): error TS1434: Unexpected keyword or identifier.
+src/skills/browser-controller.ts(28,107): error TS1005: ';' expected.
+src/skills/browser-controller.ts(28,110): error TS1434: Unexpected keyword or identifier.
+src/skills/browser-controller.ts(28,114): error TS1005: 'while' expected.
+src/skills/browser-controller.ts(28,119): error TS1005: ')' expected.
+src/skills/browser-controller.ts(28,130): error TS1434: Unexpected keyword or identifier.
+src/skills/browser-controller.ts(28,133): error TS1434: Unexpected keyword or identifier.
+src/skills/browser-controller.ts(28,137): error TS1434: Unexpected keyword or identifier.
+src/skills/browser-controller.ts(28,148): error TS1127: Invalid character.
+src/skills/browser-controller.ts(28,149): error TS1434: Unexpected keyword or identifier.
+src/skills/browser-controller.ts(28,153): error TS1002: Unterminated string literal.

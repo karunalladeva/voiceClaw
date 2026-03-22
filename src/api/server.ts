@@ -131,15 +131,22 @@ async function handleStreamingChat(
 
       if (event.type === 'text_done' && event.data) {
         fullText = event.data;
+        sendSSE(res, { type: 'thinking', data: 'Preparing high-quality summary for voice...' });
+        
         // Start summarise-then-synthesise immediately — runs in parallel with
         // any remaining SSE housekeeping.
+        const ttsText = fullText.length > 500 
+          ? await agent.summarizeForAudio(input, fullText)
+          : ttsTextFor(input, fullText);
+          
         sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
-        ttsPromise = synthToBuffer(ttsTextFor(input, fullText))
+        ttsPromise = synthToBuffer(ttsText)
           .catch((err: any) => {
             console.error('[API] TTS pre-synthesis failed:', err);
             return null as any;
           });
       }
+
       if (event.type === 'error') {
         fullText = event.data;
       }
@@ -235,13 +242,20 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
         sendSSE(res, event);
         if (event.type === 'text_done' && event.data) {
           fullText = event.data;
+          sendSSE(res, { type: 'thinking', data: 'Preparing high-quality summary for voice...' });
+          
+          const ttsText = fullText.length > 500
+            ? await agent.summarizeForAudio(userQuestion, fullText)
+            : ttsTextFor(userQuestion, fullText);
+
           sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
-          ttsPromise = synthToBuffer(ttsTextFor(userQuestion, fullText))
+          ttsPromise = synthToBuffer(ttsText)
             .catch((err: any) => {
               console.error('[API] TTS pre-synthesis failed:', err);
               return null as any;
             });
         }
+
         if (event.type === 'error') fullText = event.data;
       }
     } catch (err: any) {

@@ -27,7 +27,18 @@ export interface AppConfig {
     retryOnFail: boolean;
     maxRetries: number;
   };
+  cache: {
+    mode: 'memory' | 'redis';
+    redisUrl?: string;
+  };
+  voiceHandling: {
+    vadEnabled: boolean;
+    wakeWordEnabled: boolean;
+    autoListen: boolean;
+  };
+  assistantName: string;
 }
+
 
 const DEFAULT_CONFIG: AppConfig = {
   llm: {
@@ -53,7 +64,19 @@ const DEFAULT_CONFIG: AppConfig = {
     retryOnFail: true,
     maxRetries: 3,
   },
+  cache: {
+    mode: 'memory',
+    redisUrl: 'redis://localhost:6379',
+  },
+  voiceHandling: {
+    vadEnabled: true,
+    wakeWordEnabled: false,
+    autoListen: false,
+  },
+  assistantName: 'Claw',
 };
+
+
 
 class ConfigManager extends EventEmitter {
   private configPath: string;

@@ -111,12 +111,21 @@ export class LearningEngine {
         .map(a => `Attempt ${a.attempt}: ${a.response.substring(0, 300)}`)
         .join('\n\n');
 
+      const existingSkills = await this.listLearnedSkills();
+      let existingContext = '';
+      if (existingSkills.length > 0) {
+        existingContext = `\n\nExisting learned skills:\n` + existingSkills.map(s => `- name: ${s.name}\n  desc: ${s.description}`).join('\n');
+      }
+
       const prompt =
         `You are a skill-creation assistant. The AI agent failed to complete the following task:\n` +
         `"${taskDescription}"\n\n` +
         `Attempt history:\n${historyText}\n\n` +
         `Based on these failures, synthesize what capability is needed and how it could be done. ` +
-        `Create a concise skill document in this exact format (no extra text outside):\n\n` +
+        `Create a concise skill document in the exact format shown below.\n` +
+        `CRITICAL DEDUPLICATION RULE: Review the "Existing learned skills" below. If the capability needed matches the purpose of an existing skill, you MUST exactly reuse its 'name' so we can update it, rather than creating a duplicate! If it's a completely new capability, invent a new kebab-case name.\n` +
+        `${existingContext}\n\n` +
+        `Format requirements (no extra text outside):\n` +
         `---\n` +
         `name: <kebab-case-skill-name>\n` +
         `description: <one-line description>\n` +
@@ -129,7 +138,7 @@ export class LearningEngine {
         `<any important constraints or caveats>`;
 
       const result = await llm.invoke([
-        new SystemMessage('You create SKILL.md knowledge documents to help the agent learn from failures.'),
+        new SystemMessage('You create SKILL.md knowledge documents to help the agent learn from failures. You prevent duplicates by updating existing skills if the core purpose overlaps.'),
         new HumanMessage(prompt),
       ]);
 

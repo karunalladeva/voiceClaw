@@ -3,14 +3,14 @@ import { z } from 'zod';
 import { chromium } from 'playwright';
 import * as https from 'https';
 import * as http from 'http';
+import { cache } from '../utils/cache';
+
 
 /** Max characters to read from a single page before truncating. */
 const MAX_PAGE_CHARS = 4000;
 
-// ── Search cache (15 min TTL, matching OpenClaw) ─────────────────────────────
-
 const CACHE_TTL_MS = 15 * 60 * 1000;
-const searchCache = new Map<string, { result: string; ts: number }>();
+
 
 // ── web_search ────────────────────────────────────────────────────────────────
 
@@ -21,12 +21,13 @@ const searchCache = new Map<string, { result: string; ts: number }>();
  */
 export const webSearchTool = tool(
   async ({ query }) => {
-    const cacheKey = query.toLowerCase().trim();
-    const cached = searchCache.get(cacheKey);
-    if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    const cacheKey = `search:${query.toLowerCase().trim()}`;
+    const cached = await cache.get(cacheKey);
+    if (cached) {
       console.log(`[Tool: Web Search] Cache hit for: "${query}"`);
-      return cached.result;
+      return cached;
     }
+
 
     let browser;
     try {
@@ -78,7 +79,7 @@ export const webSearchTool = tool(
         '\n\nTip: Use the web_fetch tool with any of the URLs above to read the full page content.'
       );
 
-      searchCache.set(cacheKey, { result, ts: Date.now() });
+      await cache.set(cacheKey, result, CACHE_TTL_MS);
       return result;
     } catch (e: any) {
       if (browser) await browser.close().catch(() => {});
@@ -106,18 +107,26 @@ export const webSearchTool = tool(
  * too little content (e.g. JS-rendered sites).
  */
 export const webFetchTool = tool(
-  async ({ url }) => {
-    console.log(`[Tool: Web Fetch] Fetching: ${url}`);
+  async ({ url, offset = 0 }) => {
+    console.log(`[Tool: Web Fetch] Fetching (offset: ${offset}): ${url}`);
+
 
     // 1. Try plain HTTP first (fast, no Playwright overhead)
     const plainText = await plainFetch(url);
     if (plainText && plainText.length > 200) {
-      const trimmed = plainText.length > MAX_PAGE_CHARS
-        ? plainText.substring(0, MAX_PAGE_CHARS) + '…'
-        : plainText;
-      console.log(`[Tool: Web Fetch] Plain fetch succeeded (${trimmed.length} chars)`);
-      return trimmed;
+      const slice = plainText.substring(offset, offset + MAX_PAGE_CHARS);
+      const isTruncated = (offset + MAX_PAGE_CHARS) < plainText.length;
+      
+      const result = (
+        `CONTENT BLOCK [offset: ${offset}, length: ${slice.length}/${plainText.length}]\n` +
+        slice +
+        (isTruncated ? `\n\n...[TRUNCATED]. Use web_fetch with offset ${offset + MAX_PAGE_CHARS} to read more.` : '')
+      );
+      
+      console.log(`[Tool: Web Fetch] Plain fetch succeeded (${slice.length} chars)`);
+      return result;
     }
+
 
     // 2. Fall back to headless browser for JS-heavy sites
     console.log(`[Tool: Web Fetch] Plain fetch insufficient — launching headless browser`);
@@ -149,11 +158,18 @@ export const webFetchTool = tool(
       await browser.close();
 
       const cleaned = text.replace(/\s{3,}/g, '\n\n').trim();
-      const trimmed = cleaned.length > MAX_PAGE_CHARS
-        ? cleaned.substring(0, MAX_PAGE_CHARS) + '…'
-        : cleaned;
-      console.log(`[Tool: Web Fetch] Browser fetch succeeded (${trimmed.length} chars)`);
-      return trimmed || 'No readable content found on this page.';
+      const slice = cleaned.substring(offset, offset + MAX_PAGE_CHARS);
+      const isTruncated = (offset + MAX_PAGE_CHARS) < cleaned.length;
+
+      const result = (
+        `CONTENT BLOCK [offset: ${offset}, length: ${slice.length}/${cleaned.length}]\n` +
+        slice +
+        (isTruncated ? `\n\n...[TRUNCATED]. Use web_fetch with offset ${offset + MAX_PAGE_CHARS} to read more.` : '')
+      );
+
+      console.log(`[Tool: Web Fetch] Browser fetch succeeded (${slice.length} chars)`);
+      return result || 'No readable content found on this page.';
+
     } catch (e: any) {
       if (browser) await browser.close().catch(() => {});
       console.error('[Tool: Web Fetch] Failed:', e);
@@ -168,7 +184,9 @@ export const webFetchTool = tool(
       'Can also be used to read any URL directly (documentation, articles, etc.).',
     schema: z.object({
       url: z.string().describe('The full URL of the web page to read.'),
+      offset: z.number().optional().default(0).describe('The character offset to start reading from (use for pagination).'),
     }),
+
   },
 );
 

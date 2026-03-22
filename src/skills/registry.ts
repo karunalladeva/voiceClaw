@@ -11,42 +11,18 @@ export class SkillRegistry {
   }
 
   /**
-   * Auto-discover and load all skill files from src/skills/.
-   * Any .ts/.js file that exports a default class extending BaseSkill is loaded.
+   * Auto-discover and load all default and on-demand skill files.
    */
   async discover(): Promise<void> {
-    console.log(`[SkillRegistry] Scanning for skills in ${this.skillsDir}...`);
+    const { SkillLoader } = await import('../loaders/skill-loader');
+    
+    const defaults = await SkillLoader.loadDefaultSkills(this.skillsDir);
+    defaults.forEach(def => this.skills.set(def.id, def));
 
-    const skipFiles = new Set(['base-skill', 'registry', 'index']);
+    const onDemands = await SkillLoader.loadOnDemandSkills();
+    onDemands.forEach(def => this.skills.set(def.id, def));
 
-    const files = fs.readdirSync(this.skillsDir).filter(f => {
-      const ext = path.extname(f);
-      const name = path.basename(f, ext);
-      return (ext === '.ts' || ext === '.js') && !skipFiles.has(name);
-    });
-
-    for (const file of files) {
-      try {
-        const modulePath = path.join(this.skillsDir, file);
-        const mod = await import(modulePath);
-        const SkillClass = mod.default;
-
-        if (!SkillClass) {
-          console.warn(`[SkillRegistry] ${file}: no default export, skipping.`);
-          continue;
-        }
-
-        const instance: BaseSkill = new SkillClass();
-        const definition = await instance.define();
-
-        this.skills.set(definition.id, definition);
-        console.log(`[SkillRegistry] Loaded skill: ${definition.name} (${definition.id}) - ${definition.enabled ? 'enabled' : 'disabled'}`);
-      } catch (err: any) {
-        console.error(`[SkillRegistry] Failed to load skill from ${file}:`, err.message);
-      }
-    }
-
-    console.log(`[SkillRegistry] Discovery complete. ${this.skills.size} skill(s) loaded.`);
+    console.log(`[SkillRegistry] Discovery complete. ${this.skills.size} native skill(s) loaded.`);
   }
 
   getSkill(id: string): SkillDefinition | undefined {
@@ -91,12 +67,16 @@ export class SkillRegistry {
       `- SKILL_ID: "${s.id}" | NAME: "${s.name}" | WHEN TO USE: ${s.triggerDescription}`
     );
 
-    return (
-      '\n\nYou have access to specialized skills. If the user\'s request matches a skill, ' +
-      'respond ONLY with the JSON: {"route_to_skill": "<SKILL_ID>", "query": "<user\'s original question>"}. ' +
-      'If no skill matches, answer directly.\n\nAvailable Skills:\n' +
-      lines.join('\n')
-    );
+    return `
+<skills>
+You have access to specialized skills via the NATIVE JSON tool function named \`route_to_skill\`. 
+CRITICAL: DO NOT write python scripts, shell commands, or use \`shell_exec\` to launch skills. You must directly invoke the JSON \`route_to_skill\` function provided in your tool schema!
+
+If the user's request matches a skill below, invoke \`route_to_skill\` with the corresponding SKILL_ID.
+
+Available Skills:
+${lines.join('\n')}
+</skills>`;
   }
 
   // ── Learned Skills (OpenClaw-style SKILL.md) ─────────────────────────────
@@ -105,39 +85,9 @@ export class SkillRegistry {
   private learnedSkillsContext = '';
   private _watcher: import('fs').FSWatcher | null = null;
 
-  /**
-   * Reads all workspace/learned-skills/<name>/SKILL.md files and builds an
-   * XML-style context string (mirrors OpenClaw's formatSkillsForPrompt).
-   */
   async loadLearnedSkills(): Promise<void> {
-    try {
-      await fs.promises.mkdir(this.learnedSkillsDir, { recursive: true });
-      const entries = fs.readdirSync(this.learnedSkillsDir, { withFileTypes: true });
-      const parts: string[] = [];
-
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const skillPath = path.join(this.learnedSkillsDir, entry.name, 'SKILL.md');
-        try {
-          const content = fs.readFileSync(skillPath, 'utf-8');
-          const nameMatch = content.match(/^name:\s*(.+)/m);
-          const descMatch = content.match(/^description:\s*(.+)/m);
-          const name = nameMatch?.[1]?.trim() ?? entry.name;
-          const desc = descMatch?.[1]?.trim() ?? '';
-          parts.push(`<skill><name>${name}</name><description>${desc}</description></skill>`);
-        } catch { /* skip missing */ }
-      }
-
-      if (parts.length > 0) {
-        this.learnedSkillsContext =
-          '\n\nLEARNED SKILLS (knowledge from past experiences):\n' + parts.join('\n');
-        console.log(`[SkillRegistry] Loaded ${parts.length} learned skill(s).`);
-      } else {
-        this.learnedSkillsContext = '';
-      }
-    } catch (err: any) {
-      console.error('[SkillRegistry] Could not load learned skills:', err.message);
-    }
+    const { SkillLoader } = await import('../loaders/skill-loader');
+    this.learnedSkillsContext = await SkillLoader.loadLearnedSkills(this.learnedSkillsDir);
   }
 
   /**

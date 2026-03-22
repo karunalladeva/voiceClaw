@@ -44,18 +44,19 @@ function runCommand(command: string, workdir: string, timeoutMs: number): Promis
       const chunk = data.toString();
       stdout += chunk;
       // Cap output to prevent memory issues
-      if (stdout.length > 50000) {
-        stdout = stdout.substring(0, 50000) + '\n... (output truncated)';
+      if (stdout.length > 10000) {
+        stdout = stdout.substring(0, 10000) + '\n... (output truncated)';
         proc.kill('SIGTERM');
       }
     });
 
     proc.stderr.on('data', (data) => {
       stderr += data.toString();
-      if (stderr.length > 20000) {
-        stderr = stderr.substring(0, 20000) + '\n... (stderr truncated)';
+      if (stderr.length > 5000) {
+        stderr = stderr.substring(0, 5000) + '\n... (stderr truncated)';
       }
     });
+
 
     proc.on('close', (code) => {
       clearTimeout(timer);

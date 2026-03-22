@@ -38,14 +38,13 @@ async function connectMongo() {
     const db = dbClient.db(DB_NAME);
     memoryCollection = db.collection(COLLECTION_NAME);
     console.error("[Memory MCP] Successfully connected to MongoDB.");
-  } catch (err) {
+  } catch (err: any) {
     console.error("[Memory MCP] Failed to connect to MongoDB. Using local file fallback.");
     dbClient = null;
     memoryCollection = null;
   }
 }
 
-// Call connect immediately but don't await, let it run in background
 connectMongo();
 
 interface MemoryItem {
@@ -53,6 +52,7 @@ interface MemoryItem {
   timestamp: string;
   content: string;
   tags: string[];
+  embedding?: number[];
 }
 
 async function getMemory(): Promise<MemoryItem[]> {
@@ -60,13 +60,51 @@ async function getMemory(): Promise<MemoryItem[]> {
     const data = await fs.readFile(MEMORY_FILE, "utf-8");
     return JSON.parse(data);
   } catch {
-    return []; // Return empty if file doesn't exist or is invalid
+    return [];
   }
 }
 
 async function saveMemory(memory: MemoryItem[]) {
   await fs.mkdir(path.dirname(MEMORY_FILE), { recursive: true });
   await fs.writeFile(MEMORY_FILE, JSON.stringify(memory, null, 2), "utf-8");
+}
+
+/**
+ * Generate a vector embedding for text using Ollama.
+ */
+async function getEmbedding(text: string): Promise<number[] | null> {
+  try {
+    const response = await fetch("http://localhost:11434/api/embeddings", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "nomic-embed-text",
+        prompt: text,
+      }),
+    });
+    if (!response.ok) return null;
+    const data: any = await response.json();
+    return data.embedding;
+  } catch (err: any) {
+    console.error("[Memory MCP] Embedding failed (Ollama connection issue or model missing):", err.message);
+    return null;
+  }
+}
+
+/**
+ * Calculate Cosine Similarity between two vectors.
+ */
+function cosineSimilarity(vecA: number[], vecB: number[]): number {
+  if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -90,11 +128,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_memory",
-        description: "Search past memories using a keyword query.",
+        description: "Search past memories using Semantic Search (vector similarity).",
         inputSchema: {
           type: "object",
           properties: {
-            query: { type: "string", description: "The keyword to search for" },
+            query: { type: "string", description: "The natural language query to search for" },
           },
           required: ["query"],
         },
@@ -147,98 +185,114 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         tags = args.tags.map(String);
       } else if (typeof args.tags === 'string' && args.tags.length > 0) {
         try {
-          // If it looks like a JSON array, try parsing it
           if (args.tags.trim().startsWith('[')) {
             const parsed = JSON.parse(args.tags);
-            if (Array.isArray(parsed)) {
-              tags = parsed.map(String);
-            } else {
-              tags = [args.tags];
-            }
+            if (Array.isArray(parsed)) tags = parsed.map(String);
           } else {
-            // Otherwise treat as comma-separated
             tags = args.tags.split(',').map(t => t.trim()).filter(Boolean);
           }
         } catch (_) {
           tags = args.tags.split(',').map(t => t.trim()).filter(Boolean);
         }
       }
-      
+
       const newItem: MemoryItem = {
         id: Date.now().toString(),
         timestamp: new Date().toISOString(),
         content,
         tags,
+        embedding: await getEmbedding(content) || undefined,
       };
 
       if (memoryCollection) {
-        // Use MongoDB
         await memoryCollection.insertOne(newItem);
-        return {
-          content: [{ type: "text", text: `Memory stored successfully in MongoDB. ID: ${newItem.id}` }],
-        };
       } else {
-        // Use local file fallback
         const memories = await getMemory();
         memories.push(newItem);
         await saveMemory(memories);
-        return {
-          content: [{ type: "text", text: `Memory stored successfully locally. ID: ${newItem.id}` }],
-        };
       }
-      
+      return {
+        content: [{ type: "text", text: `Memory stored successfully ID: ${newItem.id}${newItem.embedding ? ' (Smart Semantic Indexing enabled)' : ' (Warning: Embedding failed, falling back to keyword search)'}` }],
+      };
+
     } else if (name === "search_memory") {
-      const query = (args.query as string).toLowerCase();
-      
-      let results: MemoryItem[] = [];
+      const rawQuery = (args.query as string).toLowerCase();
+      const stopWords = new Set(['hey', 'buddy', 'how', 'is', 'the', 'in', 'my', 'at', 'on', 'with', 'a', 'an', 'and', 'for', 'of', 'to', 'me', 'you', 'it', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'about']);
+      const queryWords = rawQuery.split(/[^a-z0-9]/i).filter(w => w.length > 1 && !stopWords.has(w));
+      const queryEmbedding = await getEmbedding(rawQuery);
+
+      let memories: MemoryItem[] = [];
+      let updatedAny = false;
 
       if (memoryCollection) {
-        // Use MongoDB Text Search or Regex
-        const cursor = memoryCollection.find({
-          $or: [
-            { content: { $regex: query, $options: 'i' } },
-            { tags: { $regex: query, $options: 'i' } }
-          ]
-        });
-        results = await cursor.toArray() as any;
+        memories = await memoryCollection.find({}).toArray() as any;
       } else {
-        // Use local file fallback
-        const memories = await getMemory();
-        results = memories.filter(
-          m => m.content.toLowerCase().includes(query) || 
-               m.tags.some(t => t.toLowerCase().includes(query))
-        );
+        memories = await getMemory();
       }
-      
-      if (results.length === 0) {
+
+      const results = await Promise.all(memories.map(async m => {
+        let kwScore = 0;
+        const content = m.content.toLowerCase();
+        queryWords.forEach(w => { if (content.includes(w)) kwScore++; });
+
+        // ── Lazy Vectorization: Upgrade old memories on the fly ─────────────
+        if (!m.embedding) {
+          console.error(`[Memory MCP] Auto-vectorizing legacy memory: ${m.id}`);
+          m.embedding = await getEmbedding(m.content) || undefined;
+          updatedAny = true;
+        }
+
+        const semanticScore = queryEmbedding && m.embedding
+          ? cosineSimilarity(queryEmbedding, m.embedding)
+          : 0;
+
+        // Semantic search is primary (0.8), keywords provide a safety net (0.2)
+        const combinedScore = (semanticScore * 8) + (kwScore * 0.4);
+        return { ...m, combinedScore, semanticScore };
+      }));
+
+      // If we upgraded any legacy memories, save the state
+      if (updatedAny && !memoryCollection) {
+        await saveMemory(memories);
+      } else if (updatedAny && memoryCollection) {
+        // Bulk update for Mongo would be better, but for this scale we'll just 
+        // rely on them getting cached/re-indexed next time or do individual updates
+        for (const m of memories.filter(m => m.embedding)) {
+          await memoryCollection.updateOne({ id: m.id }, { $set: { embedding: m.embedding } });
+        }
+      }
+
+      const filteredResults = results.filter(m => m.combinedScore > 0.1);
+      filteredResults.sort((a, b) => b.combinedScore - a.combinedScore || b.timestamp.localeCompare(a.timestamp));
+
+      if (filteredResults.length === 0) {
         return {
-          content: [{ type: "text", text: `No memories found matching "${query}".` }],
+          content: [{ type: "text", text: `No memories found related to "${rawQuery}".` }],
         };
       }
-      
-      const formattedResults = results.map(r => `[${r.timestamp}] (${r.tags.join(',')}) - ${r.content}`).join('\n');
-      
+
+      const topResults = filteredResults.slice(0, 5);
+      const formatted = topResults.map(r =>
+        `[Match: ${(r.semanticScore * 100).toFixed(1)}%] (${r.tags.join(',')}) - ${r.content}`
+      ).join('\n');
+
       return {
-        content: [{ type: "text", text: `Found ${results.length} memories:\n${formattedResults}` }],
+        content: [{ type: "text", text: `Found ${filteredResults.length} related memories:\n${formatted}` }],
       };
-      
+
+
     } else if (name === "list_memories") {
       let results: MemoryItem[] = [];
-
       if (memoryCollection) {
         results = await memoryCollection.find({}).sort({ timestamp: -1 }).toArray() as any;
       } else {
         results = await getMemory();
         results.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
       }
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(results) }],
-      };
+      return { content: [{ type: "text", text: JSON.stringify(results) }] };
 
     } else if (name === "delete_memory") {
       const id = args.id as string;
-
       if (memoryCollection) {
         await memoryCollection.deleteOne({ id });
       } else {
@@ -246,26 +300,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const filtered = memories.filter(m => m.id !== id);
         await saveMemory(filtered);
       }
-
-      return {
-        content: [{ type: "text", text: `Memory ${id} deleted.` }],
-      };
+      return { content: [{ type: "text", text: `Memory ${id} deleted.` }] };
 
     } else if (name === "save_skill") {
       const skillName = (args.name as string).toLowerCase().replace(/[^a-z0-9-]/g, '-');
       const skillDir = path.join(process.cwd(), "workspace", "learned-skills", skillName);
       await fs.mkdir(skillDir, { recursive: true });
       const skillPath = path.join(skillDir, "SKILL.md");
-      const content =
-        `---\nname: ${skillName}\ndescription: ${args.description as string}\ncreated: ${new Date().toISOString().split('T')[0]}\n---\n\n${args.content as string}`;
+      const content = `---\nname: ${skillName}\ndescription: ${args.description as string}\ncreated: ${new Date().toISOString().split('T')[0]}\n---\n\n${args.content as string}`;
       await fs.writeFile(skillPath, content, "utf-8");
-      return {
-        content: [{ type: "text", text: `Skill saved to ${skillPath}` }],
-      };
+      return { content: [{ type: "text", text: `Skill saved to ${skillPath}` }] };
 
     } else {
       throw new Error(`Unknown tool: ${name}`);
-
     }
   } catch (error: any) {
     return {
@@ -277,5 +324,5 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 const transport = new StdioServerTransport();
 server.connect(transport).then(() => {
-  console.error("Memory MCP Server running on stdio");
+  console.error("Memory MCP Server running on stdio with Semantic Vector Search enabled");
 });

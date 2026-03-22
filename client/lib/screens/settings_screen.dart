@@ -25,6 +25,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _autoSkillCreate;
   late bool _retryOnFail;
   late double _maxRetries;
+  late String _cacheMode;
+  late TextEditingController _redisUrlController;
+  late TextEditingController _nameController;
+  late bool _vadEnabled;
+  late bool _wakeWordEnabled;
+  late bool _autoListen;
+
+
 
   @override
   void initState() {
@@ -41,14 +49,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _autoSkillCreate = config?.learning.autoSkillCreate ?? true;
     _retryOnFail = config?.learning.retryOnFail ?? true;
     _maxRetries = (config?.learning.maxRetries ?? 3).toDouble();
+    _cacheMode = config?.cache.mode ?? 'memory';
+    _redisUrlController = TextEditingController(text: config?.cache.redisUrl ?? 'redis://localhost:6379');
+    _nameController = TextEditingController(text: config?.assistantName ?? 'Claw');
+    _vadEnabled = config?.voiceHandling.vadEnabled ?? true;
+    _wakeWordEnabled = config?.voiceHandling.wakeWordEnabled ?? false;
+    _autoListen = config?.voiceHandling.autoListen ?? false;
   }
+
+
 
   @override
   void dispose() {
     _modelController.dispose();
     _voiceController.dispose();
+    _redisUrlController.dispose();
+    _nameController.dispose();
     super.dispose();
   }
+
+
 
   Future<void> _save() async {
     final appState = Provider.of<AppState>(context, listen: false);
@@ -64,7 +84,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
         retryOnFail: _retryOnFail,
         maxRetries: _maxRetries.round(),
       ),
+      cache: CacheConfig(
+        mode: _cacheMode,
+        redisUrl: _redisUrlController.text,
+      ),
+      voiceHandling: VoiceHandlingConfig(
+        vadEnabled: _vadEnabled,
+        wakeWordEnabled: _wakeWordEnabled,
+        autoListen: _autoListen,
+      ),
+      assistantName: _nameController.text,
     );
+
+
     await appState.updateConfig(newConfig);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Settings saved')));
@@ -200,6 +232,67 @@ class _SettingsScreenState extends State<SettingsScreen> {
               context,
               MaterialPageRoute(builder: (_) => const SkillsScreen()),
             ),
+          ),
+          const Divider(height: 48),
+          const Text('Caching Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          const Text('Speeds up responses by storing search results and past memories in a fast cache.', style: TextStyle(color: Colors.grey, fontSize: 13)),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<String>(
+            value: _cacheMode,
+            decoration: const InputDecoration(labelText: 'Cache Mode', border: OutlineInputBorder()),
+            items: const [
+              DropdownMenuItem(value: 'memory', child: Text('In-Memory (Default, Simple)')),
+              DropdownMenuItem(value: 'redis', child: Text('Redis (Advanced, Persistent)')),
+            ],
+            onChanged: (val) {
+              if (val != null) setState(() => _cacheMode = val);
+            },
+          ),
+          if (_cacheMode == 'redis') ...[
+            const SizedBox(height: 16),
+            TextField(
+              controller: _redisUrlController,
+              decoration: const InputDecoration(
+                labelText: 'Redis URL',
+                hintText: 'redis://localhost:6379',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+          const SizedBox(height: 32),
+
+          const Divider(height: 48),
+          const Text('Voice & Personality', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          const Text('Configure how the assistant listens and its identity.', style: TextStyle(color: Colors.grey, fontSize: 13)),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _nameController,
+            decoration: const InputDecoration(
+              labelText: 'Assistant Name',
+              hintText: 'e.g., Claw or Buddy',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          SwitchListTile(
+            title: const Text('Wake-Word Detection'),
+            subtitle: const Text('Starts listening when you say the assistant\'s name.'),
+            value: _wakeWordEnabled,
+            onChanged: (val) => setState(() => _wakeWordEnabled = val),
+          ),
+          SwitchListTile(
+            title: const Text('Voice Activity Detection (VAD)'),
+            subtitle: const Text('Automatically sends your message when you stop talking.'),
+            value: _vadEnabled,
+            onChanged: (val) => setState(() => _vadEnabled = val),
+          ),
+          SwitchListTile(
+            title: const Text('Auto-Listen after Response'),
+            subtitle: const Text('Automatically starts the mic after the assistant finishes speaking (Hands-Free).'),
+            value: _autoListen,
+            onChanged: (val) => setState(() => _autoListen = val),
           ),
           const SizedBox(height: 32),
           ElevatedButton(

@@ -42,11 +42,14 @@ export default class OsControllerSkill extends BaseSkill {
         '  • windows_browser_close_tab — close a tab by ID or URL keyword.\n\n' +
         'UI / MOUSE-FIRST NAVIGATION (use BEFORE shell):\n' +
         '  If a dedicated tool fails or the target cannot be opened via its name, SWITCH TO MOUSE MODE:\n' +
-        '  1. windows_take_screenshot — see what is on screen right now.\n' +
-        '  2. windows_mouse_move + windows_mouse_click — move to a visible button/icon and click it.\n' +
-        '  3. windows_press_key (e.g. Win, Tab, Enter, Escape) — navigate menus or dialogs.\n' +
-        '  4. windows_type_text — type into a search box, address bar, or dialog.\n' +
-        '  Repeat screenshot → click → verify until the task is complete.\n\n' +
+        '  1. windows_read_screen — Ask explicitly for exact [X, Y] pixel coordinates of the target (e.g. "What are the X, Y coordinates of the Search button?").\n' +
+        '  2. windows_mouse_move / windows_mouse_click — Use the returned coordinates to click.\n' +
+        '  3. **STRICT VERIFICATION LOOP**: If you are unsure about the click, first use windows_mouse_move(x, y), then call windows_read_screen again to visually verify the mouse cursor is actually hovering the correct target before executing windows_mouse_click.\n' +
+        '  4. windows_press_key (e.g. Win, Tab, Enter, Escape) — navigate menus or dialogs.\n' +
+        '  5. windows_type_text — type into a search box, address bar, or dialog.\n' +
+        '  Repeat screenshot → verify → click until the task is complete.\n\n' +
+        'WEB DATA EXTRACTION & DOM:\n' +
+        '  If you need to read complex data from a website, do NOT rely purely on vision screenshots. Use the `web_search` and `web_fetch` tools to natively parse the HTML DOM data reliably.\n\n' +
         'SHELL (last resort only — use mouse first if shell is unavailable):\n' +
         '  Use shell_exec ONLY when no GUI tool can accomplish the task.\n' +
         '  If shell_exec fails with a "not found" error, do NOT retry shell — switch to mouse navigation instead.';
