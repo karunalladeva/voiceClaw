@@ -5,6 +5,7 @@ import '../models/app_config.dart';
 import 'memory_screen.dart';
 import 'models_screen.dart';
 import 'skills_screen.dart';
+import 'workspace_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({Key? key}) : super(key: key);
@@ -381,6 +382,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
               _buildNavigationTile('Browse Source Repositories', 'View injected deterministic macro pipelines.', Icons.auto_stories_outlined, () {
                 Navigator.push(context, MaterialPageRoute(builder: (_) => const SkillsScreen()));
               }),
+            ]),
+
+            _buildSectionHeader('Workspace & Storage'),
+            _buildCardGroup([
+              _buildNavigationTile(
+                'Browse Workspace Files',
+                'View and manage data, media, and skill files.',
+                Icons.folder_open_rounded,
+                () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WorkspaceScreen())),
+              ),
             ]),
 
             _buildSectionHeader('System Architecture'),

@@ -230,10 +230,11 @@ export const adbScreenshotTool = tool(
 
       const fs = await import('fs/promises');
       const path = await import('path');
-      const filePath = path.join(process.cwd(), 'workspace', `screenshot_${Date.now()}.png`);
+      const screenshotsDir = path.join(process.cwd(), 'workspace', 'outputs', 'screenshots');
+      await fs.mkdir(screenshotsDir, { recursive: true });
+      const filePath = path.join(screenshotsDir, `screenshot_${Date.now()}.png`);
       await fs.writeFile(filePath, buffer);
-      
-      return `Screenshot saved to ${filePath} (${Math.round(buffer.length / 1024)}KB)`;
+      return `Screenshot saved to workspace/outputs/screenshots/${path.basename(filePath)} (${Math.round(buffer.length / 1024)}KB)`;
     } catch (e: any) {
       return `Error: ${e.message}`;
     }

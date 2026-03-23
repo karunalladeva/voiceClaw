@@ -5,12 +5,17 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 
 const WORKSPACE = path.join(process.cwd(), 'workspace');
+const OUTPUTS_DIR = path.join(WORKSPACE, 'outputs', 'documents');
 
 const readFileTool = tool(
   async ({ filename }) => {
     try {
-      const safePath = path.resolve(WORKSPACE, path.basename(filename));
-      if (!safePath.startsWith(WORKSPACE)) return 'Access denied.';
+      // Look in outputs first, then workspace root
+      let safePath = path.resolve(OUTPUTS_DIR, path.basename(filename));
+      try { await fs.access(safePath); } catch {
+        safePath = path.resolve(WORKSPACE, path.basename(filename));
+        if (!safePath.startsWith(WORKSPACE)) return 'Access denied.';
+      }
       return await fs.readFile(safePath, 'utf-8');
     } catch (e: any) {
       return `Error reading file: ${e.message}`;
@@ -18,7 +23,7 @@ const readFileTool = tool(
   },
   {
     name: 'read_file',
-    description: 'Read a file from the workspace directory.',
+    description: 'Read a file from the workspace (checks outputs/documents first, then root).',
     schema: z.object({ filename: z.string().describe('Name of the file to read') }),
   }
 );
@@ -26,19 +31,20 @@ const readFileTool = tool(
 const writeFileTool = tool(
   async ({ filename, content }) => {
     try {
-      const safePath = path.resolve(WORKSPACE, path.basename(filename));
-      if (!safePath.startsWith(WORKSPACE)) return 'Access denied.';
+      await fs.mkdir(OUTPUTS_DIR, { recursive: true });
+      const safePath = path.resolve(OUTPUTS_DIR, path.basename(filename));
+      if (!safePath.startsWith(OUTPUTS_DIR)) return 'Access denied.';
       await fs.writeFile(safePath, content, 'utf-8');
-      return `Successfully wrote to ${filename}`;
+      return `Saved to workspace/outputs/documents/${path.basename(filename)}`;
     } catch (e: any) {
       return `Error writing file: ${e.message}`;
     }
   },
   {
     name: 'write_file',
-    description: 'Write content to a file in the workspace directory.',
+    description: 'Write content to workspace/outputs/documents/. Use for agent-generated reports, notes and plans.',
     schema: z.object({
-      filename: z.string().describe('Name of the file to write'),
+      filename: z.string().describe('Name of file to write (e.g. report.md)'),
       content: z.string().describe('Content to write'),
     }),
   }

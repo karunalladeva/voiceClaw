@@ -498,8 +498,53 @@ app.post('/skills/:id/disable', (req, res) => {
   }
 });
 
+// ── Workspace Files API ──────────────────────────────────────────────────────
+app.get('/workspace/files', async (req, res) => {
+  const workspacePath = path.join(process.cwd(), 'workspace');
+  try {
+    const entries = await fs.readdir(workspacePath, { withFileTypes: true });
+    const categorized: Record<string, any[]> = { data: [], media: [], chats: [], skills: [], other: [] };
+
+    for (const entry of entries) {
+      const stat = await fs.stat(path.join(workspacePath, entry.name)).catch(() => null);
+      const item = {
+        name: entry.name,
+        isDir: entry.isDirectory(),
+        sizeBytes: stat?.size ?? 0,
+        modifiedAt: stat?.mtime?.toISOString() ?? null,
+      };
+      if (entry.isDirectory()) {
+        if (entry.name === 'chats') categorized.chats.push(item);
+        else if (['learned', 'learned-skills', 'ondemand-skills'].includes(entry.name)) categorized.skills.push(item);
+        else categorized.other.push(item);
+      } else {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (ext === '.json') categorized.data.push(item);
+        else if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp4'].includes(ext)) categorized.media.push(item);
+        else categorized.other.push(item);
+      }
+    }
+    res.json(categorized);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/workspace/files/:name', async (req, res) => {
+  const workspacePath = path.join(process.cwd(), 'workspace');
+  const filePath = path.join(workspacePath, req.params.name);
+  if (!filePath.startsWith(workspacePath + path.sep)) return res.status(403).json({ error: 'Access denied' });
+  try {
+    await fs.unlink(filePath);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 6. Session Management
 app.get('/chats', async (req, res) => {
+
   try {
     const chats = await historyManager.listChats();
     res.json({ chats });

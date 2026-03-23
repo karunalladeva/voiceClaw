@@ -8,6 +8,8 @@ import { HumanMessage } from '@langchain/core/messages';
 import { modelRouter } from '../models/model-router';
 
 const WORKSPACE = path.join(process.cwd(), 'workspace');
+const SCREENSHOTS_DIR = path.join(WORKSPACE, 'outputs', 'screenshots');
+const TEMP_DIR = path.join(WORKSPACE, 'outputs', '.tmp');
 
 // Helper to run PowerShell commands
 function runPowerShell(script: string, timeoutMs = 30000): Promise<string> {
@@ -184,8 +186,9 @@ export const windowsPressKeyTool = tool(
 
 export const windowsTakeScreenshotTool = tool(
   async () => {
+    await fs.mkdir(SCREENSHOTS_DIR, { recursive: true });
     const filename = `screenshot_${Date.now()}.png`;
-    const filepath = path.join(WORKSPACE, filename);
+    const filepath = path.join(SCREENSHOTS_DIR, filename);
     const script = `
       try {
         Add-Type -AssemblyName System.Windows.Forms
@@ -206,15 +209,17 @@ export const windowsTakeScreenshotTool = tool(
   },
   {
     name: 'windows_take_screenshot',
-    description: 'Take a screenshot of the main Windows display.',
+    description: 'Take a screenshot of the main Windows display. Saves to workspace/outputs/screenshots/.',
     schema: z.object({}),
   }
 );
 
+
 export const windowsReadScreenTool = tool(
   async ({ query, expectedFormat }) => {
+    await fs.mkdir(TEMP_DIR, { recursive: true });
     const filename = `read_screen_${Date.now()}.jpg`;
-    const filepath = path.join(WORKSPACE, filename);
+    const filepath = path.join(TEMP_DIR, filename);
     const script = `
       try {
         Add-Type -AssemblyName System.Windows.Forms
