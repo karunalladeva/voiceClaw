@@ -32,7 +32,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   Future<void> _load() async {
     setState(() { _loading = true; _error = null; });
     try {
-      final base = Provider.of<AppState>(context, listen: false).serverUrl;
+      final appState = Provider.of<AppState>(context, listen: false);
+      final base = appState.apiService.baseUrl;
       final resp = await http.get(Uri.parse('$base/workspace/files'));
       if (resp.statusCode == 200) {
         final data = jsonDecode(resp.body) as Map<String, dynamic>;
@@ -67,7 +68,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     );
     if (confirmed != true) return;
     try {
-      final base = Provider.of<AppState>(context, listen: false).serverUrl;
+      final appState = Provider.of<AppState>(context, listen: false);
+      final base = appState.apiService.baseUrl;
       await http.delete(Uri.parse('$base/workspace/files/${Uri.encodeComponent(name)}'));
       _load();
     } catch (_) {}
