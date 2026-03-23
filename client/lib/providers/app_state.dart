@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
+import '../services/notification_service.dart';
 import '../models/app_config.dart';
 
 class AppState extends ChangeNotifier {
   final ApiService apiService = ApiService();
+  final NotificationService notificationService = NotificationService();
   
   bool isConnected = false;
   String connectionError = '';
@@ -20,8 +22,10 @@ class AppState extends ChangeNotifier {
       if (isConnected) {
         config = await apiService.getConfig();
         connectionError = '';
+        notificationService.startPolling(apiService.baseUrl);
       } else {
         connectionError = 'Server not reachable.';
+        notificationService.stopPolling();
       }
     } catch (e) {
       isConnected = false;

@@ -16,6 +16,8 @@ import { learningEngine } from './learning-engine';
 import { cache } from '../utils/cache';
 
 
+import { historyManager } from './agent-history';
+
 export interface StreamEvent {
   type: 'transcription' | 'thinking' | 'tool_call' | 'token' | 'text_done' | 'audio' | 'error' | 'done';
   data: string;
@@ -28,7 +30,6 @@ export class ReactAgent {
   private lastTools: DynamicStructuredTool[] = [];
   private skillRegistry: SkillRegistry;
   private agentFactory: AgentFactory;
-  private conversationHistory: BaseMessage[] = [];
   private activeModelId: string = 'unknown';
   private static readonly MAX_HISTORY_TURNS = 20;
 
@@ -282,13 +283,16 @@ If you need information or need to perform an action, use your tools.
 
           try {
             const fastModel = await modelRouter.getModel('summarize');
-            const summary = await (fastModel as any).invoke([
-              new SystemMessage("You are an expert at summarizing massive tool/command outputs. Summarize the following output accurately to retain all crucial details, keeping it under 2000 characters. Make the summary fast and concise."),
-              new HumanMessage({ content: msg.content.substring(0, 40000) })
+            const summary = await Promise.race([
+              (fastModel as any).invoke([
+                new SystemMessage("You are an expert at summarizing massive tool/command outputs. Summarize the following output accurately to retain all crucial details, keeping it under 2000 characters. Make the summary fast and concise."),
+                new HumanMessage({ content: msg.content.substring(0, 40000) })
+              ]),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Summarization Timeout')), 60000))
             ]);
-            msg.content = `[Tool Output Summarized for Context Efficiency]:\n${summary.content.toString()}`;
+            msg.content = `[Tool Output Summarized for Context Efficiency]:\n${(summary as any).content.toString()}`;
           } catch (e) {
-            console.warn(`[Agent: ReAct] Summarizer failed, falling back to truncation:`, e);
+            console.warn(`[Agent: ReAct] Summarizer failed or timed out, falling back to truncation:`, e);
             msg.content = msg.content.substring(0, 12000) + '\n\n...[OUTPUT TRUNCATED FOR CONTEXT EFFICIENCY]...';
           }
         }
@@ -370,49 +374,44 @@ If you need information or need to perform an action, use your tools.
 
   // ── History management ─────────────────────────────────────────────────────
 
-  async clearHistory() {
-    this.conversationHistory = [];
+  async clearHistory(chatId: string = 'default') {
+    await historyManager.deleteChat(chatId);
     await cache.clear();
-    console.log('[ReAct Agent] Conversation history and caches cleared.');
+    console.log(`[ReAct Agent] Chat ${chatId} history and caches cleared.`);
   }
 
-
-  getHistoryLength(): number {
-    return this.conversationHistory.length / 2;
+  async getHistoryLength(chatId: string = 'default'): Promise<number> {
+    return await historyManager.getHistoryLength(chatId);
   }
 
-  private appendToHistory(humanInput: string | any, aiResponse: string) {
+  private async appendToHistory(chatId: string, humanInput: string | any, aiResponse: string) {
     let humanContent = '[audio input]';
 
     if (typeof humanInput === 'string') {
       humanContent = humanInput;
     } else if (Array.isArray(humanInput)) {
-      // Extract the first text block from a multimodal array
       const textPart = humanInput.find(p => p.type === 'text');
       if (textPart && textPart.text) {
         humanContent = textPart.text;
       }
     }
 
-    this.conversationHistory.push(new HumanMessage({ content: humanContent }));
-    this.conversationHistory.push(new AIMessage({ content: aiResponse }));
+    const thread = await historyManager.loadChat(chatId);
+    thread.push(new HumanMessage({ content: humanContent }));
+    thread.push(new AIMessage({ content: aiResponse }));
 
-    // ── Context Pruning (Overflow Protection) ───────────────────────────────
-
-    // 1. First, enforce the turn limit
     const maxMessages = ReactAgent.MAX_HISTORY_TURNS * 2;
-    if (this.conversationHistory.length > maxMessages) {
-      this.conversationHistory = this.conversationHistory.slice(
-        this.conversationHistory.length - maxMessages
-      );
+    if (thread.length > maxMessages) {
+       historyManager.setThread(chatId, thread.slice(thread.length - maxMessages));
     }
 
-    // 2. Then, enforce the token limit (Estimation: 4 chars = 1 token)
-    let totalChars = this.conversationHistory.reduce((sum, msg) => sum + (msg.content?.toString().length || 0), 0);
-    while (totalChars > ReactAgent.MAX_HISTORY_TOKENS * 4 && this.conversationHistory.length > 2) {
-      const removed = this.conversationHistory.splice(0, 2); // Remove oldest turn (Human+AI pair)
+    let totalChars = thread.reduce((sum, msg) => sum + (msg.content?.toString().length || 0), 0);
+    while (totalChars > ReactAgent.MAX_HISTORY_TOKENS * 4 && thread.length > 2) {
+      const removed = thread.splice(0, 2); 
       totalChars -= removed.reduce((sum, msg) => sum + (msg.content?.toString().length || 0), 0);
     }
+    
+    await historyManager.saveChat(chatId, typeof humanInput === 'string' ? humanInput : undefined);
   }
 
 
@@ -432,17 +431,18 @@ If you need information or need to perform an action, use your tools.
 
   // ── Non-streaming process ──────────────────────────────────────────────────
 
-  async process(input: string | any): Promise<string> {
+  async process(input: string | any, chatId: string = 'default'): Promise<string> {
     const modelId = this.activeModelId;
     console.log(`[Agent: ReAct] [Model: ${modelId}] Thinking about input…`);
 
 
     try {
       const systemPrompt = await this.buildSystemPromptWithMemory(input);
+      const thread = await historyManager.loadChat(chatId);
       const result = await this.graph.invoke({
         messages: [
           new SystemMessage(systemPrompt),
-          ...this.conversationHistory,
+          ...thread,
           new HumanMessage({ content: input }),
         ],
       }, { recursionLimit: 100 });
@@ -462,7 +462,7 @@ If you need information or need to perform an action, use your tools.
                 messages: [new SystemMessage(skill.systemPrompt), new HumanMessage({ content: tc.args.query })],
               });
               const skillResponse = skillResult.messages[skillResult.messages.length - 1].content.toString();
-              this.appendToHistory(input, skillResponse);
+              await this.appendToHistory(chatId, input, skillResponse);
               return skillResponse;
             }
           }
@@ -470,7 +470,7 @@ If you need information or need to perform an action, use your tools.
       }
 
       console.log(`[ReAct Agent] Final Response: "${content.substring(0, 80)}…"`);
-      this.appendToHistory(input, content);
+      await this.appendToHistory(chatId, input, content);
       return content;
     } catch (error: any) {
       return this.handleError(error);
@@ -479,9 +479,10 @@ If you need information or need to perform an action, use your tools.
 
   // ── Streaming process ──────────────────────────────────────────────────────
 
-  async *processStream(input: string | any, signal?: AbortSignal): AsyncGenerator<StreamEvent> {
+  async *processStream(input: string | any, chatId: string = 'default', signal?: AbortSignal): AsyncGenerator<StreamEvent> {
     const rawKey = typeof input === 'string' ? input.trim().toLowerCase() : '[audio]';
-    const cacheKey = `resp:${rawKey}|hist:${this.conversationHistory.length}`;
+    const numTurns = await historyManager.getHistoryLength(chatId);
+    const cacheKey = `resp:${rawKey}|hist:${numTurns}|chat:${chatId}`;
     const cachedResponse = await cache.get(cacheKey);
 
     if (cachedResponse) {
@@ -523,7 +524,7 @@ If you need information or need to perform an action, use your tools.
         }
         
         const successMsg = `Successfully executed deterministic macro shortcut: ${macro.name}`;
-        this.appendToHistory(input, successMsg);
+        await this.appendToHistory(chatId, input, successMsg);
         yield { type: 'text_done', data: successMsg };
         return;
       }
@@ -551,10 +552,11 @@ If you need information or need to perform an action, use your tools.
           ? `\n\n[SELF-IMPROVEMENT] Previous attempt failed. Approach this differently. Attempt ${attempt + 1}.`
           : '';
 
+        const threadMsgs = await historyManager.loadChat(chatId);
         const inputMessages = {
           messages: [
             new SystemMessage(systemPrompt + retryPrefix),
-            ...this.conversationHistory,
+            ...threadMsgs,
             new HumanMessage({ content: input }),
           ],
         };
@@ -663,9 +665,10 @@ If you need information or need to perform an action, use your tools.
         // Success path — commit history and auto-store
         console.log(`[ReAct Agent] Stream complete: "${fullText.substring(0, 80)}…"`);
         if (fullText) {
-          this.appendToHistory(input, fullText);
+          await this.appendToHistory(chatId, input, fullText);
           const rawKey = typeof input === 'string' ? input.trim().toLowerCase() : '[audio]';
-          const cacheKey = `resp:${rawKey}|hist:${this.conversationHistory.length}`;
+          const nt = await historyManager.getHistoryLength(chatId);
+          const cacheKey = `resp:${rawKey}|hist:${nt}|chat:${chatId}`;
           await cache.set(cacheKey, fullText, ReactAgent.RESPONSE_CACHE_TTL);
         }
 

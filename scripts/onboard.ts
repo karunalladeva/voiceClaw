@@ -59,7 +59,7 @@ async function preloadModels() {
 
   try {
     console.log('➡️  Pre-loading Whisper STT ONNX model...');
-    await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
+    await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en');
     console.log('✅ Whisper STT model downloaded and cached successfully.');
   } catch (error) {
     console.error('❌ Failed to preload Whisper STT model:', error);

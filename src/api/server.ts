@@ -10,6 +10,9 @@ import { ReactAgent, StreamEvent } from '../agents/react-agent';
 import { configManager } from '../config/index';
 import { modelRegistry } from '../models/model-registry';
 import { modelRouter } from '../models/model-router';
+import { historyManager } from '../agents/agent-history';
+import { startPipelineTicker } from '../pipeline/pipeline-engine';
+import '../pipeline/steps'; // register step executors
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -67,6 +70,7 @@ app.use(cors());
 app.use(express.json());
 
 function sendSSE(res: express.Response, event: StreamEvent) {
+  if (res.writableEnded || res.destroyed) return;
   res.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
   if (typeof (res as any).flush === 'function') (res as any).flush();
 }
@@ -85,7 +89,10 @@ function initSSE(res: express.Response) {
  * The temp file is written once and immediately deleted after reading.
  */
 async function synthToBuffer(text: string): Promise<Buffer> {
-  const audio = await TTSModule.synthesize(text);
+  const audio = await Promise.race([
+    TTSModule.synthesize(text),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('TTS Engine Timeout')), 15000))
+  ]) as any;
   const tempFilePath = path.join(os.tmpdir(), `tts-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
   await audio.save(tempFilePath);
   const buffer = await fs.readFile(tempFilePath);
@@ -97,6 +104,7 @@ async function handleStreamingChat(
   req: express.Request,
   res: express.Response,
   input: string | any,
+  chatId: string = 'default'
 ) {
   initSSE(res);
 
@@ -120,30 +128,58 @@ async function handleStreamingChat(
   }, 5000);
 
   let fullText = '';
-  let ttsPromise: Promise<Buffer> | null = null;
+  let sentenceBuffer = '';
+  let ttsQueue = Promise.resolve();
 
   try {
-    for await (const event of agent.processStream(input, controller.signal)) {
+    for await (const event of agent.processStream(input, chatId, controller.signal)) {
       clearInterval(keepalive); // Stop keepalive once real events start
       if (controller.signal.aborted) break;
 
       sendSSE(res, event);
 
+      if (event.type === 'token') {
+        sentenceBuffer += event.data;
+        const match = sentenceBuffer.match(/([.!?]\s+|\n+)/);
+        if (match) {
+          const splitIndex = match.index! + match[0].length;
+          const chunk = sentenceBuffer.substring(0, splitIndex);
+          sentenceBuffer = sentenceBuffer.substring(splitIndex);
+
+          const ttsText = ttsTextFor(input, chunk);
+          if (ttsText.trim().length > 0) {
+             ttsQueue = ttsQueue.then(async () => {
+                if (controller.signal.aborted) return;
+                try {
+                   sendSSE(res, { type: 'thinking', data: 'Generating audio stream...' });
+                   const audioBuffer = await synthToBuffer(ttsText);
+                   if (audioBuffer && !controller.signal.aborted) {
+                      sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+                   }
+                } catch(e) { console.error('[API] TTS chunk failed:', e); }
+             });
+          }
+        }
+      }
+
       if (event.type === 'text_done' && event.data) {
         fullText = event.data;
-        
-        // Start summarise-then-synthesise immediately — runs in parallel with
-        // any remaining SSE housekeeping.
-        sendSSE(res, { type: 'thinking', data: 'Preparing audio...' });
-        
-        const ttsText = ttsTextFor(input, fullText);
-          
-        sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
-        ttsPromise = synthToBuffer(ttsText)
-          .catch((err: any) => {
-            console.error('[API] TTS pre-synthesis failed:', err);
-            return null as any;
-          });
+        if (sentenceBuffer.trim().length > 0) {
+           const ttsText = ttsTextFor(input, sentenceBuffer);
+           if (ttsText.trim().length > 0) {
+             ttsQueue = ttsQueue.then(async () => {
+                if (controller.signal.aborted) return;
+                try {
+                   sendSSE(res, { type: 'thinking', data: 'Generating final audio...' });
+                   const audioBuffer = await synthToBuffer(ttsText);
+                   if (audioBuffer && !controller.signal.aborted) {
+                      sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+                   }
+                } catch(e) { console.error('[API] TTS chunk failed:', e); }
+             });
+           }
+        }
+        await ttsQueue; // Wait for all chunks to finish playing
       }
 
       if (event.type === 'error') {
@@ -153,18 +189,6 @@ async function handleStreamingChat(
   } catch (err: any) {
     if (!controller.signal.aborted) {
       console.error('[API] Stream error:', err.message);
-    }
-  }
-
-  if (!controller.signal.aborted && ttsPromise) {
-    try {
-      const audioBuffer = await ttsPromise;
-      if (audioBuffer) sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-    } catch (ttsError: any) {
-      console.error('[API] TTS failed:', ttsError);
-      if (!controller.signal.aborted) {
-        sendSSE(res, { type: 'error', data: 'Audio synthesis failed.' });
-      }
     }
   }
 
@@ -196,6 +220,7 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
     }
 
     const originalName = req.file.originalname;
+    const chatId = req.body.chatId || 'default';
     const extension = originalName.includes('.') 
       ? originalName.substring(originalName.lastIndexOf('.'))
       : '.wav';
@@ -227,7 +252,9 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
     });
 
     let fullText = '';
-    let ttsPromise: Promise<Buffer> | null = null;
+    let sentenceBuffer = '';
+    let ttsQueue = Promise.resolve();
+
     // For the summarization prompt we want the plain-text question, not raw
     // audio bytes.  When STT is in direct mode the transcription isn't available,
     // so we fall back to a generic label.
@@ -235,22 +262,53 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
       sttMode === 'direct' ? '[audio input]' : (textOrAudioPayload as string);
 
     try {
-      for await (const event of agent.processStream(textOrAudioPayload, controller.signal)) {
+      for await (const event of agent.processStream(textOrAudioPayload, chatId, controller.signal)) {
         if (controller.signal.aborted) break;
 
         sendSSE(res, event);
+
+        if (event.type === 'token') {
+          sentenceBuffer += event.data;
+          const match = sentenceBuffer.match(/([.!?]\s+|\n+)/);
+          if (match) {
+            const splitIndex = match.index! + match[0].length;
+            const chunk = sentenceBuffer.substring(0, splitIndex);
+            sentenceBuffer = sentenceBuffer.substring(splitIndex);
+
+            const ttsText = ttsTextFor(userQuestion, chunk);
+            if (ttsText.trim().length > 0) {
+               ttsQueue = ttsQueue.then(async () => {
+                  if (controller.signal.aborted) return;
+                  try {
+                     sendSSE(res, { type: 'thinking', data: 'Generating audio stream...' });
+                     const audioBuffer = await synthToBuffer(ttsText);
+                     if (audioBuffer && !controller.signal.aborted) {
+                        sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+                     }
+                  } catch(e) { console.error('[API] TTS chunk failed:', e); }
+               });
+            }
+          }
+        }
+
         if (event.type === 'text_done' && event.data) {
           fullText = event.data;
-          sendSSE(res, { type: 'thinking', data: 'Preparing audio...' });
-          
-          const ttsText = ttsTextFor(userQuestion, fullText);
-
-          sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
-          ttsPromise = synthToBuffer(ttsText)
-            .catch((err: any) => {
-              console.error('[API] TTS pre-synthesis failed:', err);
-              return null as any;
-            });
+          if (sentenceBuffer.trim().length > 0) {
+             const ttsText = ttsTextFor(userQuestion, sentenceBuffer);
+             if (ttsText.trim().length > 0) {
+               ttsQueue = ttsQueue.then(async () => {
+                  if (controller.signal.aborted) return;
+                  try {
+                     sendSSE(res, { type: 'thinking', data: 'Generating final audio...' });
+                     const audioBuffer = await synthToBuffer(ttsText);
+                     if (audioBuffer && !controller.signal.aborted) {
+                        sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+                     }
+                  } catch(e) { console.error('[API] TTS chunk failed:', e); }
+               });
+             }
+          }
+          await ttsQueue; // Wait for all chunks to finish
         }
 
         if (event.type === 'error') fullText = event.data;
@@ -258,18 +316,6 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
     } catch (err: any) {
       if (!controller.signal.aborted) {
         console.error('[API] Audio stream error:', err.message);
-      }
-    }
-
-    if (!controller.signal.aborted && ttsPromise) {
-      try {
-        const audioBuffer = await ttsPromise;
-        if (audioBuffer) sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-      } catch (ttsError: any) {
-        console.error('[API] TTS failed:', ttsError);
-        if (!controller.signal.aborted) {
-          sendSSE(res, { type: 'error', data: 'Audio synthesis failed.' });
-        }
       }
     }
 
@@ -453,6 +499,37 @@ app.post('/skills/:id/disable', (req, res) => {
 });
 
 // 6. Session Management
+app.get('/chats', async (req, res) => {
+  try {
+    const chats = await historyManager.listChats();
+    res.json({ chats });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/chats/:id', async (req, res) => {
+  try {
+    const thread = await historyManager.loadChat(req.params.id);
+    const messages = thread.map(m => ({
+      role: m.getType() === 'human' ? 'user' : m.getType() === 'system' ? 'system' : 'agent',
+      content: m.content.toString()
+    }));
+    res.json({ messages });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/chats/:id', async (req, res) => {
+  try {
+    await historyManager.deleteChat(req.params.id);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/chat/reset', (req, res) => {
   agent.clearHistory();
   res.json({ success: true, message: 'Conversation history cleared.' });
@@ -581,11 +658,111 @@ app.post('/models/detect-all', async (_req, res) => {
   }
 });
 
+// ── 8. Channels API ──────────────────────────────────────────────────────────
+
+import { loadChannels, saveChannels, ChannelConfig, getSupportedChannels } from '../pipeline/channels';
+
+app.get('/channels', async (_req, res) => {
+  const channels = await loadChannels();
+  const supported = getSupportedChannels();
+  res.json({ channels, supported });
+});
+
+app.post('/channels', async (req, res) => {
+  try {
+    const { type, name, settings } = req.body;
+    if (!type || !name) return res.status(400).json({ error: 'type and name required' });
+    const channels = await loadChannels();
+    const existing = channels.findIndex(c => c.type === type);
+    const config: ChannelConfig = { type, name, settings: settings || {}, enabled: true };
+    if (existing >= 0) { channels[existing] = config; } else { channels.push(config); }
+    await saveChannels(channels);
+    res.json({ success: true, channel: config });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/channels/:type/toggle', async (req, res) => {
+  const channels = await loadChannels();
+  const ch = channels.find(c => c.type === req.params.type);
+  if (!ch) return res.status(404).json({ error: 'Channel not found' });
+  ch.enabled = !ch.enabled;
+  await saveChannels(channels);
+  res.json({ success: true, channel: ch });
+});
+
+app.delete('/channels/:type', async (req, res) => {
+  const channels = await loadChannels();
+  const filtered = channels.filter(c => c.type !== req.params.type);
+  await saveChannels(filtered);
+  res.json({ success: true });
+});
+
+// ── 9. Pipelines API ─────────────────────────────────────────────────────────
+
+import { loadPipelines as loadPipes, savePipelines as savePipes, loadHistory, runPipeline } from '../pipeline/pipeline-engine';
+
+app.get('/pipelines', async (_req, res) => {
+  const pipelines = await loadPipes();
+  res.json({ pipelines });
+});
+
+app.delete('/pipelines/:id', async (req, res) => {
+  const pipelines = await loadPipes();
+  const filtered = pipelines.filter(p => p.id !== req.params.id);
+  await savePipes(filtered);
+  res.json({ success: true });
+});
+
+app.post('/pipelines/:id/run', async (req, res) => {
+  const pipelines = await loadPipes();
+  const p = pipelines.find(p => p.id === req.params.id);
+  if (!p) return res.status(404).json({ error: 'Pipeline not found' });
+  const { success, outputs } = await runPipeline(p);
+  await savePipes(pipelines);
+  res.json({ success, outputs: outputs.map(o => ({ success: o.success, output: o.output.substring(0, 500) })) });
+});
+
+app.put('/pipelines/:id/toggle', async (req, res) => {
+  const pipelines = await loadPipes();
+  const p = pipelines.find(p => p.id === req.params.id);
+  if (!p) return res.status(404).json({ error: 'Pipeline not found' });
+  p.enabled = !p.enabled;
+  await savePipes(pipelines);
+  res.json({ success: true, pipeline: p });
+});
+
+app.get('/pipelines/history', async (_req, res) => {
+  const history = await loadHistory();
+  res.json({ history });
+});
+
+// ── 10. Notifications API ────────────────────────────────────────────────────
+
+import { loadNotifications, markNotificationsRead } from '../pipeline/channels';
+
+app.get('/notifications', async (_req, res) => {
+  const notifications = await loadNotifications();
+  // Return only unread ones
+  res.json({ notifications: notifications.filter(n => !n.read) });
+});
+
+app.post('/notifications/read', async (req, res) => {
+  const { ids } = req.body;
+  if (!ids || !Array.isArray(ids)) return res.status(400).json({ error: 'ids array required' });
+  await markNotificationsRead(ids);
+  res.json({ success: true });
+});
+
 export const startServer = async (port: number = 3000) => {
   const fsServerPath = path.join(process.cwd(), "src", "mcp-servers", "tools", "filesystem.ts");
   const memoryServerPath = path.join(process.cwd(), "src", "mcp-servers", "memory", "index.ts");
   
   await agent.initialize([fsServerPath, memoryServerPath]);
+
+  // ── Start the pipeline engine ticker ────────────────────────────────────────
+  startPipelineTicker();
 
   app.listen(port, () => {
     console.log(`[API] Server is running on port ${port}`);

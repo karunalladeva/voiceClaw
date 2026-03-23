@@ -32,8 +32,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _wakeWordEnabled;
   late bool _autoListen;
 
-
-
   @override
   void initState() {
     super.initState();
@@ -57,8 +55,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _autoListen = config?.voiceHandling.autoListen ?? false;
   }
 
-
-
   @override
   void dispose() {
     _modelController.dispose();
@@ -67,8 +63,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _nameController.dispose();
     super.dispose();
   }
-
-
 
   Future<void> _save() async {
     final appState = Provider.of<AppState>(context, listen: false);
@@ -96,210 +90,331 @@ class _SettingsScreenState extends State<SettingsScreen> {
       assistantName: _nameController.text,
     );
 
-
     await appState.updateConfig(newConfig);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Settings saved')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Preferences updated successfully'),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          backgroundColor: Colors.black87,
+        )
+      );
       Navigator.pop(context);
     }
+  }
+
+  // ── UI Helpers ──
+
+  Widget _buildSectionHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 12.0, bottom: 8.0, top: 24.0),
+      child: Text(
+        title.toUpperCase(),
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+          color: Colors.grey.shade600,
+          letterSpacing: 0.8,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCardGroup(List<Widget> children) {
+    List<Widget> segmentedChildren = [];
+    for (int i = 0; i < children.length; i++) {
+      segmentedChildren.add(children[i]);
+      if (i < children.length - 1) {
+        segmentedChildren.add(Divider(height: 1, thickness: 1, color: Colors.grey.shade200));
+      }
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.015),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: segmentedChildren,
+      ),
+    );
+  }
+
+  Widget _buildTextFieldBlock(String label, String hint, TextEditingController controller) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+          const SizedBox(width: 16),
+          Expanded(
+            child: TextField(
+              controller: controller,
+              textAlign: TextAlign.end,
+              style: TextStyle(fontSize: 15, color: Colors.grey.shade800),
+              decoration: InputDecoration(
+                hintText: hint,
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDropdownBlock(String label, String value, List<DropdownMenuItem<String>> items, Function(String?) onChanged) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+          const SizedBox(width: 16),
+          Expanded(
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: value,
+                isExpanded: true,
+                alignment: Alignment.centerRight,
+                icon: const Icon(Icons.arrow_drop_down, color: Colors.grey),
+                style: TextStyle(fontSize: 15, color: Colors.grey.shade800),
+                items: items,
+                onChanged: onChanged,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSwitchBlock(String title, String? subtitle, bool value, Function(bool) onChanged) {
+    return SwitchListTile(
+      title: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+      subtitle: subtitle != null ? Text(subtitle, style: TextStyle(fontSize: 13, color: Colors.grey.shade600)) : null,
+      value: value,
+      activeColor: Colors.blueAccent,
+      inactiveTrackColor: Colors.grey.shade200,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
+      onChanged: onChanged,
+    );
+  }
+
+  Widget _buildSliderBlock(String label, double value, double min, double max, int? divisions, Function(double) onChanged) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+              Text(value.toStringAsFixed(divisions == null ? 2 : 0), style: TextStyle(fontSize: 15, color: Colors.blue.shade700, fontWeight: FontWeight.w600)),
+            ],
+          ),
+          Slider(
+            value: value,
+            min: min,
+            max: max,
+            divisions: divisions,
+            activeColor: Colors.blueAccent,
+            inactiveColor: Colors.blueAccent.withOpacity(0.2),
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNavigationTile(String title, String subtitle, IconData icon, VoidCallback onTap) {
+    return ListTile(
+      leading: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.blue.shade50,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Icon(icon, color: Colors.blue.shade600, size: 20),
+      ),
+      title: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+      subtitle: Text(subtitle, style: TextStyle(fontSize: 13, color: Colors.grey.shade600)),
+      trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
+      onTap: onTap,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
-      body: ListView(
-        padding: const EdgeInsets.all(16.0),
-        children: [
-          const Text('LLM Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          TextField(
-            controller: _modelController,
-            decoration: const InputDecoration(labelText: 'Model Name (e.g., llama3.1)'),
-          ),
-          const SizedBox(height: 16),
-          Text('Temperature: ${_temperature.toStringAsFixed(2)}'),
-          Slider(
-            value: _temperature,
-            min: 0.0,
-            max: 1.0,
-            onChanged: (val) => setState(() => _temperature = val),
-          ),
-          const Divider(height: 48),
-          const Text('Agent Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          SwitchListTile(
-            title: const Text('Enable Internet Search Tool'),
-            subtitle: const Text('Allows the LLM to search the web if it does not know the answer.'),
-            value: _enableInternet,
-            onChanged: (val) => setState(() => _enableInternet = val),
-          ),
-          const Divider(height: 48),
-          const Text('STT Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          DropdownButtonFormField<String>(
-            value: _sttMode,
-            decoration: const InputDecoration(labelText: 'STT Mode'),
-            items: const [
-              DropdownMenuItem(value: 'transcribe', child: Text('Local Transcribe (Whisper)')),
-              DropdownMenuItem(value: 'direct', child: Text('Direct to LLM (Audio)')),
-            ],
-            onChanged: (val) {
-              if (val != null) setState(() => _sttMode = val);
-            },
-          ),
-          const Divider(height: 48),
-          const Text('TTS Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          DropdownButtonFormField<String>(
-            value: _engine,
-            decoration: const InputDecoration(labelText: 'TTS Engine'),
-            items: const [
-              DropdownMenuItem(value: 'kokoro', child: Text('Kokoro-JS (Local)')),
-              DropdownMenuItem(value: 'qwen', child: Text('Qwen-TTS (Python API)')),
-            ],
-            onChanged: (val) {
-              if (val != null) setState(() => _engine = val);
-            },
-          ),
-          TextField(
-            controller: _voiceController,
-            decoration: const InputDecoration(labelText: 'Default Voice'),
-          ),
-          const Divider(height: 48),
-          const Text('Model Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          ListTile(
-            leading: const Icon(Icons.smart_toy_outlined),
-            title: const Text('Manage AI Models'),
-            subtitle: const Text('Add, configure, and switch between providers'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const ModelsScreen()),
-            ),
-          ),
-          const Divider(height: 48),
-          const Text('Memory Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          SwitchListTile(
-            title: const Text('Enable Long-Term Memory'),
-            subtitle: const Text('Agent searches past memories and stores new facts automatically.'),
-            value: _enableMemory,
-            onChanged: (val) => setState(() => _enableMemory = val),
-          ),
-          ListTile(
-            leading: const Icon(Icons.memory_outlined),
-            title: const Text('Manage Memories'),
-            subtitle: const Text('View, add, or delete stored memories'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const MemoryScreen()),
-            ),
-          ),
-          const SizedBox(height: 32),
-          const Divider(height: 48),
-          const Text('Self-Learning', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          SwitchListTile(
-            title: const Text('Auto Memory Store'),
-            subtitle: const Text('Automatically saves important facts from every conversation.'),
-            value: _autoMemoryStore,
-            onChanged: (val) => setState(() => _autoMemoryStore = val),
-          ),
-          SwitchListTile(
-            title: const Text('Auto Skill Creation'),
-            subtitle: const Text('Creates SKILL.md files when the agent encounters tasks it cannot do.'),
-            value: _autoSkillCreate,
-            onChanged: (val) => setState(() => _autoSkillCreate = val),
-          ),
-          SwitchListTile(
-            title: const Text('Retry Until Done'),
-            subtitle: const Text('Agent retries failed tasks and learns from each attempt.'),
-            value: _retryOnFail,
-            onChanged: (val) => setState(() => _retryOnFail = val),
-          ),
-          if (_retryOnFail) ...[
-            Text('Max Retries: ${_maxRetries.round()}'),
-            Slider(
-              value: _maxRetries,
-              min: 1,
-              max: 5,
-              divisions: 4,
-              onChanged: (val) => setState(() => _maxRetries = val),
-            ),
-          ],
-          ListTile(
-            leading: const Icon(Icons.auto_stories_outlined),
-            title: const Text('View Learned Skills'),
-            subtitle: const Text('Browse and delete skills the agent has taught itself.'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const SkillsScreen()),
-            ),
-          ),
-          const Divider(height: 48),
-          const Text('Caching Configuration', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          const Text('Speeds up responses by storing search results and past memories in a fast cache.', style: TextStyle(color: Colors.grey, fontSize: 13)),
-          const SizedBox(height: 16),
-          DropdownButtonFormField<String>(
-            value: _cacheMode,
-            decoration: const InputDecoration(labelText: 'Cache Mode', border: OutlineInputBorder()),
-            items: const [
-              DropdownMenuItem(value: 'memory', child: Text('In-Memory (Default, Simple)')),
-              DropdownMenuItem(value: 'redis', child: Text('Redis (Advanced, Persistent)')),
-            ],
-            onChanged: (val) {
-              if (val != null) setState(() => _cacheMode = val);
-            },
-          ),
-          if (_cacheMode == 'redis') ...[
-            const SizedBox(height: 16),
-            TextField(
-              controller: _redisUrlController,
-              decoration: const InputDecoration(
-                labelText: 'Redis URL',
-                hintText: 'redis://localhost:6379',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-          const SizedBox(height: 32),
+      backgroundColor: const Color(0xFFF7F7F8),
+      appBar: AppBar(
+        title: const Text('Settings', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18)),
+        centerTitle: true,
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black87,
+        elevation: 0,
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1.0),
+          child: Container(color: Colors.grey.shade200, height: 1.0),
+        ),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+          children: [
+            _buildSectionHeader('AI Models & Hardware'),
+            _buildCardGroup([
+              _buildTextFieldBlock('Model Name', 'llama3.1', _modelController),
+              _buildSliderBlock('Temperature', _temperature, 0.0, 1.0, null, (v) => setState(() => _temperature = v)),
+              _buildNavigationTile('Manage AI Models', 'Add, configure, and switch local/remote providers.', Icons.smart_toy_outlined, () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const ModelsScreen()));
+              }),
+            ]),
 
-          const Divider(height: 48),
-          const Text('Voice & Personality', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          const Text('Configure how the assistant listens and its identity.', style: TextStyle(color: Colors.grey, fontSize: 13)),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _nameController,
-            decoration: const InputDecoration(
-              labelText: 'Assistant Name',
-              hintText: 'e.g., Claw or Buddy',
-              border: OutlineInputBorder(),
+            _buildSectionHeader('Assistant Capabilities'),
+            _buildCardGroup([
+              _buildTextFieldBlock('Identity Name', 'e.g. Claw', _nameController),
+              _buildSwitchBlock(
+                'Internet Search Access', 
+                'Allows the LLM to autonomously retrieve live web data.',
+                _enableInternet, 
+                (v) => setState(() => _enableInternet = v)
+              ),
+            ]),
+
+            _buildSectionHeader('Speech & Audio Engine'),
+            _buildCardGroup([
+              _buildDropdownBlock(
+                'Input Mode', 
+                _sttMode, 
+                const [
+                  DropdownMenuItem(value: 'transcribe', child: Text('Local Transcribe (Whisper)')),
+                  DropdownMenuItem(value: 'direct', child: Text('Direct Audio Socket')),
+                ], 
+                (v) { if (v != null) setState(() => _sttMode = v); }
+              ),
+              _buildDropdownBlock(
+                'TTS Engine', 
+                _engine, 
+                const [
+                  DropdownMenuItem(value: 'kokoro', child: Text('Kokoro-JS (Local Edge)')),
+                  DropdownMenuItem(value: 'qwen', child: Text('Qwen-TTS (Python)')),
+                ], 
+                (v) { if (v != null) setState(() => _engine = v); }
+              ),
+              _buildTextFieldBlock('Default Voice Pattern', 'af_heart', _voiceController),
+            ]),
+
+            _buildSectionHeader('Voice Conversational Fluidity'),
+            _buildCardGroup([
+              _buildSwitchBlock(
+                'Wake-Word Detection', 
+                'Passively listens locally for the Assistant Name.',
+                _wakeWordEnabled, 
+                (v) => setState(() => _wakeWordEnabled = v)
+              ),
+              _buildSwitchBlock(
+                'Voice Activity Detection', 
+                'Automatically transmits audio prompts when you stop speaking.',
+                _vadEnabled, 
+                (v) => setState(() => _vadEnabled = v)
+              ),
+              _buildSwitchBlock(
+                'Continuous Conversation', 
+                'Restarts the microphone seamlessly after the Agent replies.',
+                _autoListen, 
+                (v) => setState(() => _autoListen = v)
+              ),
+            ]),
+
+            _buildSectionHeader('Machine Memory & Learning'),
+            _buildCardGroup([
+              _buildSwitchBlock(
+                'Infinite Long-Term Memory', 
+                'Agent stores contextual data over distinct sessions.',
+                _enableMemory, 
+                (v) => setState(() => _enableMemory = v)
+              ),
+              _buildSwitchBlock(
+                'Auto-Extract Experiences', 
+                'Silently commits facts and personal data during chats.',
+                _autoMemoryStore, 
+                (v) => setState(() => _autoMemoryStore = v)
+              ),
+              _buildNavigationTile('View Raw Memories', 'Inspect graph database entries.', Icons.memory_outlined, () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const MemoryScreen()));
+              }),
+            ]),
+
+            _buildSectionHeader('Self-Improving Graph Engine'),
+            _buildCardGroup([
+              _buildSwitchBlock(
+                'Autonomous Skill Creation', 
+                'The agent writes tools for itself to solve unknown challenges.',
+                _autoSkillCreate, 
+                (v) => setState(() => _autoSkillCreate = v)
+              ),
+              _buildSwitchBlock(
+                'Iterative Task Retries', 
+                'Agent observes tool trace failures and patches its execution logic.',
+                _retryOnFail, 
+                (v) => setState(() => _retryOnFail = v)
+              ),
+              if (_retryOnFail)
+                _buildSliderBlock('Max Remediation Attempts', _maxRetries, 1, 5, 4, (v) => setState(() => _maxRetries = v)),
+              _buildNavigationTile('Browse Source Repositories', 'View injected deterministic macro pipelines.', Icons.auto_stories_outlined, () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const SkillsScreen()));
+              }),
+            ]),
+
+            _buildSectionHeader('System Architecture'),
+            _buildCardGroup([
+              _buildDropdownBlock(
+                'Graph State Cache', 
+                _cacheMode, 
+                const [
+                  DropdownMenuItem(value: 'memory', child: Text('Node.js V8 In-Memory (Fastest)')),
+                  DropdownMenuItem(value: 'redis', child: Text('Redis (Distributed IPC)')),
+                ], 
+                (v) { if (v != null) setState(() => _cacheMode = v); }
+              ),
+              if (_cacheMode == 'redis')
+                _buildTextFieldBlock('Redis Host URL', 'redis://localhost:6379', _redisUrlController),
+            ]),
+
+            const SizedBox(height: 32),
+            ElevatedButton(
+              onPressed: _save,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.black87,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                elevation: 0,
+              ),
+              child: const Text('Save Configuration', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, letterSpacing: 0.5)),
             ),
-          ),
-          const SizedBox(height: 16),
-          SwitchListTile(
-            title: const Text('Wake-Word Detection'),
-            subtitle: const Text('Starts listening when you say the assistant\'s name.'),
-            value: _wakeWordEnabled,
-            onChanged: (val) => setState(() => _wakeWordEnabled = val),
-          ),
-          SwitchListTile(
-            title: const Text('Voice Activity Detection (VAD)'),
-            subtitle: const Text('Automatically sends your message when you stop talking.'),
-            value: _vadEnabled,
-            onChanged: (val) => setState(() => _vadEnabled = val),
-          ),
-          SwitchListTile(
-            title: const Text('Auto-Listen after Response'),
-            subtitle: const Text('Automatically starts the mic after the assistant finishes speaking (Hands-Free).'),
-            value: _autoListen,
-            onChanged: (val) => setState(() => _autoListen = val),
-          ),
-          const SizedBox(height: 32),
-          ElevatedButton(
-            onPressed: _save,
-            child: const Text('Save Configuration'),
-          ),
-        ],
+            const SizedBox(height: 48),
+          ],
+        ),
       ),
     );
   }

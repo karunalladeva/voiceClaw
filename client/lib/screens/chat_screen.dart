@@ -3,16 +3,19 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:provider/provider.dart';
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
 import '../providers/app_state.dart';
-
 import '../services/api_service.dart';
 import 'settings_screen.dart';
+import 'channels_screen.dart';
+import 'pipelines_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({Key? key}) : super(key: key);
@@ -43,8 +46,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   final SpeechToText _speech = SpeechToText();
 
 
-  final List<Map<String, String>> _messages = [];
+  List<Map<String, String>> _messages = [];
   Timer? _wakeWordTimer;
+
+  String _currentChatId = 'default';
+  List<Map<String, dynamic>> _chatHistoryList = [];
 
   @override
   void initState() {
@@ -53,7 +59,52 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       vsync: this,
       duration: const Duration(milliseconds: 1000),
     );
-    _initWakeWord();
+    _checkMicPermission();
+    _loadChats();
+  }
+
+  Future<void> _checkMicPermission() async {
+    final status = await Permission.microphone.request();
+    if (status.isGranted) {
+      _initWakeWord();
+    } else if (status.isPermanentlyDenied) {
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Microphone Access Required'),
+            content: const Text(
+              'VoiceClaw needs microphone access to listen for your voice.\n\nPlease enable it in Settings → Apps → VoiceClaw → Permissions.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () { Navigator.pop(context); openAppSettings(); },
+                child: const Text('Open Settings'),
+              ),
+            ],
+          ),
+        );
+      }
+    } else {
+      // Denied but not permanently — show a snackbar & still init (may fail gracefully)
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Microphone permission denied. Voice features unavailable.'),
+          duration: Duration(seconds: 4),
+        ));
+      }
+      _initWakeWord(); // still try, OS may prompt again
+    }
+  }
+
+  Future<void> _loadChats() async {
+    final appState = Provider.of<AppState>(context, listen: false);
+    final list = await appState.apiService.getChats();
+    if (mounted) {
+      setState(() {
+        _chatHistoryList = list;
+      });
+    }
   }
 
 
@@ -203,6 +254,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   void _stopProcessing() {
     final appState = Provider.of<AppState>(context, listen: false);
     appState.apiService.abort();
+    _audioQueue.clear();
     _audioPlayer.stop();
     if (mounted) {
       setState(() {
@@ -215,10 +267,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   Future<void> _initWakeWord() async {
     try {
       bool available = await _speech.initialize(
-        onStatus: (status) {
+        onStatus: (status) async {
           if (status == 'done' || status == 'notListening') {
+            await Future.delayed(const Duration(milliseconds: 500));
+            if (!mounted) return;
+            
             final config = Provider.of<AppState>(context, listen: false).config;
-            if (config?.voiceHandling.wakeWordEnabled == true && !_isRecording && !_isProcessing) {
+            if (config?.voiceHandling.wakeWordEnabled == true && !_isRecording && !_isRecordingStarting) {
               _startWakeWordListening();
             }
           }
@@ -227,6 +282,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       );
       if (available) {
         _startWakeWordListening();
+      } else if (mounted) {
+        final config = Provider.of<AppState>(context, listen: false).config;
+        if (config?.voiceHandling.wakeWordEnabled == true) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text("Warning: Native Speech Recognition is missing/disabled on this OS. Wake Word offline."),
+            duration: Duration(seconds: 4),
+          ));
+        }
       }
     } catch (e) {
       debugPrint('STT Init Error: $e');
@@ -235,13 +298,22 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   void _startWakeWordListening() {
     final config = Provider.of<AppState>(context, listen: false).config;
-    if (config?.voiceHandling.wakeWordEnabled != true) return;
+    if (config?.voiceHandling.wakeWordEnabled != true || _isRecording || _isRecordingStarting) return;
 
-    _speech.listen(
+    try {
+      _speech.listen(
       onResult: (result) {
-        final name = config?.assistantName.toLowerCase() ?? 'Claw';
-        if (result.recognizedWords.toLowerCase().contains(name)) {
-          _speech.stop();
+        final name = config?.assistantName.toLowerCase() ?? 'claw';
+        final transcript = result.recognizedWords.toLowerCase();
+        
+        final isClawFuzzy = name == 'claw' && (
+          transcript.contains('claw') || transcript.contains('call') ||
+          transcript.contains('cloud') || transcript.contains('clock') ||
+          transcript.contains('clark') || transcript.contains('close') ||
+          transcript.contains('craw') || transcript.contains('law')
+        );
+
+        if (transcript.contains(name) || isClawFuzzy) {
           _startRecording();
         }
       },
@@ -250,7 +322,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       partialResults: true,
       cancelOnError: false,
     );
-
+    } catch(e) { debugPrint("Wake word error: $e"); }
   }
 
 
@@ -276,7 +348,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     setState(() => _isProcessing = true);
     try {
       final appState = Provider.of<AppState>(context, listen: false);
-      final stream = appState.apiService.streamTextChat(text);
+      final stream = appState.apiService.streamTextChat(text, _currentChatId);
       await _handleSSEStream(stream);
     } catch (e) {
       if (!_isAbortError(e)) _addMessage('System', 'Error: $e');
@@ -300,24 +372,35 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   Future<void> _startRecording() async {
     if (_isRecording || _isRecordingStarting) return;
+    
+    // FULL DUPLEX BARGE-IN: If the AI is talking or thinking, abort the stream 
+    // and stop the audio player so the user can immediately interrupt it.
+    if (_isProcessing || _audioPlayer.state == PlayerState.playing) {
+      _stopProcessing();
+    }
+
     try {
       _isRecordingStarting = true;
       final config = Provider.of<AppState>(context, listen: false).config;
       
-      if (_speech.isListening) await _speech.stop();
+      if (_speech.isListening) {
+        await _speech.stop();
+        // CRITICAL FOR WINDOWS: Wait for the OS to release the hardware microphone lock
+        await Future.delayed(const Duration(milliseconds: 600)); 
+      }
 
       if (await _audioRecorder.hasPermission()) {
         final dir = await getApplicationDocumentsDirectory();
         final filePath = '${dir.path}/temp_record.wav';
 
         await _audioRecorder.start(
-          const RecordConfig(
+          RecordConfig(
             encoder: AudioEncoder.wav,
             sampleRate: 16000,
             numChannels: 1,
-            autoGain: true,
-            echoCancel: true,
-            noiseSuppress: true,
+            autoGain: !Platform.isWindows,
+            echoCancel: !Platform.isWindows,
+            noiseSuppress: !Platform.isWindows,
           ),
           path: filePath,
         );
@@ -330,7 +413,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           });
 
           if (config?.voiceHandling.vadEnabled == true) {
-            if (amp.current > -25) { 
+            final threshold = Platform.isWindows ? -35.0 : -25.0;
+            if (amp.current > threshold) { 
               _lastVoiceActivity = DateTime.now();
             } else if (_lastVoiceActivity != null) {
               final quietDuration = DateTime.now().difference(_lastVoiceActivity!).inMilliseconds;
@@ -380,7 +464,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       if (path != null) {
         _addMessage('User', '(Voice Message)');
         final appState = Provider.of<AppState>(context, listen: false);
-        final stream = appState.apiService.streamAudioChat(path);
+        final stream = appState.apiService.streamAudioChat(path, _currentChatId);
         await _handleSSEStream(stream);
       }
     } catch (e) {
@@ -395,115 +479,266 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     }
   }
 
+  List<String> _audioQueue = [];
+  bool _isPlayingAudioQueue = false;
+
   Future<void> _playBase64Audio(String base64Data) async {
-    try {
-      final bytes = base64Decode(base64Data);
-      final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/response_${DateTime.now().millisecondsSinceEpoch}.wav');
-      await file.writeAsBytes(bytes);
-      await _audioPlayer.play(DeviceFileSource(file.path));
-    } catch (e) {
-      debugPrint("Error playing audio: $e");
+    _audioQueue.add(base64Data);
+    if (!_isPlayingAudioQueue) {
+      _processAudioQueue();
     }
   }
 
-  Future<void> _resetConversation() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('New Conversation'),
-        content: const Text('Clear the current conversation and start fresh?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Clear')),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
+  Future<void> _processAudioQueue() async {
+    _isPlayingAudioQueue = true;
+    while (_audioQueue.isNotEmpty && _isProcessing) {
+      final base64Data = _audioQueue.removeAt(0);
+      try {
+        final bytes = base64Decode(base64Data);
+        final dir = await getTemporaryDirectory();
+        final file = File('${dir.path}/response_${DateTime.now().millisecondsSinceEpoch}.wav');
+        await file.writeAsBytes(bytes);
+        
+        await _audioPlayer.play(DeviceFileSource(file.path));
+        
+        // Wait for player to finish or get interrupted by Barge-in
+        while (_audioPlayer.state == PlayerState.playing && _isProcessing) {
+          await Future.delayed(const Duration(milliseconds: 100));
+        }
+      } catch (e) {
+        debugPrint("Error playing audio chunk: $e");
+      }
+    }
+    _isPlayingAudioQueue = false;
+  }
 
+  // ── OpenUI Sidebar / History Methods ──
+
+  Future<void> _switchChat(String id) async {
     final appState = Provider.of<AppState>(context, listen: false);
-    await appState.apiService.resetConversation();
     setState(() {
+      _currentChatId = id;
+      _messages.clear();
+      _statusText = 'Loading chat...';
+    });
+    Navigator.pop(context); // close drawer
+
+    final history = await appState.apiService.loadChat(id);
+    if (mounted) {
+      setState(() {
+        _messages = history.map((m) {
+          String sender = m['role'] == 'user' ? 'User' : 'Agent';
+          if (m['role'] == 'system') sender = 'System';
+          return {'sender': sender, 'text': m['content'].toString()};
+        }).toList();
+        _statusText = '';
+      });
+      _scrollToBottom();
+    }
+  }
+
+  Future<void> _newChat() async {
+    setState(() {
+      _currentChatId = DateTime.now().millisecondsSinceEpoch.toString();
       _messages.clear();
       _statusText = '';
     });
+    Navigator.pop(context); // close drawer
+    _loadChats();
   }
+
+  Future<void> _deleteChat(String id) async {
+    final appState = Provider.of<AppState>(context, listen: false);
+    await appState.apiService.deleteChat(id);
+    _loadChats();
+    if (_currentChatId == id) {
+       setState(() {
+         _currentChatId = 'default';
+         _messages.clear();
+       });
+    }
+  }
+
+  // ── Build UI Methods ──
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.white,
       appBar: AppBar(
-        title: const Text('Local Voice AI'),
+        title: const Text('OpenUI VoiceClaw', style: TextStyle(fontWeight: FontWeight.w600)),
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black87,
+        elevation: 0,
         actions: [
           IconButton(
             icon: const Icon(Icons.add_comment_outlined),
             tooltip: 'New Conversation',
-            onPressed: _isProcessing ? null : _resetConversation,
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (context) => const SettingsScreen()),
-            ),
+            onPressed: _isProcessing ? null : () {
+               setState(() {
+                 _currentChatId = DateTime.now().millisecondsSinceEpoch.toString();
+                 _messages.clear();
+               });
+            },
           )
         ],
+      ),
+      drawer: Drawer(
+        child: SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      backgroundColor: Colors.blueAccent,
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: _newChat,
+                    icon: const Icon(Icons.add),
+                    label: const Text('New Chat', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: _chatHistoryList.length,
+                  itemBuilder: (context, index) {
+                    final chat = _chatHistoryList[index];
+                    final isSelected = chat['id'] == _currentChatId;
+                    return ListTile(
+                      selected: isSelected,
+                      selectedTileColor: Colors.blue.withOpacity(0.1),
+                      title: Text(
+                        chat['title'] ?? 'Chat',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal),
+                      ),
+                      leading: const Icon(Icons.chat_bubble_outline, size: 20),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 20, color: Colors.grey),
+                        onPressed: () => _deleteChat(chat['id']),
+                      ),
+                      onTap: () => _switchChat(chat['id']),
+                    );
+                  },
+                ),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.auto_awesome),
+                title: const Text('Pipelines & Jobs'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const PipelinesScreen()));
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.send),
+                title: const Text('Channels'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const ChannelsScreen()));
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.settings),
+                title: const Text('Admin Panel (Settings)'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
+                },
+              )
+            ],
+          ),
+        ),
       ),
       body: Column(
         children: [
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 16),
               itemCount: _messages.length,
               itemBuilder: (context, index) {
                 final msg = _messages[index];
                 final isUser = msg['sender'] == 'User';
                 final isSystem = msg['sender'] == 'System';
-                return Align(
-                  alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(vertical: 4),
-                    padding: const EdgeInsets.all(12),
-                    constraints: BoxConstraints(
-                      maxWidth: MediaQuery.of(context).size.width * 0.75,
+
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                  decoration: BoxDecoration(
+                    color: isUser ? Colors.white : (isSystem ? Colors.orange[50] : const Color(0xFFF7F7F8)),
+                    border: Border(
+                      bottom: BorderSide(
+                        color: Colors.black.withOpacity(0.05),
+                        width: 1,
+                      ),
                     ),
-                    decoration: BoxDecoration(
-                      color: isUser
-                          ? Colors.blue[100]
-                          : isSystem
-                              ? Colors.orange[100]
-                              : Colors.grey[200],
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          msg['sender']!,
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12,
-                            color: Colors.grey[600],
-                          ),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 30,
+                        height: 30,
+                        decoration: BoxDecoration(
+                          color: isUser ? Colors.blue.shade100 : Colors.teal.shade500,
+                          borderRadius: BorderRadius.circular(4),
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          msg['text'] ?? '',
-                          style: const TextStyle(fontSize: 15),
+                        child: Icon(
+                          isUser ? Icons.person : Icons.smart_toy,
+                          size: 20,
+                          color: isUser ? Colors.blue.shade700 : Colors.white,
                         ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              msg['sender']!,
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                            ),
+                            const SizedBox(height: 4),
+                            if (isUser || isSystem)
+                              Text(
+                                msg['text'] ?? '',
+                                style: const TextStyle(fontSize: 15, height: 1.5, color: Colors.black87),
+                              )
+                            else
+                              MarkdownBody(
+                                data: msg['text'] ?? '',
+                                selectable: true,
+                                styleSheet: MarkdownStyleSheet(
+                                  p: const TextStyle(fontSize: 15, height: 1.5, color: Colors.black87),
+                                  codeblockPadding: const EdgeInsets.all(12),
+                                  codeblockDecoration: BoxDecoration(
+                                    color: Colors.grey[200],
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 );
               },
             ),
           ),
-          // Status bar with spinner + stop button
+          
           if (_isProcessing || _statusText.isNotEmpty)
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              color: Colors.grey[100],
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+              color: const Color(0xFFF7F7F8),
               child: Row(
                 children: [
                   if (_isProcessing)
@@ -513,7 +748,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
                   if (_statusText.isNotEmpty) ...[
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Text(
                         _statusText,
@@ -527,7 +762,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                     ),
                   ] else
                     const Spacer(),
-                  // Stop button — always visible while processing
                   if (_isProcessing)
                     TextButton.icon(
                       onPressed: _stopProcessing,
@@ -542,76 +776,94 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                 ],
               ),
             ),
-          Container(
-            padding: const EdgeInsets.all(8.0),
-            decoration: BoxDecoration(
-              color: Theme.of(context).scaffoldBackgroundColor,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.05),
-                  blurRadius: 4,
-                  offset: const Offset(0, -2),
+          
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.08),
+                      blurRadius: 15,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                  border: Border.all(color: Colors.grey.shade200),
                 ),
-              ],
-            ),
-            child: SafeArea(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _textController,
-                      decoration: InputDecoration(
-                        hintText: _isProcessing ? 'Tap Stop to cancel...' : 'Type a message...',
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _textController,
+                        minLines: 1,
+                        maxLines: 5,
+                        decoration: InputDecoration(
+                          hintText: _isProcessing ? 'Tap Stop to cancel...' : 'Message VoiceClaw...',
+                          border: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
                         ),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        onSubmitted: (_) => _isProcessing ? null : _sendText(),
+                        enabled: !_isProcessing,
                       ),
-                      onSubmitted: (_) => _isProcessing ? null : _sendText(),
-                      enabled: !_isProcessing,
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    icon: const Icon(Icons.send),
-                    onPressed: _isProcessing ? null : _sendText,
-                    color: Colors.blue,
-                  ),
-                   GestureDetector(
-                    onTap: _isProcessing ? null : _toggleRecording,
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        if (_isRecording)
-                          AnimatedBuilder(
-                            animation: _pulseController,
-                            builder: (context, child) {
-                              return Container(
-                                width: 48 + (32 * _pulseController.value * _amplitude),
-                                height: 48 + (32 * _pulseController.value * _amplitude),
-                                decoration: BoxDecoration(
-                                  color: Colors.red.withOpacity(0.3),
-                                  shape: BoxShape.circle,
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4, right: 4),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (_textController.text.isNotEmpty || _isProcessing)
+                            IconButton(
+                              icon: const Icon(Icons.arrow_upward),
+                              onPressed: _isProcessing ? null : _sendText,
+                              color: Colors.white,
+                              style: IconButton.styleFrom(
+                                backgroundColor: _isProcessing ? Colors.grey : Colors.black87,
+                              ),
+                            ),
+                          GestureDetector(
+                            onTap: _isProcessing ? null : _toggleRecording,
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                if (_isRecording)
+                                  AnimatedBuilder(
+                                    animation: _pulseController,
+                                    builder: (context, child) {
+                                      return Container(
+                                        width: 36 + (20 * _pulseController.value * _amplitude),
+                                        height: 36 + (20 * _pulseController.value * _amplitude),
+                                        decoration: BoxDecoration(
+                                          color: Colors.red.withOpacity(0.3),
+                                          shape: BoxShape.circle,
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                Container(
+                                  padding: const EdgeInsets.all(8),
+                                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                                  decoration: BoxDecoration(
+                                    color: _isRecording ? Colors.red : Colors.grey.shade100,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                    _isRecording ? Icons.stop : Icons.mic_none,
+                                    color: _isRecording ? Colors.white : Colors.black87,
+                                    size: 22,
+                                  ),
                                 ),
-                              );
-                            },
+                              ],
+                            ),
                           ),
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: _isRecording ? Colors.red : Colors.blue,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            _isRecording ? Icons.stop : Icons.mic,
-                            color: _isProcessing ? Colors.white54 : Colors.white,
-                          ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-
-                ],
+                  ],
+                ),
               ),
             ),
           ),

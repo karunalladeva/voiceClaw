@@ -22,7 +22,7 @@ export class STTModule {
       // Dynamic import to allow graceful initialization
       // @ts-ignore
       const { pipeline } = await import('@huggingface/transformers');
-      this.transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
+      this.transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base.en');
       
       console.log('[STT] Whisper ONNX model loaded successfully.');
     } catch (error) {

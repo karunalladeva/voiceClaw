@@ -188,15 +188,47 @@ class ApiService {
 
   // ── Session API ────────────────────────────────────────────────────────────
 
-  Future<void> resetConversation() async {
+  Future<List<Map<String, dynamic>>> getChats() async {
     try {
-      await http.post(Uri.parse('$baseUrl/chat/reset')).timeout(const Duration(seconds: 5));
+      final response = await http.get(Uri.parse('$baseUrl/chats')).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return List<Map<String, dynamic>>.from(data['chats'] ?? []);
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  Future<List<Map<String, dynamic>>> loadChat(String id) async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/chats/$id')).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return List<Map<String, dynamic>>.from(data['messages'] ?? []);
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  Future<void> deleteChat(String id) async {
+    try {
+      await http.delete(Uri.parse('$baseUrl/chats/$id')).timeout(const Duration(seconds: 5));
     } catch (_) {}
   }
 
-  Future<int> getHistoryTurns() async {
+  Future<void> resetConversation(String chatId) async {
     try {
-      final response = await http.get(Uri.parse('$baseUrl/chat/history')).timeout(const Duration(seconds: 5));
+      await http.post(
+          Uri.parse('$baseUrl/chat/reset'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'chatId': chatId})
+      ).timeout(const Duration(seconds: 5));
+    } catch (_) {}
+  }
+
+  Future<int> getHistoryTurns(String chatId) async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/chat/history?chatId=$chatId')).timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         return (data['turns'] as num?)?.toInt() ?? 0;
@@ -206,7 +238,7 @@ class ApiService {
   }
 
   /// Stream text chat via SSE. Yields SSEEvent objects as they arrive.
-  Stream<SSEEvent> streamTextChat(String text) async* {
+  Stream<SSEEvent> streamTextChat(String text, String chatId) async* {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 30)
       ..idleTimeout = const Duration(seconds: 120);
@@ -215,7 +247,7 @@ class ApiService {
       final request = await client.postUrl(Uri.parse('$baseUrl/chat/text'));
       request.headers.set('Content-Type', 'application/json');
       request.headers.set('Accept', 'text/event-stream');
-      request.write(jsonEncode({'text': text}));
+      request.write(jsonEncode({'text': text, 'chatId': chatId}));
       final response = await request.close();
 
       yield* _parseSSEStream(response);
@@ -226,7 +258,7 @@ class ApiService {
   }
 
   /// Stream audio chat via SSE. Yields SSEEvent objects as they arrive.
-  Stream<SSEEvent> streamAudioChat(String filePath) async* {
+  Stream<SSEEvent> streamAudioChat(String filePath, String chatId) async* {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 30)
       ..idleTimeout = const Duration(seconds: 120);
@@ -246,6 +278,10 @@ class ApiService {
       final header = '--$boundary\r\nContent-Disposition: form-data; name="audio"; filename="$fileName"\r\nContent-Type: audio/wav\r\n\r\n';
       bodyParts.addAll(utf8.encode(header));
       bodyParts.addAll(fileBytes);
+      
+      final chatHeader = '\r\n--$boundary\r\nContent-Disposition: form-data; name="chatId"\r\n\r\n$chatId';
+      bodyParts.addAll(utf8.encode(chatHeader));
+
       bodyParts.addAll(utf8.encode('\r\n--$boundary--\r\n'));
 
       request.contentLength = bodyParts.length;
@@ -297,5 +333,84 @@ class ApiService {
         }
       }
     }
+  }
+
+  // ── Channels API ────────────────────────────────────────────────────────────
+
+  Future<Map<String, dynamic>> getChannels() async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/channels')).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) return jsonDecode(response.body);
+    } catch (_) {}
+    return {'channels': [], 'supported': []};
+  }
+
+  Future<bool> saveChannel(String type, String name, Map<String, String> settings) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/channels'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'type': type, 'name': name, 'settings': settings}),
+      );
+      return response.statusCode == 200;
+    } catch (_) { return false; }
+  }
+
+  Future<bool> toggleChannel(String type) async {
+    try {
+      final response = await http.put(Uri.parse('$baseUrl/channels/$type/toggle'));
+      return response.statusCode == 200;
+    } catch (_) { return false; }
+  }
+
+  Future<bool> deleteChannel(String type) async {
+    try {
+      final response = await http.delete(Uri.parse('$baseUrl/channels/$type'));
+      return response.statusCode == 200;
+    } catch (_) { return false; }
+  }
+
+  // ── Pipelines API ──────────────────────────────────────────────────────────
+
+  Future<List<Map<String, dynamic>>> getPipelines() async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/pipelines')).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        return List<Map<String, dynamic>>.from(jsonDecode(response.body)['pipelines'] ?? []);
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  Future<bool> deletePipeline(String id) async {
+    try {
+      final response = await http.delete(Uri.parse('$baseUrl/pipelines/$id'));
+      return response.statusCode == 200;
+    } catch (_) { return false; }
+  }
+
+  Future<bool> togglePipeline(String id) async {
+    try {
+      final response = await http.put(Uri.parse('$baseUrl/pipelines/$id/toggle'));
+      return response.statusCode == 200;
+    } catch (_) { return false; }
+  }
+
+  Future<Map<String, dynamic>?> runPipelineNow(String id) async {
+    try {
+      final response = await http.post(Uri.parse('$baseUrl/pipelines/$id/run')).timeout(const Duration(seconds: 120));
+      if (response.statusCode == 200) return jsonDecode(response.body);
+    } catch (_) {}
+    return null;
+  }
+
+  Future<List<Map<String, dynamic>>> getPipelineHistory() async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/pipelines/history')).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        return List<Map<String, dynamic>>.from(jsonDecode(response.body)['history'] ?? []);
+      }
+    } catch (_) {}
+    return [];
   }
 }
