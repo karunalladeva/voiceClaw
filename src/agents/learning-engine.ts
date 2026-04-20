@@ -153,7 +153,7 @@ export class LearningEngine {
           if (macro.trigger === normalizedIntent) {
             return macro;
           }
-        } catch {}
+        } catch { }
       }
     } catch {
       // Ignored

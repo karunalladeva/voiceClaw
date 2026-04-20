@@ -37,7 +37,20 @@ export interface AppConfig {
     wakeWordEnabled: boolean;
     autoListen: boolean;
   };
+  evolution: {
+    enabled: boolean;
+    autoHarvest: boolean;
+    schedule: string;
+    minSamples: number;
+    vramMaxMB: number;
+    baseModel: string;
+    loraRank: number;
+    maxTrainSteps: number;
+    learningRate: number;
+    quantMethod: string;
+  };
   assistantName: string;
+  approved_senders: Record<string, string[]>;
 }
 
 
@@ -75,7 +88,25 @@ const DEFAULT_CONFIG: AppConfig = {
     wakeWordEnabled: false,
     autoListen: false,
   },
+  evolution: {
+    enabled: false,
+    autoHarvest: true,
+    schedule: '0 3 * * 0',
+    minSamples: 100,
+    vramMaxMB: 2048,
+    baseModel: 'unsloth/llama-3.1-8b-bnb-4bit',
+    loraRank: 16,
+    maxTrainSteps: 60,
+    learningRate: 2e-4,
+    quantMethod: 'q4_k_m',
+  },
   assistantName: 'Claw',
+  approved_senders: {
+    discord: [],
+    telegram: [],
+    whatsapp: [],
+    slack: []
+  },
 };
 
 
@@ -154,6 +185,8 @@ class ConfigManager extends EventEmitter {
       agent: { ...this.currentConfig.agent, ...(newSettings.agent || {}) },
       memory: { ...this.currentConfig.memory, ...(newSettings.memory || {}) },
       learning: { ...this.currentConfig.learning, ...(newSettings.learning || {}) },
+      evolution: { ...this.currentConfig.evolution, ...(newSettings.evolution || {}) },
+      approved_senders: newSettings.approved_senders || this.currentConfig.approved_senders,
     };
     
     await this.saveConfig(this.currentConfig);

@@ -3,6 +3,8 @@ import { HumanMessage, AIMessage, SystemMessage, BaseMessage } from '@langchain/
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { StateGraph, MessagesAnnotation } from '@langchain/langgraph';
 import { z } from 'zod';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 // @ts-ignore
 import { ToolNode } from '@langchain/langgraph/prebuilt';
@@ -31,7 +33,7 @@ export class ReactAgent {
   private skillRegistry: SkillRegistry;
   private agentFactory: AgentFactory;
   private activeModelId: string = 'unknown';
-  private static readonly MAX_HISTORY_TURNS = 20;
+  private static readonly MAX_HISTORY_TURNS = 3;
 
   private static readonly MAX_HISTORY_TOKENS = 8000; // ~32k characters (Standard for Mistral/Llama3/Qwen)
 
@@ -201,10 +203,10 @@ If you need information or need to perform an action, use your tools.
         func: async ({ skillId, query }, runManager, config) => {
           const skill = this.skillRegistry.getSkill(skillId);
           if (!skill || !skill.enabled) return `Skill ${skillId} not found or disabled.`;
-          
+
           console.log(`[Agent: Skill (${skill.name})] Executing nested sub-graph logic...`);
           let finalOutput = '';
-          
+
           try {
             // We use runStream natively. To prevent visual UI freezes, we map custom 'token' events 
             // from the sub-graph onto the custom callback manager or stdout. 
@@ -213,11 +215,11 @@ If you need information or need to perform an action, use your tools.
               if (skillEvent.type === 'text_done' || skillEvent.type === 'error') {
                 finalOutput = skillEvent.data;
               }
-            }             
+            }
           } catch (e: any) {
             finalOutput = `Skill crashed: ${e.message}`;
           }
-          
+
           return `[Sub-Agent Result from ${skill.name}]:\n${finalOutput || 'No text output produced.'}`;
         }
       })
@@ -242,7 +244,7 @@ If you need information or need to perform an action, use your tools.
       // ── Phase 2: Rolling Vision Context Manager ──
       // Prevent OOM by ensuring only the single most recent screenshot is sent to the local LLM per turn.
       let hasRetainedImage = false;
-      
+
       const optimizedMessages = [...state.messages].reverse().map((msg: any) => {
         if (Array.isArray(msg.content)) {
           let modified = false;
@@ -258,7 +260,7 @@ If you need information or need to perform an action, use your tools.
             }
             return block;
           });
-          
+
           if (modified) {
             const Ctor = msg.constructor;
             return new Ctor({ ...msg, content: optimizedContent });
@@ -402,15 +404,33 @@ If you need information or need to perform an action, use your tools.
 
     const maxMessages = ReactAgent.MAX_HISTORY_TURNS * 2;
     if (thread.length > maxMessages) {
-       historyManager.setThread(chatId, thread.slice(thread.length - maxMessages));
+      const removed = thread.splice(0, thread.length - maxMessages);
+      const removedText = removed.map(m => `${m.getType().toUpperCase()}: ${m.content}`).join('\\n');
+
+      // Find and extract existing rolling summary
+      const existingSummaryIndex = thread.findIndex(m => m.getType() === 'system' && m.content.toString().startsWith('[Conversation Summary]:'));
+      const existingSummaryText = existingSummaryIndex >= 0 ? thread[existingSummaryIndex].content : '';
+      if (existingSummaryIndex >= 0) thread.splice(existingSummaryIndex, 1);
+
+      // Fire-and-forget background summarizer
+      modelRouter.getModel('summarize').then(fastModel => {
+        console.log(`[ReAct Agent] Background summarization running on ${removed.length} dropped history messages...`);
+        return fastModel.invoke([
+          new SystemMessage("Summarize the following conversation history briefly. Merge it with any previous summary to ensure critical long-term context is retained. Be concise."),
+          new HumanMessage({ content: `Previous Summary: ${existingSummaryText}\\n\\nOlder Messages to summarize:\\n${removedText}` })
+        ]);
+      }).then(res => {
+        const newSummaryMsg = new SystemMessage({ content: `[Conversation Summary]:\\n${res.content}` });
+        const currentThread = historyManager.getThread(chatId);
+        // Prepend summary to keep it in context
+        currentThread.unshift(newSummaryMsg);
+        historyManager.saveChat(chatId);
+        console.log(`[ReAct Agent] History summarization complete.`);
+      }).catch(err => console.warn('[History Summarizer] Failed to summarize dropped context:', err));
+
+      historyManager.setThread(chatId, thread);
     }
 
-    let totalChars = thread.reduce((sum, msg) => sum + (msg.content?.toString().length || 0), 0);
-    while (totalChars > ReactAgent.MAX_HISTORY_TOKENS * 4 && thread.length > 2) {
-      const removed = thread.splice(0, 2); 
-      totalChars -= removed.reduce((sum, msg) => sum + (msg.content?.toString().length || 0), 0);
-    }
-    
     await historyManager.saveChat(chatId, typeof humanInput === 'string' ? humanInput : undefined);
   }
 
@@ -502,14 +522,29 @@ If you need information or need to perform an action, use your tools.
     console.log(`[Agent: ReAct] [Model: ${modelId}] Streaming response for input…`);
 
     const cfg = configManager.getConfig().learning ?? {};
-    
-    // ── Phase 3: Macro Bypass Execution ──
+
+    // ── Traffic Controller: Fast-Path Routing ──
+    if (typeof input === 'string') {
+      const lowerInput = input.trim().toLowerCase();
+      if (lowerInput === 'what time is it?' || lowerInput === 'what time is it') {
+        const msg = `It is currently ${new Date().toLocaleTimeString()}.`;
+        yield { type: 'text_done', data: msg };
+        return;
+      }
+      if (lowerInput === 'what is today?' || lowerInput === 'what is today' || lowerInput === 'what date is it?' || lowerInput === 'what date is it') {
+        const msg = `Today is ${new Date().toLocaleDateString()}.`;
+        yield { type: 'text_done', data: msg };
+        return;
+      }
+    }
+
+    // ── Traffic Controller: Macro Bypass Execution ──
     if (typeof input === 'string') {
       const macro = await learningEngine.matchMacro(input);
       if (macro) {
         console.log(`[ReAct Agent] Macro matched: ${macro.name}`);
         yield { type: 'thinking', data: `Executing learned Macro shortcut: ${macro.name}…` };
-        
+
         const allCoreTools = [...(this.lastTools || []), ...this.getSystemTools()];
         for (const step of macro.steps) {
           const tool = allCoreTools.find(t => t.name === step.tool);
@@ -522,7 +557,7 @@ If you need information or need to perform an action, use your tools.
             }
           }
         }
-        
+
         const successMsg = `Successfully executed deterministic macro shortcut: ${macro.name}`;
         await this.appendToHistory(chatId, input, successMsg);
         yield { type: 'text_done', data: successMsg };
@@ -547,6 +582,27 @@ If you need information or need to perform an action, use your tools.
         const systemPrompt = await systemPromptPromise;
         if (signal?.aborted) return;
 
+        // ── Context Fragmentation Fix: Move Base64 Images to Cache ──
+        let processedInput = input;
+        if (Array.isArray(input)) {
+          processedInput = await Promise.all(input.map(async (block: any) => {
+            if (block.type === 'image_url' && block.image_url?.url?.startsWith('data:')) {
+              const match = block.image_url.url.match(/^data:image\/([a-zA-Z+]+);base64,(.+)$/);
+              if (match) {
+                const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+                const base64Data = match[2];
+                const cacheDir = path.join(process.cwd(), 'workspace', 'cache');
+                await fs.mkdir(cacheDir, { recursive: true }).catch(() => { });
+                const filename = `vision_${Date.now()}_${Math.random().toString(36).substring(7)}.${ext}`;
+                const filepath = path.join(cacheDir, filename);
+                await fs.writeFile(filepath, base64Data, 'base64');
+                return { type: 'image_url', image_url: { url: `file://${filepath.replace(/\\/g, '/')}` } };
+              }
+            }
+            return block;
+          }));
+        }
+
         // Inject extra retry context on second+ attempt
         const retryPrefix = attempt > 0
           ? `\n\n[SELF-IMPROVEMENT] Previous attempt failed. Approach this differently. Attempt ${attempt + 1}.`
@@ -557,7 +613,7 @@ If you need information or need to perform an action, use your tools.
           messages: [
             new SystemMessage(systemPrompt + retryPrefix),
             ...threadMsgs,
-            new HumanMessage({ content: input }),
+            new HumanMessage({ content: processedInput }),
           ],
         };
 
@@ -679,7 +735,7 @@ If you need information or need to perform an action, use your tools.
         if (cfg.autoMacroCreate && toolTrace.length > 0) {
           const inputStr = typeof input === 'string' ? input : '[audio input]';
           learningEngine.extractMacroFromSuccess(inputStr, toolTrace).catch((e: any) => {
-             console.error('[React Agent] Macro extraction failed:', e);
+            console.error('[React Agent] Macro extraction failed:', e);
           });
         }
 

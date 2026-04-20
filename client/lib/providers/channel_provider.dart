@@ -66,4 +66,13 @@ class ChannelProvider extends ChangeNotifier {
     }
     return success;
   }
+
+  Future<List<Map<String, dynamic>>> getPendingPairings() => _apiService.getPendingPairings();
+  Future<Map<String, dynamic>> getApprovedPairings() => _apiService.getApprovedPairings();
+  Future<bool> approvePairing(String code) => _apiService.approvePairing(code);
+  Future<bool> rejectPairing(String code) => _apiService.rejectPairing(code);
+  Future<bool> revokePairing(String channelType, String senderId) => _apiService.revokePairing(channelType, senderId);
+  Future<Map<String, dynamic>> getWhatsAppStatus() => _apiService.getWhatsAppStatus();
+  Future<bool> resetWhatsApp() => _apiService.resetWhatsApp();
+  Future<bool> sendTestMessage(String channelType, String recipientId, String message) => _apiService.sendTestMessage(channelType, recipientId, message);
 }

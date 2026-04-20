@@ -12,14 +12,14 @@ export class MCPClientManager {
   /**
    * Start a local MCP server script and connect to it
    */
-  async connectLocalServer(serverId: string, scriptPath: string) {
-    console.log(`[MCP Client] Connecting to local server: ${serverId} at ${scriptPath}`);
+  async connectLocalServer(serverId: string, scriptPath: string, options: { command?: string; args?: string[]; env?: Record<string, string> } = {}) {
+    console.log(`[MCP Client] Connecting to local server: ${serverId} at ${scriptPath || 'custom command'}`);
     
     // Configure the stdio transport to spawn the node script
     const transport = new StdioClientTransport({
-      command: "npx",
-      args: ["ts-node", scriptPath],
-      env: process.env as Record<string, string>,
+      command: options.command || "npx",
+      args: options.args || ["ts-node", scriptPath],
+      env: { ...process.env, ...(options.env || {}) } as Record<string, string>,
     });
 
     const client = new Client(

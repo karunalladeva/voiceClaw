@@ -13,10 +13,21 @@ import { modelRouter } from '../models/model-router';
 import { historyManager } from '../agents/agent-history';
 import { startPipelineTicker } from '../pipeline/pipeline-engine';
 import '../pipeline/steps'; // register step executors
+import { vramMonitor } from '../utils/vram-monitor';
+import { channelInputManager } from '../pipeline/channel-input-manager';
+import { deliverToChannel } from '../pipeline/channels';
+import { evolutionService } from '../services/evolution-service';
+import { evolutionScheduler } from '../services/evolution-scheduler';
+
+
+vramMonitor.startMonitoring();
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const agent = new ReactAgent();
+
+// Global registry for Stop-and-Swap request interruption
+const activeControllers = new Map<string, AbortController>();
 
 /**
  * Max characters spoken aloud. Responses beyond this are trimmed to the
@@ -35,12 +46,13 @@ const AUDIO_MAX_CHARS = 500;
  */
 function stripMarkdown(text: string): string {
   return text
+    .replace(/```[\s\S]*?```/g, ' [Code provided on screen.] ') // Replace code blocks with spoken placeholder
+    .replace(/`([^`]+)`/g, '$1')         // Remove inline backticks but keep the text
     .replace(/#{1,6}\s+/g, '')           // ## headings
     .replace(/\*\*(.+?)\*\*/g, '$1')     // **bold**
     .replace(/\*(.+?)\*/g, '$1')         // *italic*
     .replace(/__(.+?)__/g, '$1')         // __bold__
     .replace(/_(.+?)_/g, '$1')           // _italic_
-    .replace(/`{1,3}[^`]*`{1,3}/g, '')  // `inline code` / ```blocks```
     .replace(/!\[.*?\]\(.*?\)/g, '')     // images
     .replace(/\[(.+?)\]\(.*?\)/g, '$1') // [link text](url) → just the text
     .replace(/^[-*+]\s+/gm, '')         // bullet points
@@ -53,7 +65,11 @@ function stripMarkdown(text: string): string {
 
 function ttsTextFor(_userInput: string | any, fullText: string): string {
   const plain = stripMarkdown(fullText);
+  if (plain.length === 0) {
+    return "I've displayed the information on your screen.";
+  }
   if (plain.length <= AUDIO_MAX_CHARS) return plain;
+  
   console.log(`[API] Response is ${plain.length} chars — trimming for audio.`);
   const slice = plain.substring(0, AUDIO_MAX_CHARS);
   const lastBreak = Math.max(
@@ -62,7 +78,10 @@ function ttsTextFor(_userInput: string | any, fullText: string): string {
     slice.lastIndexOf('? '),
     slice.lastIndexOf('.\n'),
   );
-  return lastBreak > 80 ? slice.substring(0, lastBreak + 1).trim() : slice.trim();
+  
+  const truncated = lastBreak > 80 ? slice.substring(0, lastBreak + 1).trim() : slice.trim();
+  // Append a spoken indicator so the user knows there is more on screen.
+  return `${truncated} I've placed the rest of the details on your screen.`;
 }
 
 
@@ -96,7 +115,7 @@ async function synthToBuffer(text: string): Promise<Buffer> {
   const tempFilePath = path.join(os.tmpdir(), `tts-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
   await audio.save(tempFilePath);
   const buffer = await fs.readFile(tempFilePath);
-  await fs.unlink(tempFilePath).catch(() => {});
+  await fs.unlink(tempFilePath).catch(() => { });
   return buffer;
 }
 
@@ -106,13 +125,30 @@ async function handleStreamingChat(
   input: string | any,
   chatId: string = 'default'
 ) {
+  vramMonitor.registerActivity();
   initSSE(res);
 
+  // IMMEDIATELY send a keepalive comment to verify the socket is working
+  // before we start any heavy async work like model loading.
+  // res.write(': active\n\n');
+  sendSSE(res, { type: 'thinking', data: 'Thinking...' });
+  if (typeof (res as any).flush === 'function') (res as any).flush();
+
+  if (activeControllers.has(chatId)) {
+    console.log(`[API] Aborting previous request for chat ${chatId}`);
+    activeControllers.get(chatId)!.abort();
+  }
+
   const controller = new AbortController();
-  req.on('close', () => {
-    if (!controller.signal.aborted) {
-      console.log('[API] Client disconnected — aborting stream.');
+  activeControllers.set(chatId, controller);
+
+  res.on('close', () => {
+    if (!controller.signal.aborted && !res.writableEnded) {
+      console.log(`[API] Client disconnected (${chatId}) — aborting stream.`);
       controller.abort();
+    }
+    if (activeControllers.get(chatId) === controller) {
+      activeControllers.delete(chatId);
     }
   });
 
@@ -130,6 +166,7 @@ async function handleStreamingChat(
   let fullText = '';
   let sentenceBuffer = '';
   let ttsQueue = Promise.resolve();
+  let ttsEpoch = 0;
 
   try {
     for await (const event of agent.processStream(input, chatId, controller.signal)) {
@@ -137,6 +174,11 @@ async function handleStreamingChat(
       if (controller.signal.aborted) break;
 
       sendSSE(res, event);
+
+      if (event.type === 'tool_call') {
+        sentenceBuffer = ''; // Discard pre-tool conversational filler
+        ttsEpoch++;          // Invalidate queued TTS tasks for the preamble
+      }
 
       if (event.type === 'token') {
         sentenceBuffer += event.data;
@@ -148,16 +190,17 @@ async function handleStreamingChat(
 
           const ttsText = ttsTextFor(input, chunk);
           if (ttsText.trim().length > 0) {
-             ttsQueue = ttsQueue.then(async () => {
-                if (controller.signal.aborted) return;
-                try {
-                   sendSSE(res, { type: 'thinking', data: 'Generating audio stream...' });
-                   const audioBuffer = await synthToBuffer(ttsText);
-                   if (audioBuffer && !controller.signal.aborted) {
-                      sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-                   }
-                } catch(e) { console.error('[API] TTS chunk failed:', e); }
-             });
+            const currentEpoch = ttsEpoch;
+            ttsQueue = ttsQueue.then(async () => {
+              if (controller.signal.aborted || currentEpoch !== ttsEpoch) return;
+              try {
+                sendSSE(res, { type: 'thinking', data: 'Generating audio stream...' });
+                const audioBuffer = await synthToBuffer(ttsText);
+                if (audioBuffer && !controller.signal.aborted && currentEpoch === ttsEpoch) {
+                  sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+                }
+              } catch (e) { console.error('[API] TTS chunk failed:', e); }
+            });
           }
         }
       }
@@ -165,19 +208,20 @@ async function handleStreamingChat(
       if (event.type === 'text_done' && event.data) {
         fullText = event.data;
         if (sentenceBuffer.trim().length > 0) {
-           const ttsText = ttsTextFor(input, sentenceBuffer);
-           if (ttsText.trim().length > 0) {
-             ttsQueue = ttsQueue.then(async () => {
-                if (controller.signal.aborted) return;
-                try {
-                   sendSSE(res, { type: 'thinking', data: 'Generating final audio...' });
-                   const audioBuffer = await synthToBuffer(ttsText);
-                   if (audioBuffer && !controller.signal.aborted) {
-                      sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-                   }
-                } catch(e) { console.error('[API] TTS chunk failed:', e); }
-             });
-           }
+          const ttsText = ttsTextFor(input, sentenceBuffer);
+          if (ttsText.trim().length > 0) {
+            const currentEpoch = ttsEpoch;
+            ttsQueue = ttsQueue.then(async () => {
+              if (controller.signal.aborted || currentEpoch !== ttsEpoch) return;
+              try {
+                sendSSE(res, { type: 'thinking', data: 'Generating final audio...' });
+                const audioBuffer = await synthToBuffer(ttsText);
+                if (audioBuffer && !controller.signal.aborted && currentEpoch === ttsEpoch) {
+                  sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+                }
+              } catch (e) { console.error('[API] TTS chunk failed:', e); }
+            });
+          }
         }
         await ttsQueue; // Wait for all chunks to finish playing
       }
@@ -195,6 +239,10 @@ async function handleStreamingChat(
   if (!res.writableEnded) {
     sendSSE(res, { type: 'done', data: '' });
     res.end();
+  }
+
+  if (activeControllers.get(chatId) === controller) {
+    activeControllers.delete(chatId);
   }
 }
 
@@ -221,13 +269,14 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
 
     const originalName = req.file.originalname;
     const chatId = req.body.chatId || 'default';
-    const extension = originalName.includes('.') 
+    const extension = originalName.includes('.')
       ? originalName.substring(originalName.lastIndexOf('.'))
       : '.wav';
 
     let textOrAudioPayload: string | any;
     const sttMode = configManager.getConfig().stt?.mode || 'transcribe';
-    
+
+    vramMonitor.registerActivity();
     initSSE(res);
 
     if (sttMode === 'direct') {
@@ -242,12 +291,22 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
       textOrAudioPayload = await STTModule.transcribeBuffer(req.file.buffer, extension);
       sendSSE(res, { type: 'transcription', data: textOrAudioPayload });
     }
-    
+
+    if (activeControllers.has(chatId)) {
+      console.log(`[API] Aborting previous audio request for chat ${chatId}`);
+      activeControllers.get(chatId)!.abort();
+    }
+
     const controller = new AbortController();
-    req.on('close', () => {
-      if (!controller.signal.aborted) {
-        console.log('[API] Client disconnected — aborting audio stream.');
+    activeControllers.set(chatId, controller);
+
+    res.on('close', () => {
+      if (!controller.signal.aborted && !res.writableEnded) {
+        console.log(`[API] Client disconnected (${chatId}) — aborting audio stream.`);
         controller.abort();
+      }
+      if (activeControllers.get(chatId) === controller) {
+        activeControllers.delete(chatId);
       }
     });
 
@@ -277,16 +336,16 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
 
             const ttsText = ttsTextFor(userQuestion, chunk);
             if (ttsText.trim().length > 0) {
-               ttsQueue = ttsQueue.then(async () => {
-                  if (controller.signal.aborted) return;
-                  try {
-                     sendSSE(res, { type: 'thinking', data: 'Generating audio stream...' });
-                     const audioBuffer = await synthToBuffer(ttsText);
-                     if (audioBuffer && !controller.signal.aborted) {
-                        sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-                     }
-                  } catch(e) { console.error('[API] TTS chunk failed:', e); }
-               });
+              ttsQueue = ttsQueue.then(async () => {
+                if (controller.signal.aborted) return;
+                try {
+                  sendSSE(res, { type: 'thinking', data: 'Generating audio stream...' });
+                  const audioBuffer = await synthToBuffer(ttsText);
+                  if (audioBuffer && !controller.signal.aborted) {
+                    sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+                  }
+                } catch (e) { console.error('[API] TTS chunk failed:', e); }
+              });
             }
           }
         }
@@ -294,19 +353,19 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
         if (event.type === 'text_done' && event.data) {
           fullText = event.data;
           if (sentenceBuffer.trim().length > 0) {
-             const ttsText = ttsTextFor(userQuestion, sentenceBuffer);
-             if (ttsText.trim().length > 0) {
-               ttsQueue = ttsQueue.then(async () => {
-                  if (controller.signal.aborted) return;
-                  try {
-                     sendSSE(res, { type: 'thinking', data: 'Generating final audio...' });
-                     const audioBuffer = await synthToBuffer(ttsText);
-                     if (audioBuffer && !controller.signal.aborted) {
-                        sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-                     }
-                  } catch(e) { console.error('[API] TTS chunk failed:', e); }
-               });
-             }
+            const ttsText = ttsTextFor(userQuestion, sentenceBuffer);
+            if (ttsText.trim().length > 0) {
+              ttsQueue = ttsQueue.then(async () => {
+                if (controller.signal.aborted) return;
+                try {
+                  sendSSE(res, { type: 'thinking', data: 'Generating final audio...' });
+                  const audioBuffer = await synthToBuffer(ttsText);
+                  if (audioBuffer && !controller.signal.aborted) {
+                    sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+                  }
+                } catch (e) { console.error('[API] TTS chunk failed:', e); }
+              });
+            }
           }
           await ttsQueue; // Wait for all chunks to finish
         }
@@ -324,6 +383,10 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
       res.end();
     }
 
+    if (activeControllers.get(chatId) === controller) {
+      activeControllers.delete(chatId);
+    }
+
   } catch (error: any) {
     console.error('[API] Error in /chat/audio:', error);
     if (!res.headersSent) {
@@ -338,12 +401,12 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
 // 1.5. Text -> Think -> Speak Loop via SSE Stream
 app.post('/chat/text', async (req, res) => {
   try {
-    const { text } = req.body;
+    const { text, chatId = 'default' } = req.body;
     if (!text) {
       return res.status(400).json({ error: 'Text input is required' });
     }
 
-    await handleStreamingChat(req, res, text);
+    await handleStreamingChat(req, res, text, chatId);
 
   } catch (error: any) {
     console.error('[API] Error in /chat/text:', error);
@@ -359,7 +422,7 @@ app.post('/listen', upload.single('audio'), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: 'No audio file uploaded' });
     }
-    const extension = req.file.originalname.includes('.') 
+    const extension = req.file.originalname.includes('.')
       ? req.file.originalname.substring(req.file.originalname.lastIndexOf('.'))
       : '.wav';
     const text = await STTModule.transcribeBuffer(req.file.buffer, extension);
@@ -376,14 +439,14 @@ app.post('/speak', async (req, res) => {
     if (!text) {
       return res.status(400).json({ error: 'Text is required' });
     }
-    
+
     // Engine defaults to config inside TTSSwitcher
     const audio = await TTSModule.synthesize(text, voice);
     const tempFilePath = path.join(os.tmpdir(), `tts-${Date.now()}.wav`);
     await audio.save(tempFilePath);
-    
+
     res.sendFile(tempFilePath, async (err) => {
-      await fs.unlink(tempFilePath).catch(() => {});
+      await fs.unlink(tempFilePath).catch(() => { });
     });
   } catch (error: any) {
     res.status(500).json({ error: 'Synthesis failed', details: error.message });
@@ -575,9 +638,14 @@ app.delete('/chats/:id', async (req, res) => {
   }
 });
 
-app.post('/chat/reset', (req, res) => {
-  agent.clearHistory();
-  res.json({ success: true, message: 'Conversation history cleared.' });
+app.post('/chat/reset', async (req, res) => {
+  await agent.clearHistory();
+  try {
+    const cacheDir = path.join(process.cwd(), 'workspace', 'cache');
+    await fs.rm(cacheDir, { recursive: true, force: true }).catch(() => { });
+    await fs.mkdir(cacheDir, { recursive: true }).catch(() => { });
+  } catch (e) { }
+  res.json({ success: true, message: 'Conversation history and vision cache cleared.' });
 });
 
 app.get('/chat/history', (req, res) => {
@@ -744,6 +812,133 @@ app.delete('/channels/:type', async (req, res) => {
   res.json({ success: true });
 });
 
+app.get('/channels/status', (req, res) => {
+  res.json({ channels: channelInputManager.getStatus() });
+});
+
+app.post('/channels/:type/start', async (req, res) => {
+  try {
+    await channelInputManager.startChannel(req.params.type);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/channels/:type/stop', async (req, res) => {
+  try {
+    await channelInputManager.stopChannel(req.params.type);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/channels/test-message', async (req, res) => {
+  try {
+    const { channelType, recipientId, message } = req.body;
+    if (!channelType || !recipientId || !message) {
+      return res.status(400).json({ error: 'channelType, recipientId, and message required' });
+    }
+    const result = await deliverToChannel(channelType, message, { to_number: recipientId, channel_id: recipientId, chat_id: recipientId });
+    res.json({ success: result.startsWith('✅'), result });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── 8.5 Pairing API ──────────────────────────────────────────────────────────
+
+app.get('/channels/pairings/pending', (req, res) => {
+  res.json({ pairings: channelInputManager.getPendingPairings() });
+});
+
+app.post('/channels/pairings/approve', (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'code required' });
+  const success = channelInputManager.approvePairing(code);
+  res.json({ success });
+});
+
+app.post('/channels/pairings/reject', (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'code required' });
+  const success = channelInputManager.rejectPairing(code);
+  res.json({ success });
+});
+
+app.post('/channels/pairings/revoke', async (req, res) => {
+  const { channelType, senderId } = req.body;
+  if (!channelType || !senderId) return res.status(400).json({ error: 'channelType and senderId required' });
+  const config = configManager.getConfig();
+  if (config.approved_senders && config.approved_senders[channelType]) {
+    config.approved_senders[channelType] = config.approved_senders[channelType].filter(id => id !== senderId);
+    await configManager.updateConfig({ approved_senders: config.approved_senders });
+  }
+  res.json({ success: true });
+});
+
+app.get('/channels/pairings/approved', (req, res) => {
+  const config = configManager.getConfig();
+  res.json({ approved: config.approved_senders || {} });
+});
+
+// ── 8.6 Webhook Endpoints for Inputs ──────────────────────────────────────────
+
+app.get('/channels/whatsapp/status', (req, res) => {
+  const qr = (global as any).__whatsappQR;
+  const connected = (global as any).__whatsappConnected || false;
+  res.json({ qr: qr || null, connected });
+});
+
+app.post('/channels/whatsapp/reset', async (req, res) => {
+  try {
+    await channelInputManager.stopChannel('whatsapp');
+    const authDir = path.join(process.cwd(), 'workspace', 'whatsapp_auth');
+    
+    // Give file locks time to be released by Baileys
+    await new Promise(r => setTimeout(r, 1500));
+    
+    try {
+      await fs.rm(authDir, { recursive: true, force: true });
+    } catch(err) {
+      console.log('[API] First attempt to remove whatsapp_auth failed, retrying...');
+      await new Promise(r => setTimeout(r, 1500));
+      await fs.rm(authDir, { recursive: true, force: true }).catch(console.error);
+    }
+    
+    (global as any).__whatsappQR = null;
+    (global as any).__whatsappConnected = false;
+    
+    await channelInputManager.startChannel('whatsapp');
+    res.json({ success: true });
+  } catch(e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/channels/slack/webhook', async (req, res) => {
+  const onMsg = (global as any).__slackOnMessage;
+  if (!onMsg) return res.status(503).send('Slack input disabled.');
+
+  const { type, challenge, event } = req.body;
+  if (type === 'url_verification') return res.json({ challenge });
+
+  if (event?.type === 'message' && !event.bot_id) {
+    onMsg({
+      channelType: 'slack',
+      senderId: event.channel,
+      senderName: event.user || 'User',
+      text: event.text,
+      replyFn: async (text: string) => {
+        await deliverToChannel('slack', text, { channel_id: event.channel });
+      }
+    });
+  }
+  res.status(200).send();
+});
+
+
 // ── 9. Pipelines API ─────────────────────────────────────────────────────────
 
 import { loadPipelines as loadPipes, savePipelines as savePipes, loadHistory, runPipeline } from '../pipeline/pipeline-engine';
@@ -800,14 +995,200 @@ app.post('/notifications/read', async (req, res) => {
   res.json({ success: true });
 });
 
+// ── 11. Evolution Pipeline API ───────────────────────────────────────────────
+
+app.post('/evolution/harvest', async (_req, res) => {
+  try {
+    const result = await evolutionService.harvestWorkspace();
+    res.json({ success: true, ...result });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/evolution/stats', async (_req, res) => {
+  try {
+    const stats = await evolutionService.getStats();
+    res.json(stats);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/evolution/queue', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const result = await evolutionService.getReviewQueue(page, limit);
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/evolution/queue/:id/approve', async (req, res) => {
+  try {
+    const ok = await evolutionService.approveSample(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Sample not found' });
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/evolution/queue/:id/reject', async (req, res) => {
+  try {
+    const ok = await evolutionService.rejectSample(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Sample not found' });
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/evolution/queue/batch-approve', async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !Array.isArray(ids)) return res.status(400).json({ error: 'ids array required' });
+    const count = await evolutionService.approveBatch(ids);
+    res.json({ success: true, approved: count });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/evolution/queue/batch-reject', async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !Array.isArray(ids)) return res.status(400).json({ error: 'ids array required' });
+    const count = await evolutionService.rejectBatch(ids);
+    res.json({ success: true, rejected: count });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/evolution/train', async (_req, res) => {
+  try {
+    const run = await evolutionService.startTraining();
+    res.json({ success: true, run });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/evolution/training-status', (_req, res) => {
+  const status = evolutionService.getTrainingStatus();
+  res.json({ training: status });
+});
+
+app.get('/evolution/vram', async (_req, res) => {
+  try {
+    const vram = await evolutionService.checkVRAMGuard();
+    res.json(vram);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/evolution/models', async (_req, res) => {
+  try {
+    const models = await evolutionService.listEvolvedModels();
+    res.json({ models });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/evolution/models/:version/activate', async (req, res) => {
+  try {
+    const ok = await evolutionService.activateEvolvedModel(req.params.version);
+    if (!ok) return res.status(404).json({ error: 'Model version not found' });
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/evolution/models/rollback', async (_req, res) => {
+  try {
+    const ok = await evolutionService.rollbackToBase();
+    if (!ok) return res.status(404).json({ error: 'No base model found to rollback to' });
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/evolution/reset', async (req, res) => {
+  try {
+    const keepVerified = req.query.keepVerified === 'true';
+    await evolutionService.resetHarvest({ keepVerified });
+    res.json({ success: true, keepVerified });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 export const startServer = async (port: number = 3000) => {
   const fsServerPath = path.join(process.cwd(), "src", "mcp-servers", "tools", "filesystem.ts");
   const memoryServerPath = path.join(process.cwd(), "src", "mcp-servers", "memory", "index.ts");
-  
+
+  // Initialize local tools first
   await agent.initialize([fsServerPath, memoryServerPath]);
+
+  const mcp = agent.getMcpManager();
+
+  // 1. [GitHub]
+  if (process.env.GITHUB_PERSONAL_ACCESS_TOKEN) {
+    console.log('[API] Initializing GitHub MCP Server...');
+    await mcp.connectLocalServer('github', '', {
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-github'],
+      env: { GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_PERSONAL_ACCESS_TOKEN }
+    });
+  }
+
+  // 2. [Gmail]
+  if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REFRESH_TOKEN) {
+    console.log('[API] Initializing Gmail MCP Server...');
+    await mcp.connectLocalServer('gmail', '', {
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-gmail'],
+      env: {
+        GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+        GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+        GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN
+      }
+    });
+  }
+
+  // 3. [Google Cloud / Products]
+  if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+    console.log('[API] Initializing Google Cloud MCP Server...');
+    await mcp.connectLocalServer('google-cloud', '', {
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-google-cloud'],
+      env: {
+        GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+        GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET
+      }
+    });
+  }
+
+  // Re-load tools to include newly connected servers
+  await mcp.loadTools();
+
+  // ── Start the channel input manager ────────────────────────────────────────
+  channelInputManager.setAgent(agent);
+  await channelInputManager.startAll();
 
   // ── Start the pipeline engine ticker ────────────────────────────────────────
   startPipelineTicker();
+
+  // ── Start the evolution scheduler ────────────────────────────────────────────
+  evolutionScheduler.start();
+
 
   app.listen(port, () => {
     console.log(`[API] Server is running on port ${port}`);
