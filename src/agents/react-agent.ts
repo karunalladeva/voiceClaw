@@ -16,6 +16,7 @@ import { modelRegistry } from '../models/model-registry';
 import { modelRouter } from '../models/model-router';
 import { learningEngine } from './learning-engine';
 import { cache } from '../utils/cache';
+import { agentEvents } from '../admin/agent-events';
 
 
 import { historyManager } from './agent-history';
@@ -36,6 +37,106 @@ export class ReactAgent {
   private static readonly MAX_HISTORY_TURNS = 3;
 
   private static readonly MAX_HISTORY_TOKENS = 8000; // ~32k characters (Standard for Mistral/Llama3/Qwen)
+  private static readonly MAX_CONTEXT_CHARS = 18000;
+  private activeSkillExecutions = 0;
+  private queuedSkillExecutions = 0;
+  private totalQueuedSkillExecutions = 0;
+  private totalSkillQueueTimeouts = 0;
+  private skillQueue: Array<{
+    priority: number;
+    enqueuedAt: number;
+    resolve: (release: () => void) => void;
+    reject: (error: Error) => void;
+    signal?: AbortSignal;
+    timeoutHandle: ReturnType<typeof setTimeout>;
+  }> = [];
+
+  private getSkillConcurrencyConfig(): { maxParallelSkills: number; timeoutMs: number } {
+    const cfg = configManager.getConfig().agent || ({} as any);
+    const maxParallelSkills = Math.max(1, Number(cfg.maxParallelSkills ?? 2));
+    const timeoutMs = Math.max(1000, Number(cfg.skillQueueTimeoutMs ?? 30000));
+    return { maxParallelSkills, timeoutMs };
+  }
+
+  private mapSkillPriority(priority?: 'background' | 'normal' | 'interactive'): number {
+    if (priority === 'interactive') return 2;
+    if (priority === 'background') return 0;
+    return 1;
+  }
+
+  private drainSkillQueue(): void {
+    const { maxParallelSkills } = this.getSkillConcurrencyConfig();
+    if (this.activeSkillExecutions >= maxParallelSkills || this.skillQueue.length === 0) return;
+    this.skillQueue.sort((a, b) => {
+      if (b.priority !== a.priority) return b.priority - a.priority;
+      return a.enqueuedAt - b.enqueuedAt;
+    });
+    const next = this.skillQueue.shift();
+    if (!next) return;
+    clearTimeout(next.timeoutHandle);
+    if (next.signal?.aborted) {
+      this.queuedSkillExecutions = Math.max(0, this.queuedSkillExecutions - 1);
+      next.reject(new Error('Skill execution aborted while waiting for queue slot.'));
+      this.drainSkillQueue();
+      return;
+    }
+    this.queuedSkillExecutions = Math.max(0, this.queuedSkillExecutions - 1);
+    this.activeSkillExecutions += 1;
+    next.resolve(() => {
+      this.activeSkillExecutions = Math.max(0, this.activeSkillExecutions - 1);
+      this.drainSkillQueue();
+    });
+  }
+
+  private async acquireSkillSlot(
+    priority: 'background' | 'normal' | 'interactive' = 'normal',
+    signal?: AbortSignal,
+  ): Promise<() => void> {
+    const { maxParallelSkills, timeoutMs } = this.getSkillConcurrencyConfig();
+    if (this.activeSkillExecutions < maxParallelSkills && this.skillQueue.length === 0) {
+      this.activeSkillExecutions += 1;
+      return () => {
+        this.activeSkillExecutions = Math.max(0, this.activeSkillExecutions - 1);
+        this.drainSkillQueue();
+      };
+    }
+
+    this.queuedSkillExecutions += 1;
+    this.totalQueuedSkillExecutions += 1;
+
+    return new Promise<() => void>((resolve, reject) => {
+      const enqueuedAt = Date.now();
+      const queuedItem = {
+        priority: this.mapSkillPriority(priority),
+        enqueuedAt,
+        resolve,
+        reject,
+        signal,
+        timeoutHandle: setTimeout(() => {
+          const idx = this.skillQueue.indexOf(queuedItem);
+          if (idx >= 0) this.skillQueue.splice(idx, 1);
+          this.queuedSkillExecutions = Math.max(0, this.queuedSkillExecutions - 1);
+          this.totalSkillQueueTimeouts += 1;
+          reject(new Error(`Skill queue timeout after ${timeoutMs}ms.`));
+        }, timeoutMs),
+      };
+      this.skillQueue.push(queuedItem);
+      this.drainSkillQueue();
+    });
+  }
+
+  getRuntimeMetrics() {
+    return {
+      activeSkillExecutions: this.activeSkillExecutions,
+      queuedSkillExecutions: this.queuedSkillExecutions,
+      totalQueuedSkillExecutions: this.totalQueuedSkillExecutions,
+      totalSkillQueueTimeouts: this.totalSkillQueueTimeouts,
+      queuedInteractive: this.skillQueue.filter((q) => q.priority === 2).length,
+      queuedNormal: this.skillQueue.filter((q) => q.priority === 1).length,
+      queuedBackground: this.skillQueue.filter((q) => q.priority === 0).length,
+      ...this.getSkillConcurrencyConfig(),
+    };
+  }
 
 
 
@@ -44,6 +145,21 @@ export class ReactAgent {
   private static readonly RESPONSE_CACHE_TTL = 2 * 60 * 1000; // 2 mins
 
 
+
+  private isTimeSensitiveQuery(query: string): boolean {
+    const timeWords = /\b(today|current|currently|now|latest|live|right now|at the moment|updated|newest|recent)\b/i;
+    const volatileTopics = /\b(price|rate|gold|silver|stock|crypto|weather|temperature|news|score|traffic|exchange|market)\b/i;
+    return timeWords.test(query) && volatileTopics.test(query);
+  }
+
+  private buildTemporalMemoryGuard(): string {
+    return `
+<memory_temporal_guard>
+Memories can be historical and may be outdated.
+If the user asks for current/today/latest values (especially prices, rates, weather, news, scores, market data), NEVER treat memory as live truth.
+Use a tool for fresh lookup, or clearly say live data is unavailable.
+</memory_temporal_guard>`;
+  }
 
   private getBaseSystemPrompt(): string {
     const config = configManager.getConfig();
@@ -60,6 +176,13 @@ If you need information or need to perform an action, use your tools.
 2. VOICE & PERSONALITY: You MUST understand and support SLANG, informal language, and cultural references fluently. Adapt your tone to match the user's level of formality. Never use bullet points in your final response.
 3. VISION ENTRITLEMENT (CRITICAL): You DO have access to the user's screen via the native JSON tool named "route_to_skill" (skillId: "screen-reader"). NEVER say you cannot see the screen or lack access. ALWAYS prioritize using the screen-reader skill if the context might be visible on their display.
 4. MEMORY INSTRUCTIONS: When the user tells you their preferences, goals, facts, or decisions, use the store_memory tool to save them for future reference. ALWAYS check provided memories first before asking for information.
+5. TEMPORAL ACCURACY: Memories may be old. For time-sensitive requests (today/current/latest prices, rates, weather, news, scores), do not answer from memory alone. Fetch fresh data with tools, or state that live data is unavailable.
+6. VOICE MINIMAL SUMMARY: When your natural-language answer is long (roughly more than a few minutes of speech), put the full detail first for the screen, then append exactly one block at the very end in this exact form (plain text inside, no markdown lists inside the block):
+<spoken_summary>
+Two to four short sentences with only the essentials for voice (example weather: place, condition, key numbers). No bullet points.
+</spoken_summary>
+Do not add this block for raw tool dumps, JSON-only results, or when the entire reply is already very short.
+7. USER-FIRST EXECUTION: Prioritize completing what the user asks with concrete action and minimal deflection. If a request is illegal, harmful, or violates safety boundaries, clearly state that constraint in one short sentence, refuse only the disallowed part, and offer the closest safe/legal alternative that still helps the user's goal.
 </rules>`;
   }
 
@@ -198,26 +321,65 @@ If you need information or need to perform an action, use your tools.
         description: `CRITICAL: Call this function directly! DO NOT use shell_exec or python. Route the request to a specialized skill agent. Available skill IDs: [${validSkills}]. Use this to read the screen or delegate tasks.`,
         schema: z.object({
           skillId: z.string().describe(`The exact ID of the skill to trigger. Must be one of: ${validSkills}`),
-          query: z.string().describe('The specific natural language instruction for the skill')
+          query: z.string().describe('The specific natural language instruction for the skill'),
+          priority: z.enum(['background', 'normal', 'interactive']).optional().describe('Queue priority for skill execution.'),
         }),
-        func: async ({ skillId, query }, runManager, config) => {
+        func: async ({ skillId, query, priority }, runManager, config) => {
           const skill = this.skillRegistry.getSkill(skillId);
           if (!skill || !skill.enabled) return `Skill ${skillId} not found or disabled.`;
 
+          const subAgentId = `skill-${skill.id}-${Date.now()}`;
+          const parentAgentId = (config as any)?.agentId || 'main';
+          const chatId = (config as any)?.chatId || 'default';
+
           console.log(`[Agent: Skill (${skill.name})] Executing nested sub-graph logic...`);
+          
+          agentEvents.emit('agent:spawned', {
+            agentId: subAgentId,
+            parentAgentId,
+            chatId,
+            skillId: skill.id,
+            skillName: skill.name,
+            input: query.substring(0, 100),
+          });
+
           let finalOutput = '';
+          let releaseSkillSlot: (() => void) | null = null;
+          const signal = (config as any)?.signal as AbortSignal | undefined;
 
           try {
-            // We use runStream natively. To prevent visual UI freezes, we map custom 'token' events 
-            // from the sub-graph onto the custom callback manager or stdout. 
-            // Full integration with LangGraph nested callback tracing handles context.
+            const queuePriority =
+              priority || (skill.id === 'screen-reader' ? 'interactive' : 'normal');
+            releaseSkillSlot = await this.acquireSkillSlot(queuePriority, signal);
+            agentEvents.emit('skill:started', {
+              agentId: subAgentId,
+              chatId,
+              skillId: skill.id,
+              skillName: skill.name,
+            });
+
             for await (const skillEvent of this.agentFactory.runStream(skill, query)) {
               if (skillEvent.type === 'text_done' || skillEvent.type === 'error') {
                 finalOutput = skillEvent.data;
               }
             }
+
+            agentEvents.emit('skill:completed', {
+              agentId: subAgentId,
+              chatId,
+              skillId: skill.id,
+              skillName: skill.name,
+              output: finalOutput.substring(0, 200),
+            });
           } catch (e: any) {
             finalOutput = `Skill crashed: ${e.message}`;
+            agentEvents.emit('agent:error', {
+              agentId: subAgentId,
+              chatId,
+              error: e.message,
+            });
+          } finally {
+            if (releaseSkillSlot) releaseSkillSlot();
           }
 
           return `[Sub-Agent Result from ${skill.name}]:\n${finalOutput || 'No text output produced.'}`;
@@ -341,6 +503,7 @@ If you need information or need to perform an action, use your tools.
     if (!this.isMemoryEnabled()) return base;
 
     const query = typeof input === 'string' ? input.trim().toLowerCase() : 'general user context';
+    const isTimeSensitive = this.isTimeSensitiveQuery(query);
 
     // ── Memory Relevance Optimization ──────────────────────────────────────
     // Don't pollute context with past memories for extremely short fillers
@@ -356,7 +519,8 @@ If you need information or need to perform an action, use your tools.
     const cached = await cache.get(cacheKey);
     if (cached) {
       console.log('[ReAct Agent] Injecting cached memories into context.');
-      return base + (cached ? `\n\n<memory>\n${cached}\n</memory>` : '');
+      const memoryBlock = cached ? `\n\n<memory>\n${cached}\n</memory>` : '';
+      return base + memoryBlock + (isTimeSensitive ? this.buildTemporalMemoryGuard() : '');
     }
 
     try {
@@ -364,7 +528,7 @@ If you need information or need to perform an action, use your tools.
       await cache.set(cacheKey, memories || '', ReactAgent.MEMORY_CACHE_TTL);
       if (memories) {
         console.log('[ReAct Agent] Injecting fresh memories into context.');
-        return base + `\n\n<memory>\n${memories}\n</memory>`;
+        return base + `\n\n<memory>\n${memories}\n</memory>` + (isTimeSensitive ? this.buildTemporalMemoryGuard() : '');
       }
     } catch { /* memory unavailable, store empty result to avoid retry spam */
       await cache.set(cacheKey, '', ReactAgent.MEMORY_CACHE_TTL);
@@ -434,6 +598,33 @@ If you need information or need to perform an action, use your tools.
     await historyManager.saveChat(chatId, typeof humanInput === 'string' ? humanInput : undefined);
   }
 
+  private selectContextMessages(thread: BaseMessage[], input: string | any): BaseMessage[] {
+    const inputSize = typeof input === 'string' ? input.length : 300;
+    const budget = Math.max(6000, ReactAgent.MAX_CONTEXT_CHARS - inputSize);
+    const selected: BaseMessage[] = [];
+    let used = 0;
+
+    const summaryMessages = thread.filter(
+      (m) => m.getType() === 'system' && m.content.toString().startsWith('[Conversation Summary]:'),
+    );
+    for (const s of summaryMessages.slice(-1)) {
+      selected.push(s);
+      used += s.content.toString().length;
+    }
+
+    for (let i = thread.length - 1; i >= 0; i--) {
+      const msg = thread[i];
+      const isSummary = msg.getType() === 'system' && msg.content.toString().startsWith('[Conversation Summary]:');
+      if (isSummary) continue;
+      const content = msg.content?.toString?.() ?? '';
+      if ((used + content.length) > budget) break;
+      selected.unshift(msg);
+      used += content.length;
+    }
+
+    return selected;
+  }
+
 
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -459,10 +650,11 @@ If you need information or need to perform an action, use your tools.
     try {
       const systemPrompt = await this.buildSystemPromptWithMemory(input);
       const thread = await historyManager.loadChat(chatId);
+      const contextMessages = this.selectContextMessages(thread, input);
       const result = await this.graph.invoke({
         messages: [
           new SystemMessage(systemPrompt),
-          ...thread,
+          ...contextMessages,
           new HumanMessage({ content: input }),
         ],
       }, { recursionLimit: 100 });
@@ -500,6 +692,17 @@ If you need information or need to perform an action, use your tools.
   // ── Streaming process ──────────────────────────────────────────────────────
 
   async *processStream(input: string | any, chatId: string = 'default', signal?: AbortSignal): AsyncGenerator<StreamEvent> {
+    const agentId = `${chatId}-${Date.now()}`;
+    const startTime = Date.now();
+    const inputStr = typeof input === 'string' ? input : '[audio/multimodal input]';
+    
+    agentEvents.emit('agent:started', {
+      chatId,
+      agentId,
+      input: inputStr.substring(0, 200),
+      modelId: this.activeModelId,
+    });
+
     const rawKey = typeof input === 'string' ? input.trim().toLowerCase() : '[audio]';
     const numTurns = await historyManager.getHistoryLength(chatId);
     const cacheKey = `resp:${rawKey}|hist:${numTurns}|chat:${chatId}`;
@@ -507,12 +710,13 @@ If you need information or need to perform an action, use your tools.
 
     if (cachedResponse) {
       console.log(`[ReAct Agent] Cache hit for: "${rawKey}"`);
+      agentEvents.emit('system:log', { chatId, agentId, level: 'info', message: `Cache hit for: "${rawKey.substring(0, 50)}"` });
       yield { type: 'thinking', data: 'Retrieving cached response…' };
-      // Stream cached response in chunks to simulate real streaming speed
       const tokens = cachedResponse.split(' ');
       for (const token of tokens) {
         yield { type: 'token', data: token + ' ' };
       }
+      agentEvents.emit('agent:completed', { chatId, agentId, duration: Date.now() - startTime, output: cachedResponse.substring(0, 200) });
       yield { type: 'text_done', data: cachedResponse };
       return;
     }
@@ -520,6 +724,7 @@ If you need information or need to perform an action, use your tools.
 
     const modelId = this.activeModelId;
     console.log(`[Agent: ReAct] [Model: ${modelId}] Streaming response for input…`);
+    agentEvents.emit('model:loading', { chatId, agentId, modelId });
 
     const cfg = configManager.getConfig().learning ?? {};
 
@@ -609,10 +814,11 @@ If you need information or need to perform an action, use your tools.
           : '';
 
         const threadMsgs = await historyManager.loadChat(chatId);
+        const contextMessages = this.selectContextMessages(threadMsgs, input);
         const inputMessages = {
           messages: [
             new SystemMessage(systemPrompt + retryPrefix),
-            ...threadMsgs,
+            ...contextMessages,
             new HumanMessage({ content: processedInput }),
           ],
         };
@@ -626,19 +832,24 @@ If you need information or need to perform an action, use your tools.
         let toolWasCalled = false;
         const stream = this.graph.streamEvents(inputMessages, { version: 'v2', signal, recursionLimit: 100 });
 
+        agentEvents.emit('model:inference_start', { chatId, agentId, modelId: this.activeModelId });
+
         for await (const event of stream) {
           if (signal?.aborted) {
             console.log('[ReAct Agent] Stream aborted by client.');
+            agentEvents.emit('agent:error', { chatId, agentId, error: 'Aborted by client' });
             return;
           }
 
           if (event.event === 'on_chat_model_stream') {
             const chunk = event.data?.chunk;
 
-            // Stream 'thinking' capability if model provides reasoning natively
             if (chunk?.additional_kwargs?.reasoning_content) {
               const thought = chunk.additional_kwargs.reasoning_content.toString();
-              if (thought) yield { type: 'thinking', data: thought };
+              if (thought) {
+                // agentEvents.emit('agent:thinking', { chatId, agentId, message: thought.substring(0, 100) });
+                yield { type: 'thinking', data: thought };
+              }
             }
 
             const hasToolCallChunks = chunk?.tool_call_chunks?.length > 0;
@@ -655,15 +866,16 @@ If you need information or need to perform an action, use your tools.
                   inThinkingBlock = false;
                   const parts = token.split('</think>');
                   thinkingBuffer += parts[0];
+                  // agentEvents.emit('agent:thinking', { chatId, agentId, message: thinkingBuffer.substring(0, 100) });
                   yield { type: 'thinking', data: thinkingBuffer.trim() };
-                  thinkingBuffer = ''; // reset
+                  thinkingBuffer = '';
                   if (parts[1]) {
                     fullText += parts[1];
+                    // agentEvents.emit('model:token', { chatId, agentId, token: parts[1] });
                     yield { type: 'token', data: parts[1] };
                   }
                 } else {
                   thinkingBuffer += token;
-                  // Periodically yield so UI knows it's thinking
                   if (thinkingBuffer.length % 20 === 0) {
                     yield { type: 'thinking', data: thinkingBuffer.substring(Math.max(0, thinkingBuffer.length - 80)).trim() + '...' };
                   }
@@ -671,29 +883,47 @@ If you need information or need to perform an action, use your tools.
               } else {
                 if (token) {
                   fullText += token;
+                  // agentEvents.emit('model:token', { chatId, agentId, token: token.substring(0, 20) });
                   yield { type: 'token', data: token };
                 }
               }
             }
           } else if (event.event === 'on_tool_start') {
             const modelId = this.activeModelId;
-            console.log(`[Agent: ReAct] [Model: ${modelId}] Tool call: ${event.name}`);
+            const toolName = event.name || 'unknown';
+            const toolStartTime = Date.now();
+            console.log(`[Agent: ReAct] [Model: ${modelId}] Tool call: ${toolName}`);
+
+            agentEvents.emit('tool:started', {
+              chatId,
+              agentId,
+              toolName,
+              toolArgs: event.data?.input,
+            });
 
             if (event.name === 'route_to_skill') {
               const toolInput = event.data?.input;
               const skill = this.skillRegistry.getSkill(toolInput?.skillId);
               if (skill?.enabled) {
                 console.log(`[Agent: Skill (${skill.name})] Routing to specialized skill natively...`);
+                agentEvents.emit('skill:routing', { chatId, agentId, skillId: skill.id, skillName: skill.name });
                 yield { type: 'thinking', data: `Delegating to Sub-Agent: ${skill.name}…` };
               }
             } else {
-              // Record all actual tool calls for potential Macro Extraction later
-              toolTrace.push({ tool: event.name || 'unknown', args: event.data?.input });
+              toolTrace.push({ tool: toolName, args: event.data?.input });
             }
 
             if (fullText) fullText = '';
-            yield { type: 'tool_call', data: event.name || 'unknown' };
+            yield { type: 'tool_call', data: toolName };
             toolWasCalled = true;
+          } else if (event.event === 'on_tool_end') {
+            const toolName = event.name || 'unknown';
+            agentEvents.emit('tool:completed', {
+              chatId,
+              agentId,
+              toolName,
+              toolResult: (event.data?.output || '').toString().substring(0, 200),
+            });
           }
 
         }
@@ -701,14 +931,15 @@ If you need information or need to perform an action, use your tools.
         // NO LONGER NEED parseSkillRoute HERE AS WE INTERCEPT IT ABOVE
 
         // Check if we should retry
-        if (attempt < maxRetries && learningEngine.shouldRetry(fullText)) {
+        const failureAssessment = learningEngine.assessFailure(fullText);
+        if (attempt < maxRetries && failureAssessment.shouldRetry) {
           const modelId = this.activeModelId;
-          console.log(`[Agent: ReAct] [Model: ${modelId}] Response indicates failure. Attempting to learn… (attempt ${attempt + 1}/${maxRetries})`);
+          console.log(`[Agent: ReAct] [Model: ${modelId}] Response indicates failure (${failureAssessment.failureType}). Attempting to recover… (attempt ${attempt + 1}/${maxRetries})`);
           attemptHistory.push({ attempt: attempt + 1, response: fullText });
 
 
           if (cfg.autoSkillCreate) {
-            yield { type: 'thinking', data: 'Learning from failure and creating a skill…' };
+            yield { type: 'thinking', data: `Learning from ${failureAssessment.failureType} and creating a skill…` };
             const inputStr = typeof input === 'string' ? input : '[audio input]';
             await learningEngine.createSkillFromFailure(inputStr, attemptHistory);
             // Reload learned skills so next attempt has updated context
@@ -720,6 +951,9 @@ If you need information or need to perform an action, use your tools.
 
         // Success path — commit history and auto-store
         console.log(`[ReAct Agent] Stream complete: "${fullText.substring(0, 80)}…"`);
+        
+        agentEvents.emit('model:inference_end', { chatId, agentId, modelId: this.activeModelId });
+        
         if (fullText) {
           await this.appendToHistory(chatId, input, fullText);
           const rawKey = typeof input === 'string' ? input.trim().toLowerCase() : '[audio]';
@@ -730,6 +964,7 @@ If you need information or need to perform an action, use your tools.
 
         if (cfg.autoMemoryStore && fullText) {
           learningEngine.autoExtractAndStore(input, fullText, this.mcpManager).catch(() => { });
+          agentEvents.emit('memory:stored', { chatId, agentId, message: 'Auto-extracted memory from conversation' });
         }
 
         if (cfg.autoMacroCreate && toolTrace.length > 0) {
@@ -739,15 +974,35 @@ If you need information or need to perform an action, use your tools.
           });
         }
 
+        agentEvents.emit('agent:completed', {
+          chatId,
+          agentId,
+          duration: Date.now() - startTime,
+          output: fullText.substring(0, 200),
+          toolCallCount: toolTrace.length,
+        });
+
         yield { type: 'text_done', data: fullText };
-        return; // Done — exit the retry loop
+        return;
       } catch (error: any) {
+        agentEvents.emit('agent:error', {
+          chatId,
+          agentId,
+          error: error.message || 'Unknown error',
+          duration: Date.now() - startTime,
+        });
         yield { type: 'error', data: this.handleError(error) };
         return;
       }
     }
 
     // All retries exhausted
+    agentEvents.emit('agent:completed', {
+      chatId,
+      agentId,
+      duration: Date.now() - startTime,
+      output: 'Retries exhausted',
+    });
     yield { type: 'text_done', data: 'I tried multiple approaches but could not complete your request. I have noted this for future learning.' };
   }
 

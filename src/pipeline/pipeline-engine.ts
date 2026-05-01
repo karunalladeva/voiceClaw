@@ -147,6 +147,8 @@ export async function runPipeline(pipeline: Pipeline): Promise<{ success: boolea
   console.log(`[Pipeline] ▶ Running "${pipeline.name}" (${pipeline.steps.length} steps)`);
   const outputs: StepResult[] = [];
   let context = '';
+  const pipelineRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  console.log(`[Pipeline] Run ID: ${pipelineRunId}`);
 
   for (let i = 0; i < pipeline.steps.length; i++) {
     const step = pipeline.steps[i];
@@ -161,7 +163,14 @@ export async function runPipeline(pipeline: Pipeline): Promise<{ success: boolea
 
     try {
       console.log(`[Pipeline]   Step ${i + 1}/${pipeline.steps.length}: ${step.type}`);
-      const result = await executor(step.config, context);
+      const stepConfig = {
+        ...(step.config || {}),
+        __pipelineId: pipeline.id,
+        __pipelineName: pipeline.name,
+        __pipelineRunId: pipelineRunId,
+        __pipelineStepIndex: i,
+      };
+      const result = await executor(stepConfig, context);
       outputs.push(result);
       context = result.output; // chain output → next step input
     } catch (err: any) {

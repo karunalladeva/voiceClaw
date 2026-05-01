@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
+import * as http from 'http';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import * as os from 'os';
@@ -18,6 +19,9 @@ import { channelInputManager } from '../pipeline/channel-input-manager';
 import { deliverToChannel } from '../pipeline/channels';
 import { evolutionService } from '../services/evolution-service';
 import { evolutionScheduler } from '../services/evolution-scheduler';
+import { setupAdminWebSocket, setupAdminRoutes } from '../admin/admin-server';
+import { agentEvents } from '../admin/agent-events';
+import { capSpeechPlain, selectPlainTextForTts } from '../utils/speech-for-tts';
 
 
 vramMonitor.startMonitoring();
@@ -29,59 +33,11 @@ const agent = new ReactAgent();
 // Global registry for Stop-and-Swap request interruption
 const activeControllers = new Map<string, AbortController>();
 
-/**
- * Max characters spoken aloud. Responses beyond this are trimmed to the
- * nearest sentence boundary — no LLM call needed, so TTS starts instantly.
- * The full text is still sent to the client for display.
- */
-const AUDIO_MAX_CHARS = 500;
-
-/**
- * Returns the text that should be spoken aloud.
- * Trims long responses to the nearest sentence end within AUDIO_MAX_CHARS.
- * This is instant — avoids a second LLM round-trip before TTS.
-/**
- * Strip markdown syntax so TTS reads clean natural text.
- * Handles: headers, bold, italic, code, bullets, links, horizontal rules.
- */
-function stripMarkdown(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, ' [Code provided on screen.] ') // Replace code blocks with spoken placeholder
-    .replace(/`([^`]+)`/g, '$1')         // Remove inline backticks but keep the text
-    .replace(/#{1,6}\s+/g, '')           // ## headings
-    .replace(/\*\*(.+?)\*\*/g, '$1')     // **bold**
-    .replace(/\*(.+?)\*/g, '$1')         // *italic*
-    .replace(/__(.+?)__/g, '$1')         // __bold__
-    .replace(/_(.+?)_/g, '$1')           // _italic_
-    .replace(/!\[.*?\]\(.*?\)/g, '')     // images
-    .replace(/\[(.+?)\]\(.*?\)/g, '$1') // [link text](url) → just the text
-    .replace(/^[-*+]\s+/gm, '')         // bullet points
-    .replace(/^\d+\.\s+/gm, '')         // numbered lists
-    .replace(/^-{3,}$/gm, '')           // horizontal rules ---
-    .replace(/>{1,}\s?/g, '')           // blockquotes >
-    .replace(/\s{2,}/g, ' ')            // collapse extra spaces
-    .trim();
-}
-
-function ttsTextFor(_userInput: string | any, fullText: string): string {
-  const plain = stripMarkdown(fullText);
-  if (plain.length === 0) {
-    return "I've displayed the information on your screen.";
-  }
-  if (plain.length <= AUDIO_MAX_CHARS) return plain;
-  
-  console.log(`[API] Response is ${plain.length} chars — trimming for audio.`);
-  const slice = plain.substring(0, AUDIO_MAX_CHARS);
-  const lastBreak = Math.max(
-    slice.lastIndexOf('. '),
-    slice.lastIndexOf('! '),
-    slice.lastIndexOf('? '),
-    slice.lastIndexOf('.\n'),
-  );
-  
-  const truncated = lastBreak > 80 ? slice.substring(0, lastBreak + 1).trim() : slice.trim();
-  // Append a spoken indicator so the user knows there is more on screen.
-  return `${truncated} I've placed the rest of the details on your screen.`;
+/** Build one final string for TTS from raw model answer (minimal summary block or full body, then char cap). */
+function buildFinalTtsText(rawAnswer: string): string {
+  const speech = configManager.getConfig().speech;
+  const plainSelected = selectPlainTextForTts(rawAnswer, speech);
+  return capSpeechPlain(plainSelected, speech.fallbackMaxChars, speech.truncationSuffix);
 }
 
 
@@ -164,9 +120,6 @@ async function handleStreamingChat(
   }, 5000);
 
   let fullText = '';
-  let sentenceBuffer = '';
-  let ttsQueue = Promise.resolve();
-  let ttsEpoch = 0;
 
   try {
     for await (const event of agent.processStream(input, chatId, controller.signal)) {
@@ -175,55 +128,22 @@ async function handleStreamingChat(
 
       sendSSE(res, event);
 
-      if (event.type === 'tool_call') {
-        sentenceBuffer = ''; // Discard pre-tool conversational filler
-        ttsEpoch++;          // Invalidate queued TTS tasks for the preamble
-      }
-
-      if (event.type === 'token') {
-        sentenceBuffer += event.data;
-        const match = sentenceBuffer.match(/([.!?]\s+|\n+)/);
-        if (match) {
-          const splitIndex = match.index! + match[0].length;
-          const chunk = sentenceBuffer.substring(0, splitIndex);
-          sentenceBuffer = sentenceBuffer.substring(splitIndex);
-
-          const ttsText = ttsTextFor(input, chunk);
-          if (ttsText.trim().length > 0) {
-            const currentEpoch = ttsEpoch;
-            ttsQueue = ttsQueue.then(async () => {
-              if (controller.signal.aborted || currentEpoch !== ttsEpoch) return;
-              try {
-                sendSSE(res, { type: 'thinking', data: 'Generating audio stream...' });
-                const audioBuffer = await synthToBuffer(ttsText);
-                if (audioBuffer && !controller.signal.aborted && currentEpoch === ttsEpoch) {
-                  sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-                }
-              } catch (e) { console.error('[API] TTS chunk failed:', e); }
-            });
-          }
-        }
-      }
-
       if (event.type === 'text_done' && event.data) {
         fullText = event.data;
-        if (sentenceBuffer.trim().length > 0) {
-          const ttsText = ttsTextFor(input, sentenceBuffer);
-          if (ttsText.trim().length > 0) {
-            const currentEpoch = ttsEpoch;
-            ttsQueue = ttsQueue.then(async () => {
-              if (controller.signal.aborted || currentEpoch !== ttsEpoch) return;
-              try {
-                sendSSE(res, { type: 'thinking', data: 'Generating final audio...' });
-                const audioBuffer = await synthToBuffer(ttsText);
-                if (audioBuffer && !controller.signal.aborted && currentEpoch === ttsEpoch) {
-                  sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-                }
-              } catch (e) { console.error('[API] TTS chunk failed:', e); }
-            });
+        if (!controller.signal.aborted && configManager.getConfig().speech.finalOnly) {
+          try {
+            const ttsText = buildFinalTtsText(fullText);
+            if (ttsText.trim().length > 0) {
+              sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
+              const audioBuffer = await synthToBuffer(ttsText);
+              if (audioBuffer && !controller.signal.aborted) {
+                sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+              }
+            }
+          } catch (e) {
+            console.error('[API] Final TTS failed:', e);
           }
         }
-        await ttsQueue; // Wait for all chunks to finish playing
       }
 
       if (event.type === 'error') {
@@ -311,14 +231,6 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
     });
 
     let fullText = '';
-    let sentenceBuffer = '';
-    let ttsQueue = Promise.resolve();
-
-    // For the summarization prompt we want the plain-text question, not raw
-    // audio bytes.  When STT is in direct mode the transcription isn't available,
-    // so we fall back to a generic label.
-    const userQuestion =
-      sttMode === 'direct' ? '[audio input]' : (textOrAudioPayload as string);
 
     try {
       for await (const event of agent.processStream(textOrAudioPayload, chatId, controller.signal)) {
@@ -326,48 +238,22 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
 
         sendSSE(res, event);
 
-        if (event.type === 'token') {
-          sentenceBuffer += event.data;
-          const match = sentenceBuffer.match(/([.!?]\s+|\n+)/);
-          if (match) {
-            const splitIndex = match.index! + match[0].length;
-            const chunk = sentenceBuffer.substring(0, splitIndex);
-            sentenceBuffer = sentenceBuffer.substring(splitIndex);
-
-            const ttsText = ttsTextFor(userQuestion, chunk);
-            if (ttsText.trim().length > 0) {
-              ttsQueue = ttsQueue.then(async () => {
-                if (controller.signal.aborted) return;
-                try {
-                  sendSSE(res, { type: 'thinking', data: 'Generating audio stream...' });
-                  const audioBuffer = await synthToBuffer(ttsText);
-                  if (audioBuffer && !controller.signal.aborted) {
-                    sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-                  }
-                } catch (e) { console.error('[API] TTS chunk failed:', e); }
-              });
-            }
-          }
-        }
-
         if (event.type === 'text_done' && event.data) {
           fullText = event.data;
-          if (sentenceBuffer.trim().length > 0) {
-            const ttsText = ttsTextFor(userQuestion, sentenceBuffer);
-            if (ttsText.trim().length > 0) {
-              ttsQueue = ttsQueue.then(async () => {
-                if (controller.signal.aborted) return;
-                try {
-                  sendSSE(res, { type: 'thinking', data: 'Generating final audio...' });
-                  const audioBuffer = await synthToBuffer(ttsText);
-                  if (audioBuffer && !controller.signal.aborted) {
-                    sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-                  }
-                } catch (e) { console.error('[API] TTS chunk failed:', e); }
-              });
+          if (!controller.signal.aborted && configManager.getConfig().speech.finalOnly) {
+            try {
+              const ttsText = buildFinalTtsText(fullText);
+              if (ttsText.trim().length > 0) {
+                sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
+                const audioBuffer = await synthToBuffer(ttsText);
+                if (audioBuffer && !controller.signal.aborted) {
+                  sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+                }
+              }
+            } catch (e) {
+              console.error('[API] Final TTS failed:', e);
             }
           }
-          await ttsQueue; // Wait for all chunks to finish
         }
 
         if (event.type === 'error') fullText = event.data;
@@ -525,7 +411,17 @@ app.get('/skills/learned', async (req, res) => {
   try {
     const { learningEngine } = await import('../agents/learning-engine');
     const skills = await learningEngine.listLearnedSkills();
-    res.json({ skills: skills.map(s => ({ name: s.name, description: s.description, content: s.content })) });
+    res.json({
+      skills: skills.map(s => {
+        const stageMatch = s.content.match(/^stage:\s*(draft|validated|enabled)\s*$/m);
+        return {
+          name: s.name,
+          description: s.description,
+          content: s.content,
+          stage: stageMatch?.[1] || 'draft',
+        };
+      }),
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -537,6 +433,19 @@ app.delete('/skills/learned/:name', async (req, res) => {
     const ok = await learningEngine.deleteLearnedSkill(req.params.name);
     if (ok) { res.json({ success: true }); }
     else { res.status(404).json({ error: 'Skill not found' }); }
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/skills/learned/:name/promote', async (req, res) => {
+  try {
+    const { learningEngine } = await import('../agents/learning-engine');
+    const stage = req.body?.stage === 'enabled' ? 'enabled' : 'validated';
+    const ok = await learningEngine.promoteLearnedSkill(req.params.name, stage);
+    if (!ok) return res.status(404).json({ error: 'Skill not found in promotable stage' });
+    await agent.getSkillRegistry().loadLearnedSkills();
+    res.json({ success: true, stage });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -692,8 +601,25 @@ app.delete('/memory/:id', async (req, res) => {
   }
 });
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+app.get('/health', (_req, res) => {
+  const mem = process.memoryUsage();
+  res.json({
+    status: 'ok',
+    uptimeSec: Math.floor(process.uptime()),
+    memory: {
+      rssMb: Math.round(mem.rss / (1024 * 1024)),
+      heapUsedMb: Math.round(mem.heapUsed / (1024 * 1024)),
+      heapTotalMb: Math.round(mem.heapTotal / (1024 * 1024)),
+    },
+  });
+});
+
+app.get('/metrics', (_req, res) => {
+  res.json({
+    agentEvents: agentEvents.getStats(),
+    runtime: agent.getRuntimeMetrics(),
+    mcp: agent.getMcpManager().getStats(),
+  });
 });
 
 // 8. Multi-model Management API ──────────────────────────────────────────────
@@ -1133,9 +1059,11 @@ app.delete('/evolution/reset', async (req, res) => {
 export const startServer = async (port: number = 3000) => {
   const fsServerPath = path.join(process.cwd(), "src", "mcp-servers", "tools", "filesystem.ts");
   const memoryServerPath = path.join(process.cwd(), "src", "mcp-servers", "memory", "index.ts");
+  const marketServerPath = path.join(process.cwd(), "src", "mcp-servers", "market", "index.ts");
+  const chromaServerPath = path.join(process.cwd(), "src", "mcp-servers", "chromadb", "index.ts");
 
   // Initialize local tools first
-  await agent.initialize([fsServerPath, memoryServerPath]);
+  await agent.initialize([fsServerPath, memoryServerPath, marketServerPath, chromaServerPath]);
 
   const mcp = agent.getMcpManager();
 
@@ -1189,9 +1117,44 @@ export const startServer = async (port: number = 3000) => {
   // ── Start the evolution scheduler ────────────────────────────────────────────
   evolutionScheduler.start();
 
+  // ── Setup Admin Dashboard Routes ────────────────────────────────────────────
+  setupAdminRoutes(app);
 
-  app.listen(port, () => {
+  // ── Create HTTP Server and attach WebSocket ─────────────────────────────────
+  const server = http.createServer(app);
+  setupAdminWebSocket(server);
+
+  server.listen(port, () => {
     console.log(`[API] Server is running on port ${port}`);
     console.log(`[API] Health check: http://localhost:${port}/health`);
+    console.log(`[API] Admin Dashboard: http://localhost:${port}/admin`);
+    agentEvents.log('info', `Server started on port ${port}`);
   });
+
+  process.on('unhandledRejection', (reason: any) => {
+    const msg = reason?.message || String(reason);
+    console.error('[API] Unhandled rejection:', reason);
+    agentEvents.log('error', `Unhandled rejection: ${msg}`);
+  });
+
+  process.on('uncaughtException', (error: any) => {
+    console.error('[API] Uncaught exception:', error);
+    agentEvents.log('error', `Uncaught exception: ${error?.message || String(error)}`);
+  });
+
+  const gracefulShutdown = (signal: string) => {
+    console.log(`[API] Received ${signal}. Shutting down gracefully...`);
+    agentEvents.log('info', `Received ${signal}; graceful shutdown started.`);
+    server.close(() => {
+      console.log('[API] HTTP server closed.');
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.warn('[API] Force exit after shutdown timeout.');
+      process.exit(1);
+    }, 10000).unref();
+  };
+
+  process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.once('SIGINT', () => gracefulShutdown('SIGINT'));
 };

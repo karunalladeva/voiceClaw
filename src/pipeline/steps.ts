@@ -8,6 +8,13 @@ import { registerStep, StepResult } from './pipeline-engine';
 import { deliverToChannel } from './channels';
 import { historyManager } from '../agents/agent-history';
 
+function buildPipelineScopedChatId(config: Record<string, any>, suffix: string): string {
+  if (config.chat_id) return config.chat_id;
+  const pipelineId = String(config.__pipelineId || 'pipeline');
+  const runId = String(config.__pipelineRunId || 'run');
+  return `pipeline:${pipelineId}:run:${runId}:${suffix}`;
+}
+
 // ── ai_task: Run a prompt through the main agent ──────────────────────────────
 
 registerStep('ai_task', async (config, context): Promise<StepResult> => {
@@ -21,9 +28,10 @@ registerStep('ai_task', async (config, context): Promise<StepResult> => {
     const { ReactAgent } = await import('../agents/react-agent');
     const agent = new ReactAgent();
     await agent.initialize([]);
+    const chatId = buildPipelineScopedChatId(config, 'ai_task');
 
     let result = '';
-    for await (const event of agent.processStream(fullPrompt, config.chat_id || 'pipeline', new AbortController().signal)) {
+    for await (const event of agent.processStream(fullPrompt, chatId, new AbortController().signal)) {
       if (event.type === 'text_done') result = event.data;
     }
     return { success: true, output: result || 'No response from agent.' };
@@ -46,7 +54,7 @@ registerStep('research', async (config, context): Promise<StepResult> => {
       .slice(0, config.max_results || 5)
       .map((r: any, i: number) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description}`)
       .join('\n\n');
-    return { success: true, output: snippets || 'No results found.', data: results.results };
+    return { success: true, output: snippets || '', data: results.results };
   } catch (e: any) {
     return { success: false, output: `Research failed: ${e.message}` };
   }
@@ -100,11 +108,12 @@ registerStep('summarize', async (config, context): Promise<StepResult> => {
     const { ReactAgent } = await import('../agents/react-agent');
     const agent = new ReactAgent();
     await agent.initialize([]);
+    const chatId = buildPipelineScopedChatId(config, 'summarize');
 
     let result = '';
     for await (const event of agent.processStream(
       `${prompt}\n\n${context.substring(0, 8000)}`,
-      'pipeline-summarize',
+      chatId,
       new AbortController().signal
     )) {
       if (event.type === 'text_done') result = event.data;
@@ -139,9 +148,10 @@ registerStep('generate_doc', async (config, context): Promise<StepResult> => {
     const { ReactAgent } = await import('../agents/react-agent');
     const agent = new ReactAgent();
     await agent.initialize([]);
+    const chatId = buildPipelineScopedChatId(config, 'generate_doc');
 
     let result = '';
-    for await (const event of agent.processStream(fullPrompt, 'pipeline-doc', new AbortController().signal)) {
+    for await (const event of agent.processStream(fullPrompt, chatId, new AbortController().signal)) {
       if (event.type === 'text_done') result = event.data;
     }
 
@@ -206,7 +216,7 @@ registerStep('get_system_info', async (config, context): Promise<StepResult> => 
 });
 
 registerStep('save_history', async (config, context): Promise<StepResult> => {
-  const chatId = config.chat_id || 'pipeline-output';
+  const chatId = config.chat_id || buildPipelineScopedChatId(config, 'output');
   const tag = config.tag || 'pipeline';
   const { SystemMessage } = await import('@langchain/core/messages');
   const thread = historyManager.getThread(chatId);

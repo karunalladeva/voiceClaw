@@ -17,6 +17,8 @@ export interface AppConfig {
   };
   agent: {
     enableInternet: boolean;
+    maxParallelSkills: number;
+    skillQueueTimeoutMs: number;
   };
   memory: {
     enabled: boolean;
@@ -36,6 +38,20 @@ export interface AppConfig {
     vadEnabled: boolean;
     wakeWordEnabled: boolean;
     autoListen: boolean;
+  };
+  speech: {
+    finalOnly: boolean;
+    longTextThresholdChars: number;
+    minimalSummaryEnabled: boolean;
+    fallbackMaxChars: number;
+    truncationSuffix: string;
+  };
+  marketData: {
+    mcpServerScriptPath: string;
+    mcpCommand: string;
+    mcpArgs: string[];
+    requestTimeoutMs: number;
+    enableCcxt: boolean;
   };
   evolution: {
     enabled: boolean;
@@ -68,6 +84,8 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   agent: {
     enableInternet: true,
+    maxParallelSkills: 2,
+    skillQueueTimeoutMs: 30000,
   },
   memory: {
     enabled: true,
@@ -87,6 +105,20 @@ const DEFAULT_CONFIG: AppConfig = {
     vadEnabled: true,
     wakeWordEnabled: false,
     autoListen: false,
+  },
+  speech: {
+    finalOnly: true,
+    longTextThresholdChars: 1200,
+    minimalSummaryEnabled: true,
+    fallbackMaxChars: 500,
+    truncationSuffix: "I've placed the rest of the details on your screen.",
+  },
+  marketData: {
+    mcpServerScriptPath: path.join(process.cwd(), 'src', 'mcp-servers', 'market', 'index.ts'),
+    mcpCommand: 'npx',
+    mcpArgs: [],
+    requestTimeoutMs: 8000,
+    enableCcxt: false,
   },
   evolution: {
     enabled: false,
@@ -129,7 +161,13 @@ class ConfigManager extends EventEmitter {
       
       try {
         const fileContent = await fs.readFile(this.configPath, 'utf-8');
-        this.currentConfig = { ...DEFAULT_CONFIG, ...JSON.parse(fileContent) };
+        const parsed = JSON.parse(fileContent) as Partial<AppConfig>;
+        this.currentConfig = {
+          ...DEFAULT_CONFIG,
+          ...parsed,
+          speech: { ...DEFAULT_CONFIG.speech, ...(parsed.speech || {}) },
+          marketData: { ...DEFAULT_CONFIG.marketData, ...(parsed.marketData || {}) },
+        };
         console.log('[Config] Loaded existing configuration.');
       } catch (err: any) {
         if (err.code === 'ENOENT') {
@@ -157,8 +195,13 @@ class ConfigManager extends EventEmitter {
           console.log('[Config] Configuration file changed on disk. Reloading...');
           try {
             const fileContent = await fs.readFile(this.configPath, 'utf-8');
-            const newConfig = JSON.parse(fileContent);
-            this.currentConfig = { ...this.currentConfig, ...newConfig };
+            const newConfig = JSON.parse(fileContent) as Partial<AppConfig>;
+            this.currentConfig = {
+              ...this.currentConfig,
+              ...newConfig,
+              speech: { ...this.currentConfig.speech, ...(newConfig.speech || {}) },
+              marketData: { ...this.currentConfig.marketData, ...(newConfig.marketData || {}) },
+            };
             this.emit('configChanged', this.currentConfig);
             console.log('[Config] Hot-reloaded configuration successfully.');
           } catch (err) {
@@ -186,6 +229,8 @@ class ConfigManager extends EventEmitter {
       memory: { ...this.currentConfig.memory, ...(newSettings.memory || {}) },
       learning: { ...this.currentConfig.learning, ...(newSettings.learning || {}) },
       evolution: { ...this.currentConfig.evolution, ...(newSettings.evolution || {}) },
+      speech: { ...this.currentConfig.speech, ...(newSettings.speech || {}) },
+      marketData: { ...this.currentConfig.marketData, ...(newSettings.marketData || {}) },
       approved_senders: newSettings.approved_senders || this.currentConfig.approved_senders,
     };
     

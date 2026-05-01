@@ -8,6 +8,13 @@ export class MCPClientManager {
   private clients: Map<string, Client> = new Map();
   private tools: DynamicStructuredTool[] = [];
   private memoryServerId: string | null | undefined = undefined; // undefined = not yet discovered
+  private stats = {
+    totalToolCalls: 0,
+    failedToolCalls: 0,
+    totalMemoryCalls: 0,
+    failedMemoryCalls: 0,
+    lastToolCallAt: 0,
+  };
 
   /**
    * Start a local MCP server script and connect to it
@@ -37,6 +44,54 @@ export class MCPClientManager {
   /**
    * Load tools from all connected MCP servers and convert them to LangChain tools
    */
+  private buildZodFromJsonSchema(schemaNode: any): any {
+    if (!schemaNode || typeof schemaNode !== 'object') return z.any();
+    if (Array.isArray(schemaNode.enum) && schemaNode.enum.length > 0) {
+      const vals = schemaNode.enum.filter((v: any) => typeof v === 'string');
+      if (vals.length > 0) return z.enum(vals as [string, ...string[]]);
+    }
+    if (schemaNode.type === 'string') return z.string();
+    if (schemaNode.type === 'number' || schemaNode.type === 'integer') return z.number();
+    if (schemaNode.type === 'boolean') return z.boolean();
+    if (schemaNode.type === 'array') {
+      const itemSchema = this.buildZodFromJsonSchema(schemaNode.items);
+      return z.array(itemSchema);
+    }
+    if (schemaNode.type === 'object' || schemaNode.properties) {
+      const shape: Record<string, any> = {};
+      const required = Array.isArray(schemaNode.required) ? schemaNode.required : [];
+      const props = schemaNode.properties || {};
+      for (const [key, prop] of Object.entries<any>(props)) {
+        let built = this.buildZodFromJsonSchema(prop);
+        if (prop?.description && typeof built.describe === 'function') {
+          built = built.describe(prop.description);
+        }
+        if (!required.includes(key)) built = built.optional();
+        shape[key] = built;
+      }
+      return z.object(shape);
+    }
+    return z.any();
+  }
+
+  private formatToolResult(result: any, serverId: string, toolName: string): string {
+    const textContents = (result.content as any[])
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text)
+      .join('\n')
+      .trim();
+    const payload = textContents || "Tool executed successfully with no text output.";
+    const nowIso = new Date().toISOString();
+    return [
+      `[MCP_RESULT]`,
+      `server=${serverId}`,
+      `tool=${toolName}`,
+      `fetched_at=${nowIso}`,
+      `---`,
+      payload,
+    ].join('\n');
+  }
+
   async loadTools(): Promise<DynamicStructuredTool[]> {
     this.tools = [];
 
@@ -45,26 +100,7 @@ export class MCPClientManager {
         const response = await client.listTools();
         
         for (const mcpTool of response.tools) {
-          // Convert the JSON schema to a minimal Zod schema for LangChain
-          // For a production app, you might use json-schema-to-zod, but here we do a basic mapping
-          let schema = z.object({});
-          if (mcpTool.inputSchema?.properties) {
-            const shape: any = {};
-            const required = mcpTool.inputSchema.required || [];
-            
-            for (const [key, prop] of Object.entries<any>(mcpTool.inputSchema.properties)) {
-              let zType: any = z.any();
-              if (prop.type === "string") zType = z.string().describe(prop.description || "");
-              else if (prop.type === "number") zType = z.number().describe(prop.description || "");
-              else if (prop.type === "boolean") zType = z.boolean().describe(prop.description || "");
-              
-              if (!required.includes(key)) {
-                zType = zType.optional();
-              }
-              shape[key] = zType;
-            }
-            schema = z.object(shape);
-          }
+          const schema = this.buildZodFromJsonSchema(mcpTool.inputSchema || { type: 'object', properties: {} });
 
           // Create the LangChain tool
           const lcTool = new DynamicStructuredTool({
@@ -73,6 +109,8 @@ export class MCPClientManager {
             schema,
             func: async (input: any) => {
               console.log(`[MCP Execution] Calling ${mcpTool.name} on ${serverId} with args:`, input);
+              this.stats.totalToolCalls += 1;
+              this.stats.lastToolCallAt = Date.now();
               try {
                 const result = await client.callTool({
                   name: mcpTool.name,
@@ -81,16 +119,12 @@ export class MCPClientManager {
                 
                 // Format the result back into a string for the LLM
                 if (result.isError) {
+                  this.stats.failedToolCalls += 1;
                   return `Error: ${JSON.stringify(result.content)}`;
                 }
-                
-                const textContents = (result.content as any[])
-                  .filter((c: any) => c.type === 'text')
-                  .map((c: any) => c.text)
-                  .join('\n');
-                  
-                return textContents || "Tool executed successfully with no text output.";
+                return this.formatToolResult(result, serverId, mcpTool.name);
               } catch (err: any) {
+                this.stats.failedToolCalls += 1;
                 return `Tool Execution Failed: ${err.message}`;
               }
             },
@@ -134,15 +168,21 @@ export class MCPClientManager {
   private async callMemoryTool(toolName: string, args: Record<string, any> = {}): Promise<string> {
     const serverId = await this.findMemoryServerId();
     if (!serverId) return '';
+    this.stats.totalMemoryCalls += 1;
+    this.stats.lastToolCallAt = Date.now();
     try {
       const client = this.clients.get(serverId)!;
       const result = await client.callTool({ name: toolName, arguments: args });
-      if (result.isError) return '';
+      if (result.isError) {
+        this.stats.failedMemoryCalls += 1;
+        return '';
+      }
       return (result.content as any[])
         .filter((c: any) => c.type === 'text')
         .map((c: any) => c.text)
         .join('\n');
     } catch {
+      this.stats.failedMemoryCalls += 1;
       return '';
     }
   }
@@ -155,7 +195,8 @@ export class MCPClientManager {
   /** Search long-term memory. Returns formatted results or empty string. */
   async searchMemory(query: string): Promise<string> {
     const text = await this.callMemoryTool('search_memory', { query });
-    return text.includes('No memories found') ? '' : text;
+    if (!text || text.includes('No memories found')) return '';
+    return `<memory_search_result freshness="historical" fetched_at="${new Date().toISOString()}">\n${text}\n</memory_search_result>`;
   }
 
   /** List all stored memories as a parsed array. */
@@ -188,5 +229,18 @@ export class MCPClientManager {
   /** Delete a memory by ID. */
   async deleteMemory(id: string): Promise<string> {
     return this.callMemoryTool('delete_memory', { id });
+  }
+
+  getStats() {
+    const totalCalls = this.stats.totalToolCalls + this.stats.totalMemoryCalls;
+    const failedCalls = this.stats.failedToolCalls + this.stats.failedMemoryCalls;
+    return {
+      ...this.stats,
+      totalCalls,
+      failedCalls,
+      successRate: totalCalls > 0 ? Number((((totalCalls - failedCalls) / totalCalls) * 100).toFixed(2)) : 100,
+      connectedServers: this.clients.size,
+      loadedTools: this.tools.length,
+    };
   }
 }
