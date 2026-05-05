@@ -8,11 +8,62 @@ import { registerStep, StepResult } from './pipeline-engine';
 import { deliverToChannel } from './channels';
 import { historyManager } from '../agents/agent-history';
 
+interface SearchSnippet {
+  title: string;
+  url: string;
+  description: string;
+}
+
 function buildPipelineScopedChatId(config: Record<string, any>, suffix: string): string {
   if (config.chat_id) return config.chat_id;
   const pipelineId = String(config.__pipelineId || 'pipeline');
   const runId = String(config.__pipelineRunId || 'run');
   return `pipeline:${pipelineId}:run:${runId}:${suffix}`;
+}
+
+function formatSearchSnippets(snippets: SearchSnippet[]): string {
+  return snippets
+    .map((r: SearchSnippet, i: number) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description}`)
+    .join('\n\n');
+}
+
+function stripHtml(value: string): string {
+  return value
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, '\'')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function searchDuckDuckGoFallback(query: string, maxResults: number): Promise<SearchSnippet[]> {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const response = await fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (compatible; pipeline-research-bot/1.0)',
+    },
+  });
+  if (!response.ok) {
+    return [];
+  }
+  const html = await response.text();
+  const matches = [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)];
+  return matches
+    .slice(0, maxResults)
+    .map((match: RegExpMatchArray) => {
+      const rawHref = String(match[1] || '');
+      const hrefMatch = rawHref.match(/[?&]uddg=([^&]+)/);
+      const urlValue = hrefMatch ? decodeURIComponent(hrefMatch[1]) : rawHref;
+      return {
+        title: stripHtml(String(match[2] || 'Untitled result')),
+        url: urlValue,
+        description: 'Fetched via DuckDuckGo fallback search.',
+      };
+    })
+    .filter((item: SearchSnippet) => item.title.length > 0 && item.url.length > 0);
 }
 
 // ── ai_task: Run a prompt through the main agent ──────────────────────────────
@@ -46,15 +97,42 @@ registerStep('research', async (config, context): Promise<StepResult> => {
   const query = config.query || context || '';
   if (!query) return { success: false, output: 'No search query provided.' };
 
+  const maxResults = Number(config.max_results || 5);
+
   try {
-    // Use the existing googlethis package
+    const snippets: SearchSnippet[] = [];
+
+    // Primary provider: googlethis
     const google = require('googlethis');
     const results = await google.search(query, { page: 0, safe: false });
-    const snippets = (results.results || [])
-      .slice(0, config.max_results || 5)
-      .map((r: any, i: number) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description}`)
-      .join('\n\n');
-    return { success: true, output: snippets || '', data: results.results };
+    const primarySnippets = (results.results || [])
+      .slice(0, maxResults)
+      .map((r: any) => ({
+        title: String(r.title || '').trim(),
+        url: String(r.url || '').trim(),
+        description: String(r.description || '').trim(),
+      }))
+      .filter((r: SearchSnippet) => r.title && r.url);
+    snippets.push(...primarySnippets);
+
+    // Fallback provider: DuckDuckGo HTML results, only when Google yields no usable rows.
+    if (snippets.length === 0) {
+      try {
+        const ddgSnippets = await searchDuckDuckGoFallback(query, maxResults);
+        snippets.push(...ddgSnippets);
+      } catch (fallbackError: any) {
+        return {
+          success: false,
+          output: `Research failed (fallback error): ${fallbackError.message}`,
+        };
+      }
+    }
+
+    if (snippets.length === 0) {
+      return { success: false, output: `No research results found for query: "${query}"` };
+    }
+
+    return { success: true, output: formatSearchSnippets(snippets), data: snippets };
   } catch (e: any) {
     return { success: false, output: `Research failed: ${e.message}` };
   }
@@ -101,7 +179,13 @@ registerStep('browse', async (config, context): Promise<StepResult> => {
 // ── summarize: LLM summarization of context ───────────────────────────────────
 
 registerStep('summarize', async (config, context): Promise<StepResult> => {
-  if (!context) return { success: false, output: 'Nothing to summarize (no input from previous step).' };
+  if (!context) {
+    return {
+      success: true,
+      output: 'Skipped summarize step (no input from previous step).',
+      data: { skipped: true },
+    };
+  }
 
   const prompt = config.prompt || 'Summarize the following content concisely:';
   try {

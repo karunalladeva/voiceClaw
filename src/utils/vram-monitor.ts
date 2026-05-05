@@ -1,6 +1,9 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { modelRegistry } from '../models/model-registry';
+import { orchestrationStore } from '../orchestration/store';
+import { cache } from './cache';
+import { inferenceActivity } from './inference-activity';
 
 const execAsync = promisify(exec);
 
@@ -19,8 +22,17 @@ export class VramMonitor {
            const used = parseInt(usedStr, 10);
            const total = parseInt(totalStr, 10);
            if (total > 0 && (used / total) > 0.90) {
-             console.warn('[VRAM Monitor] VRAM usage exceeded 90%. Purging caches and unloading models...');
-             await this.unloadLocalModels();
+            if (inferenceActivity.hasActiveInference()) {
+              console.warn(`[VRAM Monitor] VRAM > 90% but ${inferenceActivity.getActiveCount()} inference task(s) active. Skipping model kill.`);
+              continue;
+            }
+            const hasActiveTasks = await this.hasActiveTaskProcess();
+            if (hasActiveTasks) {
+              console.warn('[VRAM Monitor] VRAM > 90% but active task process detected. Skipping model kill.');
+              continue;
+            }
+            console.warn('[VRAM Monitor] VRAM usage exceeded 90%. Purging caches and unloading models...');
+            await this.purgeCachesAndUnloadModels();
            }
         }
       } catch (err) {
@@ -68,6 +80,43 @@ export class VramMonitor {
      } catch (err) {
        console.warn('[VRAM Monitor] Failed to unload local models:', err);
      }
+  }
+
+  private async hasActiveTaskProcess(): Promise<boolean> {
+    try {
+      const tasks = await orchestrationStore.load('tasks');
+      return tasks.some(task =>
+        task.status === 'in_progress' ||
+        (task.status === 'review' && Boolean(task.checkedOutBy)) ||
+        Boolean(task.checkedOutBy)
+      );
+    } catch {
+      // If orchestration state is unavailable, fail-open and avoid destructive kill behavior.
+      return true;
+    }
+  }
+
+  private async purgeCachesAndUnloadModels(): Promise<void> {
+    try {
+      await cache.clear();
+    } catch {
+      // Cache clear is best-effort; continue with model unload.
+    }
+    await this.unloadLocalModels();
+    await this.killIdleLocalModelProcesses();
+  }
+
+  private async killIdleLocalModelProcesses(): Promise<void> {
+    try {
+      if (process.platform === 'win32') {
+        await execAsync('taskkill /IM ollama.exe /F');
+      } else {
+        await execAsync('pkill -f ollama');
+      }
+      console.log('[VRAM Monitor] Killed idle local model process (ollama).');
+    } catch {
+      // Best-effort kill; ignore when process does not exist or command is unavailable.
+    }
   }
 }
 

@@ -21,7 +21,10 @@ import { evolutionService } from '../services/evolution-service';
 import { evolutionScheduler } from '../services/evolution-scheduler';
 import { setupAdminWebSocket, setupAdminRoutes } from '../admin/admin-server';
 import { agentEvents } from '../admin/agent-events';
+import { setupOrchestrationRoutes } from '../orchestration/routes';
+import { orchestrationStore, heartbeatScheduler, agentRegistry, routineScheduler } from '../orchestration';
 import { capSpeechPlain, selectPlainTextForTts } from '../utils/speech-for-tts';
+import { inferenceActivity } from '../utils/inference-activity';
 
 
 vramMonitor.startMonitoring();
@@ -120,6 +123,7 @@ async function handleStreamingChat(
   }, 5000);
 
   let fullText = '';
+  const releaseInference = inferenceActivity.begin();
 
   try {
     for await (const event of agent.processStream(input, chatId, controller.signal)) {
@@ -154,6 +158,8 @@ async function handleStreamingChat(
     if (!controller.signal.aborted) {
       console.error('[API] Stream error:', err.message);
     }
+  } finally {
+    releaseInference();
   }
 
   if (!res.writableEnded) {
@@ -231,6 +237,7 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
     });
 
     let fullText = '';
+    const releaseInference = inferenceActivity.begin();
 
     try {
       for await (const event of agent.processStream(textOrAudioPayload, chatId, controller.signal)) {
@@ -262,6 +269,8 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
       if (!controller.signal.aborted) {
         console.error('[API] Audio stream error:', err.message);
       }
+    } finally {
+      releaseInference();
     }
 
     if (!res.writableEnded) {
@@ -1119,6 +1128,41 @@ export const startServer = async (port: number = 3000) => {
 
   // ── Setup Admin Dashboard Routes ────────────────────────────────────────────
   setupAdminRoutes(app);
+
+  // ── Setup Orchestration (Paperclip-style) ──────────────────────────────────
+  await orchestrationStore.initialize();
+  setupOrchestrationRoutes(app);
+  
+  // Set up heartbeat handler to use the main agent
+  heartbeatScheduler.setHandler(async (orgAgent, task, context) => {
+    const prompt = task
+      ? `${context}\n\nPlease work on the assigned task and provide your output.`
+      : `${context}\n\nCheck for any work that needs to be done and report status.`;
+    
+    let output = '';
+    const releaseInference = inferenceActivity.begin();
+    try {
+      for await (const event of agent.processStream(prompt, `heartbeat-${orgAgent.id}`)) {
+        if (event.type === 'text_done') {
+          output = event.data;
+        }
+      }
+    } finally {
+      releaseInference();
+    }
+    return output;
+  });
+  
+  // Start heartbeat scheduler
+  await heartbeatScheduler.start();
+  
+  // Start routine scheduler
+  routineScheduler.start();
+  
+  // Check for monthly budget resets daily at midnight
+  setInterval(() => agentRegistry.resetMonthlyBudgets(), 24 * 60 * 60 * 1000);
+  
+  console.log('[API] Orchestration system initialized');
 
   // ── Create HTTP Server and attach WebSocket ─────────────────────────────────
   const server = http.createServer(app);

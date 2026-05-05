@@ -108,7 +108,13 @@ function handleClientMessage(clientId: string, client: AdminClient, msg: any) {
 }
 
 export function setupAdminRoutes(app: express.Application) {
-  app.use('/admin', express.static(path.join(__dirname, 'public')));
+  app.use('/admin', express.static(path.join(__dirname, 'public'), {
+    setHeaders: (res, path) => {
+      if (path.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+    }
+  }));
 
   app.get('/admin/api/stats', (_req, res) => {
     res.json(agentEvents.getStats());

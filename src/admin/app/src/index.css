@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+@source "../index.html";
+@source "./**/*.{js,ts,jsx,tsx}";
+
+@theme {
+  --color-background: oklch(13.7% 0.02 274.04);
+  --color-foreground: oklch(96.83% 0.01 274.04);
+  --color-card: oklch(17.06% 0.03 274.04);
+  --color-card-foreground: oklch(96.83% 0.01 274.04);
+  --color-popover: oklch(17.06% 0.03 274.04);
+  --color-popover-foreground: oklch(96.83% 0.01 274.04);
+  --color-primary: oklch(63.61% 0.19 274.04);
+  --color-primary-foreground: oklch(100% 0 0);
+  --color-secondary: oklch(22.76% 0.04 274.04);
+  --color-secondary-foreground: oklch(96.83% 0.01 274.04);
+  --color-muted: oklch(22.76% 0.04 274.04);
+  --color-muted-foreground: oklch(65.47% 0.02 274.04);
+  --color-accent: oklch(63.61% 0.19 274.04);
+  --color-accent-foreground: oklch(100% 0 0);
+  --color-destructive: oklch(62.79% 0.26 29.23);
+  --color-destructive-foreground: oklch(100% 0 0);
+  --color-success: oklch(64.69% 0.21 145.44);
+  --color-success-foreground: oklch(100% 0 0);
+  --color-warning: oklch(70.28% 0.17 70.67);
+  --color-warning-foreground: oklch(100% 0 0);
+  --color-border: oklch(27.22% 0.03 274.04);
+  --color-input: oklch(27.22% 0.03 274.04);
+  --color-ring: oklch(63.61% 0.19 274.04);
+  --color-purple: oklch(62.48% 0.19 296.27);
+
+  --radius-lg: 0.75rem;
+  --radius-md: 0.5rem;
+  --radius-sm: 0.25rem;
+
+  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes glow {
+  0%, 100% { box-shadow: 0 0 5px rgba(139, 92, 246, 0.3); }
+  50% { box-shadow: 0 0 15px rgba(139, 92, 246, 0.5); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes agentPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+}
+
+.animate-pulse-slow {
+  animation: pulse 2s infinite;
+}
+
+.animate-slide-in {
+  animation: slideIn 0.3s ease;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease;
+}
+
+.animate-glow {
+  animation: glow 1s infinite;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+.animate-agent-pulse {
+  animation: agentPulse 1.5s ease-in-out infinite;
+}

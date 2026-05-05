@@ -7,7 +7,9 @@
     "dev": "ts-node src/index.ts",
     "onboard": "ts-node scripts/onboard.ts",
     "generate-skill": "ts-node scripts/generate-skill.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "admin:dev": "npm run dev --prefix src/admin/app",
+    "admin:build": "npm run build --prefix src/admin/app"
   },
   "keywords": [],
   "author": "",
