@@ -1,0 +1,26 @@
+{
+  "id": "trading-portfolio-risk-review",
+  "name": "Portfolio Risk Review",
+  "category": "trading/risk",
+  "description": "Review watchlist risk profile, sentiment pressure, and drawdown-sensitive warnings.",
+  "steps": [
+    {
+      "type": "research",
+      "config": {
+        "query": "Risk outlook and volatility concerns for portfolio symbols: {{symbols}}."
+      }
+    },
+    {
+      "type": "summarize",
+      "config": {
+        "prompt": "Summarize risk concentration, downside triggers, and practical risk controls."
+      }
+    },
+    {
+      "type": "deliver",
+      "config": {
+        "channel": "history"
+      }
+    }
+  ]
+}

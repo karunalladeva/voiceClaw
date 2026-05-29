@@ -1,0 +1,1126 @@
+[
+  {
+    "id": "trading-data-routing",
+    "name": "Trading Data Routing",
+    "category": "data-source",
+    "description": "Route market data requests to the best available source and summarize coverage limits.",
+    "triggerDescription": "Use when user asks which data source should be used, fallback behavior, or symbol coverage checks.",
+    "systemPrompt": "You are a market data routing specialist. Decide the best source for the user's request, explain fallback options, and state any data limitations clearly.",
+    "tools": [
+      "yahoo_ohlcv",
+      "yahoo_news"
+    ],
+    "tags": [
+      "routing",
+      "market-data",
+      "fallback"
+    ]
+  },
+  {
+    "id": "trading-market-snapshot",
+    "name": "Market Snapshot",
+    "category": "analysis",
+    "description": "Provide a concise market snapshot for one or more symbols.",
+    "triggerDescription": "Use when user asks for current status, trend summary, or quick stock/ETF/crypto checks.",
+    "systemPrompt": "Produce a short market snapshot with recent trend, momentum clues, and key observations. Keep it concise and actionable.",
+    "tools": [
+      "yahoo_ohlcv",
+      "yahoo_news"
+    ],
+    "tags": [
+      "snapshot",
+      "equities",
+      "crypto"
+    ]
+  },
+  {
+    "id": "trading-technical-basic",
+    "name": "Technical Basic",
+    "category": "strategy",
+    "description": "Evaluate trend, momentum, and support/resistance from recent candles.",
+    "triggerDescription": "Use when user asks for technical analysis, chart reading, trend direction, or key levels.",
+    "systemPrompt": "Perform technical analysis from candle data, identify trend regime, support/resistance, and risk-aware action bias.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "technical",
+      "trend",
+      "support-resistance"
+    ]
+  },
+  {
+    "id": "trading-factor-research",
+    "name": "Factor Research",
+    "category": "analysis",
+    "description": "Explain and evaluate factor-based ideas (momentum, value, quality, volatility).",
+    "triggerDescription": "Use when user asks for factor investing, multifactor rationale, or cross-factor comparison.",
+    "systemPrompt": "Analyze factor hypothesis, expected drivers, risks, and practical validation checklist.",
+    "tools": [
+      "web_search",
+      "web_fetch"
+    ],
+    "tags": [
+      "factor",
+      "quant",
+      "research"
+    ]
+  },
+  {
+    "id": "trading-multi-factor",
+    "name": "Multi Factor Strategy",
+    "category": "strategy",
+    "description": "Create multi-factor strategy designs and validation flow.",
+    "triggerDescription": "Use when user asks to combine multiple factors into a strategy.",
+    "systemPrompt": "Design a multi-factor strategy with weighting logic, rebalance cadence, risk controls, and evaluation metrics.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "strategy",
+      "multi-factor"
+    ]
+  },
+  {
+    "id": "trading-ml-strategy",
+    "name": "ML Strategy",
+    "category": "strategy",
+    "description": "Outline machine-learning based strategy concepts and validation safeguards.",
+    "triggerDescription": "Use when user asks for machine learning in trading or predictive models.",
+    "systemPrompt": "Provide model framing, feature ideas, leakage prevention, validation approach, and deployment cautions.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "ml",
+      "strategy"
+    ]
+  },
+  {
+    "id": "trading-pair-trading",
+    "name": "Pair Trading",
+    "category": "strategy",
+    "description": "Build pair-trading and mean-reversion analysis outlines.",
+    "triggerDescription": "Use when user asks for pair trading, spread trading, or stat-arb style ideas.",
+    "systemPrompt": "Assess pair suitability, spread behavior, entry/exit logic, and risk controls for divergence.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "pairs",
+      "mean-reversion"
+    ]
+  },
+  {
+    "id": "trading-options-strategy",
+    "name": "Options Strategy",
+    "category": "asset-class",
+    "description": "Recommend options structures by directional and volatility view.",
+    "triggerDescription": "Use when user asks for options strategy selection or payoff structuring.",
+    "systemPrompt": "Map market view to suitable options structure, include payoff intuition, key risks, and invalidation points.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "options",
+      "derivatives"
+    ]
+  },
+  {
+    "id": "trading-options-advanced",
+    "name": "Options Advanced",
+    "category": "asset-class",
+    "description": "Advanced options setup with Greeks-aware adjustments.",
+    "triggerDescription": "Use when user asks for advanced options tactics, Greeks management, or adjustment plans.",
+    "systemPrompt": "Analyze Greeks exposure and suggest advanced adjustment frameworks under changing volatility and price paths.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "options",
+      "greeks"
+    ]
+  },
+  {
+    "id": "trading-options-payoff",
+    "name": "Options Payoff",
+    "category": "asset-class",
+    "description": "Explain payoff profiles and break-even mechanics.",
+    "triggerDescription": "Use when user asks to compare payoff outcomes or scenario behavior for options positions.",
+    "systemPrompt": "Explain payoff and break-even behavior in plain terms with scenario-based outcomes.",
+    "tools": [],
+    "tags": [
+      "options",
+      "payoff"
+    ]
+  },
+  {
+    "id": "trading-etf-analysis",
+    "name": "ETF Analysis",
+    "category": "asset-class",
+    "description": "Analyze ETF composition, trend behavior, and thematic fit.",
+    "triggerDescription": "Use when user asks for ETF screening, comparison, or thematic exposure checks.",
+    "systemPrompt": "Provide ETF analysis with trend context, concentration risk, and suitability to user objective.",
+    "tools": [
+      "yahoo_ohlcv",
+      "yahoo_news"
+    ],
+    "tags": [
+      "etf",
+      "allocation"
+    ]
+  },
+  {
+    "id": "trading-asset-allocation",
+    "name": "Asset Allocation",
+    "category": "asset-class",
+    "description": "Construct multi-asset allocation suggestions with risk-aware reasoning.",
+    "triggerDescription": "Use when user asks for portfolio allocation across equities, bonds, commodities, or crypto.",
+    "systemPrompt": "Propose allocation mixes based on risk profile, horizon, and macro regime, including rebalance guidance.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "allocation",
+      "portfolio"
+    ]
+  },
+  {
+    "id": "trading-sector-rotation",
+    "name": "Sector Rotation",
+    "category": "strategy",
+    "description": "Assess sector leadership and regime-sensitive rotation ideas.",
+    "triggerDescription": "Use when user asks which sectors may outperform under current macro conditions.",
+    "systemPrompt": "Evaluate sector rotation with macro linkage, momentum context, and risk scenarios.",
+    "tools": [
+      "web_search",
+      "yahoo_news"
+    ],
+    "tags": [
+      "sectors",
+      "macro"
+    ]
+  },
+  {
+    "id": "trading-global-macro",
+    "name": "Global Macro",
+    "category": "analysis",
+    "description": "Macro-driven market interpretation across rates, FX, commodities, and risk assets.",
+    "triggerDescription": "Use when user asks for macro outlook and cross-asset implications.",
+    "systemPrompt": "Connect macro developments to market impacts and identify likely transmission channels.",
+    "tools": [
+      "web_search",
+      "web_fetch"
+    ],
+    "tags": [
+      "macro",
+      "cross-asset"
+    ]
+  },
+  {
+    "id": "trading-macro-analysis",
+    "name": "Macro Analysis",
+    "category": "analysis",
+    "description": "Interpret macro indicators and policy narratives for market positioning.",
+    "triggerDescription": "Use when user asks for inflation, GDP, rates, central-bank impacts on markets.",
+    "systemPrompt": "Analyze macro signals and provide concise market implications with scenario framing.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "macro"
+    ]
+  },
+  {
+    "id": "trading-valuation-model",
+    "name": "Valuation Model",
+    "category": "analysis",
+    "description": "Discuss valuation perspectives and assumption sensitivity.",
+    "triggerDescription": "Use when user asks whether an equity looks expensive or cheap.",
+    "systemPrompt": "Provide valuation assessment, assumption sensitivity, and key drivers to monitor.",
+    "tools": [
+      "web_search",
+      "yahoo_news"
+    ],
+    "tags": [
+      "valuation",
+      "fundamental"
+    ]
+  },
+  {
+    "id": "trading-earnings-forecast",
+    "name": "Earnings Forecast",
+    "category": "analysis",
+    "description": "Forecast-aware analysis around earnings expectations and revisions.",
+    "triggerDescription": "Use when user asks about earnings outlook, surprises, and post-earnings scenarios.",
+    "systemPrompt": "Analyze earnings setup, expectations versus risk, and likely scenario paths.",
+    "tools": [
+      "web_search",
+      "yahoo_news"
+    ],
+    "tags": [
+      "earnings",
+      "fundamental"
+    ]
+  },
+  {
+    "id": "trading-dividend-analysis",
+    "name": "Dividend Analysis",
+    "category": "analysis",
+    "description": "Evaluate dividend yield sustainability and growth quality.",
+    "triggerDescription": "Use when user asks for income stocks, dividend safety, or yield trap checks.",
+    "systemPrompt": "Assess dividend sustainability and highlight red flags for yield traps.",
+    "tools": [
+      "web_search",
+      "yahoo_news"
+    ],
+    "tags": [
+      "dividend",
+      "income"
+    ]
+  },
+  {
+    "id": "trading-credit-analysis",
+    "name": "Credit Analysis",
+    "category": "analysis",
+    "description": "Credit-risk perspective for issuers and macro credit backdrop.",
+    "triggerDescription": "Use when user asks about credit risk, spreads, or balance-sheet stress signals.",
+    "systemPrompt": "Provide credit perspective with risk indicators and implications for equity/debt holders.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "credit",
+      "risk"
+    ]
+  },
+  {
+    "id": "trading-risk-analysis",
+    "name": "Risk Analysis",
+    "category": "risk",
+    "description": "Portfolio and position risk analysis with controls.",
+    "triggerDescription": "Use when user asks to evaluate downside risk, drawdown, concentration, or tail exposure.",
+    "systemPrompt": "Deliver risk analysis with concrete controls, position sizing hints, and stop-loss discipline.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "risk",
+      "portfolio"
+    ]
+  },
+  {
+    "id": "trading-volatility",
+    "name": "Volatility Analysis",
+    "category": "risk",
+    "description": "Assess volatility regime and its strategy implications.",
+    "triggerDescription": "Use when user asks about volatility spikes, calm regimes, or volatility-adjusted sizing.",
+    "systemPrompt": "Analyze volatility regime and implications for entries, leverage, and stop distance.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "volatility",
+      "risk"
+    ]
+  },
+  {
+    "id": "trading-correlation-analysis",
+    "name": "Correlation Analysis",
+    "category": "analysis",
+    "description": "Explain correlation structure and diversification impact.",
+    "triggerDescription": "Use when user asks to compare assets for diversification or clustering risk.",
+    "systemPrompt": "Provide correlation-aware diversification analysis and concentration warnings.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "correlation",
+      "portfolio"
+    ]
+  },
+  {
+    "id": "trading-performance-attribution",
+    "name": "Performance Attribution",
+    "category": "analysis",
+    "description": "Break down strategy or portfolio performance drivers.",
+    "triggerDescription": "Use when user asks why returns happened and which factors contributed.",
+    "systemPrompt": "Provide attribution by market move, selection, timing, and risk exposure where possible.",
+    "tools": [],
+    "tags": [
+      "attribution",
+      "performance"
+    ]
+  },
+  {
+    "id": "trading-report-generate",
+    "name": "Trading Report Generate",
+    "category": "tool",
+    "description": "Generate structured trading reports for strategy and market analysis.",
+    "triggerDescription": "Use when user asks for formatted report output from analysis.",
+    "systemPrompt": "Produce clear structured reports with sections, key findings, and next actions.",
+    "tools": [],
+    "tags": [
+      "reporting",
+      "documentation"
+    ]
+  },
+  {
+    "id": "trading-doc-reader",
+    "name": "Document Reader",
+    "category": "tool",
+    "description": "Read and summarize uploaded trading documents and notes.",
+    "triggerDescription": "Use when user provides external files or asks to analyze docs.",
+    "systemPrompt": "Extract relevant information from provided documents and summarize with trading context.",
+    "tools": [
+      "web_fetch"
+    ],
+    "tags": [
+      "doc",
+      "ingestion"
+    ]
+  },
+  {
+    "id": "trading-web-reader",
+    "name": "Web Reader",
+    "category": "tool",
+    "description": "Fetch and summarize content from URLs relevant to trading.",
+    "triggerDescription": "Use when user asks to read a specific URL or article in full.",
+    "systemPrompt": "Use web fetching to retrieve full content and summarize key market-relevant points.",
+    "tools": [
+      "web_fetch"
+    ],
+    "tags": [
+      "web",
+      "content"
+    ]
+  },
+  {
+    "id": "trading-pine-script",
+    "name": "Pine Script Helper",
+    "category": "tool",
+    "description": "Convert strategy ideas into TradingView Pine Script planning guidance.",
+    "triggerDescription": "Use when user asks to draft or explain Pine Script indicator/strategy logic.",
+    "systemPrompt": "Provide Pine Script-ready logic structure, parameters, and validation guidance.",
+    "tools": [],
+    "tags": [
+      "pine-script",
+      "export"
+    ]
+  },
+  {
+    "id": "trading-vnpy-export",
+    "name": "VN.PY Export Helper",
+    "category": "tool",
+    "description": "Help map strategy logic to vn.py style execution template concepts.",
+    "triggerDescription": "Use when user asks for vn.py strategy export planning.",
+    "systemPrompt": "Translate strategy logic to vn.py-style structure with key hooks and risk checks.",
+    "tools": [],
+    "tags": [
+      "vnpy",
+      "export"
+    ]
+  },
+  {
+    "id": "trading-ccxt-market",
+    "name": "CCXT Market",
+    "category": "data-source",
+    "description": "Crypto exchange-market routing and data interpretation guidance.",
+    "triggerDescription": "Use when user asks about exchange-level crypto market coverage and symbols.",
+    "systemPrompt": "Provide exchange-aware crypto market guidance and data caveats.",
+    "tools": [],
+    "tags": [
+      "ccxt",
+      "crypto"
+    ]
+  },
+  {
+    "id": "trading-okx-market",
+    "name": "OKX Market",
+    "category": "data-source",
+    "description": "OKX-centric market context for crypto analysis.",
+    "triggerDescription": "Use when user asks for OKX market lens or derivatives context.",
+    "systemPrompt": "Give OKX-oriented market interpretation and practical monitoring cues.",
+    "tools": [],
+    "tags": [
+      "okx",
+      "crypto"
+    ]
+  },
+  {
+    "id": "trading-yfinance",
+    "name": "Yahoo Finance Data",
+    "category": "data-source",
+    "description": "Use Yahoo Finance tools for market data and headlines.",
+    "triggerDescription": "Use when user asks for stock/ETF/crypto symbol snapshots from Yahoo data.",
+    "systemPrompt": "Fetch and interpret Yahoo data carefully, highlighting data freshness and possible gaps.",
+    "tools": [
+      "yahoo_ohlcv",
+      "yahoo_news"
+    ],
+    "tags": [
+      "yahoo",
+      "data"
+    ]
+  },
+  {
+    "id": "trading-fund-analysis",
+    "name": "Fund Analysis",
+    "category": "asset-class",
+    "description": "Analyze fund-style products and positioning implications.",
+    "triggerDescription": "Use when user asks for fund comparisons or positioning rationale.",
+    "systemPrompt": "Evaluate fund behavior, concentration patterns, and scenario fit.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "fund",
+      "asset-class"
+    ]
+  },
+  {
+    "id": "trading-financial-statement",
+    "name": "Financial Statement Analysis",
+    "category": "flow",
+    "description": "Interpret balance sheet, income statement, and cash-flow signals.",
+    "triggerDescription": "Use when user asks for statement-level financial interpretation.",
+    "systemPrompt": "Extract key accounting signals and connect them to investment risk/reward.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "financials",
+      "fundamental"
+    ]
+  },
+  {
+    "id": "trading-edgar-sec-filings",
+    "name": "EDGAR SEC Filings",
+    "category": "flow",
+    "description": "Summarize insights from SEC filing flows and disclosures.",
+    "triggerDescription": "Use when user asks about SEC filings, 10-Q/10-K, or disclosure-driven insights.",
+    "systemPrompt": "Summarize key filing signals and explain what changes matter for investors.",
+    "tools": [
+      "web_search",
+      "web_fetch"
+    ],
+    "tags": [
+      "sec",
+      "filings"
+    ]
+  },
+  {
+    "id": "trading-us-etf-flow",
+    "name": "US ETF Flow",
+    "category": "flow",
+    "description": "Discuss ETF flow dynamics and sentiment interpretation.",
+    "triggerDescription": "Use when user asks for ETF flow-driven market interpretation.",
+    "systemPrompt": "Interpret flow data contextually and avoid overfitting short-term signals.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "flow",
+      "etf"
+    ]
+  },
+  {
+    "id": "trading-hk-connect-flow",
+    "name": "HK Connect Flow",
+    "category": "flow",
+    "description": "Analyze northbound/southbound flow narratives and impacts.",
+    "triggerDescription": "Use when user asks for HK connect flow implications.",
+    "systemPrompt": "Explain connect flow direction and potential sector/market impact.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "flow",
+      "hk"
+    ]
+  },
+  {
+    "id": "trading-onchain-analysis",
+    "name": "On-chain Analysis",
+    "category": "crypto",
+    "description": "Evaluate on-chain indicators and wallet-flow narratives.",
+    "triggerDescription": "Use when user asks for blockchain/on-chain behavior and crypto health signals.",
+    "systemPrompt": "Provide on-chain interpretation with caution about lag and noisy metrics.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "crypto",
+      "onchain"
+    ]
+  },
+  {
+    "id": "trading-defi-yield",
+    "name": "DeFi Yield",
+    "category": "crypto",
+    "description": "Assess DeFi yield opportunities and protocol risk.",
+    "triggerDescription": "Use when user asks for DeFi yield strategy and risk trade-offs.",
+    "systemPrompt": "Balance yield opportunities against smart-contract, liquidity, and counterparty risk.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "crypto",
+      "defi"
+    ]
+  },
+  {
+    "id": "trading-stablecoin-flow",
+    "name": "Stablecoin Flow",
+    "category": "crypto",
+    "description": "Analyze stablecoin issuance and movement as liquidity signal.",
+    "triggerDescription": "Use when user asks about stablecoin liquidity and risk-on/risk-off hints.",
+    "systemPrompt": "Interpret stablecoin flow as one signal among many, with clear uncertainty notes.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "crypto",
+      "liquidity"
+    ]
+  },
+  {
+    "id": "trading-liquidation-heatmap",
+    "name": "Liquidation Heatmap",
+    "category": "crypto",
+    "description": "Assess liquidation clusters and leverage risks in crypto markets.",
+    "triggerDescription": "Use when user asks about liquidation levels or squeeze risk.",
+    "systemPrompt": "Explain liquidation risk zones and possible volatility pathways.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "crypto",
+      "derivatives",
+      "risk"
+    ]
+  },
+  {
+    "id": "trading-perp-funding-basis",
+    "name": "Perp Funding Basis",
+    "category": "crypto",
+    "description": "Interpret perp funding and basis dynamics.",
+    "triggerDescription": "Use when user asks about funding rates, basis trades, or perp sentiment.",
+    "systemPrompt": "Analyze funding/basis conditions and highlight overcrowding risk.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "crypto",
+      "funding",
+      "basis"
+    ]
+  },
+  {
+    "id": "trading-hedging-strategy",
+    "name": "Hedging Strategy",
+    "category": "risk",
+    "description": "Design practical hedging plans for directional exposure.",
+    "triggerDescription": "Use when user asks how to hedge portfolio or single-asset risk.",
+    "systemPrompt": "Provide hedging choices, cost trade-offs, and hedge failure conditions.",
+    "tools": [],
+    "tags": [
+      "hedging",
+      "risk"
+    ]
+  },
+  {
+    "id": "trading-event-driven",
+    "name": "Event Driven Analysis",
+    "category": "analysis",
+    "description": "Analyze event-driven opportunities and risks.",
+    "triggerDescription": "Use when user asks about catalyst/event-driven trades.",
+    "systemPrompt": "Map event catalysts to scenario outcomes and execution risks.",
+    "tools": [
+      "web_search",
+      "yahoo_news"
+    ],
+    "tags": [
+      "event",
+      "catalyst"
+    ]
+  },
+  {
+    "id": "trading-market-microstructure",
+    "name": "Market Microstructure",
+    "category": "analysis",
+    "description": "Discuss liquidity, spread, and execution quality considerations.",
+    "triggerDescription": "Use when user asks about execution slippage, liquidity, or order behavior.",
+    "systemPrompt": "Explain microstructure impacts on execution and trade design.",
+    "tools": [],
+    "tags": [
+      "execution",
+      "liquidity"
+    ]
+  },
+  {
+    "id": "trading-sentiment-analysis",
+    "name": "Sentiment Analysis",
+    "category": "analysis",
+    "description": "Extract sentiment bias from news flow and narratives.",
+    "triggerDescription": "Use when user asks for sentiment read on a ticker or market theme.",
+    "systemPrompt": "Summarize sentiment tone, divergence, and actionable implications.",
+    "tools": [
+      "yahoo_news",
+      "web_search"
+    ],
+    "tags": [
+      "sentiment",
+      "news"
+    ]
+  },
+  {
+    "id": "trading-trade-journal",
+    "name": "Trade Journal Analysis",
+    "category": "tool",
+    "description": "Evaluate trading behavior patterns from journal inputs.",
+    "triggerDescription": "Use when user asks to analyze personal trade history and behavior bias.",
+    "systemPrompt": "Identify behavioral patterns, risk drift, and actionable process improvements.",
+    "tools": [
+      "finance_recall_market_memory",
+      "finance_store_market_memory"
+    ],
+    "tags": [
+      "journal",
+      "behavior"
+    ]
+  },
+  {
+    "id": "trading-shadow-account",
+    "name": "Shadow Account",
+    "category": "tool",
+    "description": "Assess counterfactual strategy quality versus observed execution.",
+    "triggerDescription": "Use when user asks for shadow-account style evaluation and missed-opportunity analysis.",
+    "systemPrompt": "Provide shadow-account style diagnostics and process-level recommendations.",
+    "tools": [],
+    "tags": [
+      "shadow-account",
+      "diagnostics"
+    ]
+  },
+  {
+    "id": "trading-adr-hshare",
+    "name": "Adr Hshare",
+    "category": "flow",
+    "description": "adr hshare trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for adr hshare analysis or workflow.",
+    "systemPrompt": "You are the adr-hshare specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "adr-hshare"
+    ]
+  },
+  {
+    "id": "trading-akshare",
+    "name": "Akshare",
+    "category": "data-source",
+    "description": "akshare trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for akshare analysis or workflow.",
+    "systemPrompt": "You are the akshare specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [],
+    "tags": [
+      "trading",
+      "akshare"
+    ]
+  },
+  {
+    "id": "trading-ashare-pre-st-filter",
+    "name": "Ashare Pre St Filter",
+    "category": "risk",
+    "description": "ashare pre st filter trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for ashare pre st filter analysis or workflow.",
+    "systemPrompt": "You are the ashare-pre-st-filter specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [],
+    "tags": [
+      "trading",
+      "ashare-pre-st-filter"
+    ]
+  },
+  {
+    "id": "trading-backtest-diagnose",
+    "name": "Backtest Diagnose",
+    "category": "tool",
+    "description": "backtest diagnose trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for backtest diagnose analysis or workflow.",
+    "systemPrompt": "You are the backtest-diagnose specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "finance_recall_market_memory",
+      "finance_store_market_memory"
+    ],
+    "tags": [
+      "trading",
+      "backtest-diagnose"
+    ]
+  },
+  {
+    "id": "trading-behavioral-finance",
+    "name": "Behavioral Finance",
+    "category": "analysis",
+    "description": "behavioral finance trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for behavioral finance analysis or workflow.",
+    "systemPrompt": "You are the behavioral-finance specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "behavioral-finance"
+    ]
+  },
+  {
+    "id": "trading-candlestick",
+    "name": "Candlestick",
+    "category": "strategy",
+    "description": "candlestick trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for candlestick analysis or workflow.",
+    "systemPrompt": "You are the candlestick specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "trading",
+      "candlestick"
+    ]
+  },
+  {
+    "id": "trading-ccxt",
+    "name": "Ccxt",
+    "category": "data-source",
+    "description": "ccxt trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for ccxt analysis or workflow.",
+    "systemPrompt": "You are the ccxt specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [],
+    "tags": [
+      "trading",
+      "ccxt"
+    ]
+  },
+  {
+    "id": "trading-chanlun",
+    "name": "Chanlun",
+    "category": "strategy",
+    "description": "chanlun trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for chanlun analysis or workflow.",
+    "systemPrompt": "You are the chanlun specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [],
+    "tags": [
+      "trading",
+      "chanlun"
+    ]
+  },
+  {
+    "id": "trading-commodity-analysis",
+    "name": "Commodity Analysis",
+    "category": "analysis",
+    "description": "commodity analysis trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for commodity analysis analysis or workflow.",
+    "systemPrompt": "You are the commodity-analysis specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "commodity-analysis"
+    ]
+  },
+  {
+    "id": "trading-convertible-bond",
+    "name": "Convertible Bond",
+    "category": "asset-class",
+    "description": "convertible bond trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for convertible bond analysis or workflow.",
+    "systemPrompt": "You are the convertible-bond specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "convertible-bond"
+    ]
+  },
+  {
+    "id": "trading-corporate-events",
+    "name": "Corporate Events",
+    "category": "analysis",
+    "description": "corporate events trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for corporate events analysis or workflow.",
+    "systemPrompt": "You are the corporate-events specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "corporate-events"
+    ]
+  },
+  {
+    "id": "trading-cross-market-strategy",
+    "name": "Cross Market Strategy",
+    "category": "strategy",
+    "description": "cross market strategy trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for cross market strategy analysis or workflow.",
+    "systemPrompt": "You are the cross-market-strategy specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "trading",
+      "cross-market-strategy"
+    ]
+  },
+  {
+    "id": "trading-crypto-derivatives",
+    "name": "Crypto Derivatives",
+    "category": "crypto",
+    "description": "crypto derivatives trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for crypto derivatives analysis or workflow.",
+    "systemPrompt": "You are the crypto-derivatives specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "crypto-derivatives"
+    ]
+  },
+  {
+    "id": "trading-earnings-revision",
+    "name": "Earnings Revision",
+    "category": "analysis",
+    "description": "earnings revision trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for earnings revision analysis or workflow.",
+    "systemPrompt": "You are the earnings-revision specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "yahoo_news",
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "earnings-revision"
+    ]
+  },
+  {
+    "id": "trading-elliott-wave",
+    "name": "Elliott Wave",
+    "category": "strategy",
+    "description": "elliott wave trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for elliott wave analysis or workflow.",
+    "systemPrompt": "You are the elliott-wave specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "trading",
+      "elliott-wave"
+    ]
+  },
+  {
+    "id": "trading-execution-model",
+    "name": "Execution Model",
+    "category": "strategy",
+    "description": "execution model trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for execution model analysis or workflow.",
+    "systemPrompt": "You are the execution-model specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [],
+    "tags": [
+      "trading",
+      "execution-model"
+    ]
+  },
+  {
+    "id": "trading-fundamental-filter",
+    "name": "Fundamental Filter",
+    "category": "strategy",
+    "description": "fundamental filter trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for fundamental filter analysis or workflow.",
+    "systemPrompt": "You are the fundamental-filter specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [],
+    "tags": [
+      "trading",
+      "fundamental-filter"
+    ]
+  },
+  {
+    "id": "trading-geopolitical-risk",
+    "name": "Geopolitical Risk",
+    "category": "analysis",
+    "description": "geopolitical risk trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for geopolitical risk analysis or workflow.",
+    "systemPrompt": "You are the geopolitical-risk specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "geopolitical-risk"
+    ]
+  },
+  {
+    "id": "trading-harmonic",
+    "name": "Harmonic",
+    "category": "strategy",
+    "description": "harmonic trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for harmonic analysis or workflow.",
+    "systemPrompt": "You are the harmonic specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [],
+    "tags": [
+      "trading",
+      "harmonic"
+    ]
+  },
+  {
+    "id": "trading-ichimoku",
+    "name": "Ichimoku",
+    "category": "strategy",
+    "description": "ichimoku trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for ichimoku analysis or workflow.",
+    "systemPrompt": "You are the ichimoku specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "trading",
+      "ichimoku"
+    ]
+  },
+  {
+    "id": "trading-minute-analysis",
+    "name": "Minute Analysis",
+    "category": "strategy",
+    "description": "minute analysis trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for minute analysis analysis or workflow.",
+    "systemPrompt": "You are the minute-analysis specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "trading",
+      "minute-analysis"
+    ]
+  },
+  {
+    "id": "trading-quant-statistics",
+    "name": "Quant Statistics",
+    "category": "analysis",
+    "description": "quant statistics trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for quant statistics analysis or workflow.",
+    "systemPrompt": "You are the quant-statistics specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "quant-statistics"
+    ]
+  },
+  {
+    "id": "trading-regulatory-knowledge",
+    "name": "Regulatory Knowledge",
+    "category": "analysis",
+    "description": "regulatory knowledge trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for regulatory knowledge analysis or workflow.",
+    "systemPrompt": "You are the regulatory-knowledge specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "regulatory-knowledge"
+    ]
+  },
+  {
+    "id": "trading-seasonal",
+    "name": "Seasonal",
+    "category": "strategy",
+    "description": "seasonal trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for seasonal analysis or workflow.",
+    "systemPrompt": "You are the seasonal specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "trading",
+      "seasonal"
+    ]
+  },
+  {
+    "id": "trading-smc",
+    "name": "Smc",
+    "category": "strategy",
+    "description": "smc trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for smc analysis or workflow.",
+    "systemPrompt": "You are the smc specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "yahoo_ohlcv"
+    ],
+    "tags": [
+      "trading",
+      "smc"
+    ]
+  },
+  {
+    "id": "trading-social-media-intelligence",
+    "name": "Social Media Intelligence",
+    "category": "analysis",
+    "description": "social media intelligence trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for social media intelligence analysis or workflow.",
+    "systemPrompt": "You are the social-media-intelligence specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "yahoo_news",
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "social-media-intelligence"
+    ]
+  },
+  {
+    "id": "trading-strategy-generate",
+    "name": "Strategy Generate",
+    "category": "strategy",
+    "description": "strategy generate trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for strategy generate analysis or workflow.",
+    "systemPrompt": "You are the strategy-generate specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [],
+    "tags": [
+      "trading",
+      "strategy-generate"
+    ]
+  },
+  {
+    "id": "trading-token-unlock-treasury",
+    "name": "Token Unlock Treasury",
+    "category": "crypto",
+    "description": "token unlock treasury trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for token unlock treasury analysis or workflow.",
+    "systemPrompt": "You are the token-unlock-treasury specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [
+      "web_search"
+    ],
+    "tags": [
+      "trading",
+      "token-unlock-treasury"
+    ]
+  },
+  {
+    "id": "trading-tushare",
+    "name": "Tushare",
+    "category": "data-source",
+    "description": "tushare trading skill imported for full skill parity.",
+    "triggerDescription": "Use when the user asks for tushare analysis or workflow.",
+    "systemPrompt": "You are the tushare specialist. Provide concise, risk-aware trading guidance and state assumptions clearly.",
+    "tools": [],
+    "tags": [
+      "trading",
+      "tushare"
+    ]
+  }
+]

@@ -16,6 +16,7 @@ import '../services/api_service.dart';
 import 'settings_screen.dart';
 import 'channels_screen.dart';
 import 'pipelines_screen.dart';
+import 'evolution_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({Key? key}) : super(key: key);
@@ -34,17 +35,20 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   bool _isRecording = false;
   bool _isRecordingStarting = false;
   bool _isProcessing = false;
+  bool _isSending = false; // Guard against double-submits
   String _statusText = '';
   
   // Siri-like features
   double _amplitude = 0.0;
   bool _isWakeWordListening = false;
+  bool _isWakeWordStarting = false;
   DateTime? _lastVoiceActivity;
+  DateTime? _lastWakeWordStartAt;
   StreamSubscription? _amplitudeSub;
   StreamSubscription? _audioPlayerSub;
   late AnimationController _pulseController;
   final SpeechToText _speech = SpeechToText();
-
+  Object _currentRequestId = Object();
 
   List<Map<String, String>> _messages = [];
   Timer? _wakeWordTimer;
@@ -61,6 +65,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     );
     _checkMicPermission();
     _loadChats();
+    _textController.addListener(() {
+      if (mounted) setState(() {});
+    });
   }
 
   Future<void> _checkMicPermission() async {
@@ -152,12 +159,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _scrollToBottom();
   }
 
-  Future<void> _handleSSEStream(Stream<SSEEvent> stream) async {
+  Future<void> _handleSSEStream(Stream<SSEEvent> stream, Object requestId) async {
     String agentText = '';
     bool agentMsgAdded = false;
 
     await for (final event in stream) {
-      if (!mounted) return;
+      if (!mounted || _currentRequestId != requestId) return;
 
       switch (event.type) {
         case 'transcription':
@@ -165,9 +172,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           break;
 
         case 'thinking':
-          // Server signals "Generating audio..." via thinking — suppress it here
-          // because the status bar already shows it.
-          if (event.data != 'Generating audio...') {
+          // Server signals audio generation — suppress it gracefully if it's tts noise
+          if (!event.data.contains('Generating audio')) {
             setState(() => _statusText = event.data);
           }
           break;
@@ -187,6 +193,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                 }
               }
             });
+          }
+          // Abort any in-progress audio from pre-tool conversational filler
+          _audioQueue.clear();
+          if (_audioPlayer.state == PlayerState.playing) {
+             _audioPlayer.stop();
           }
           setState(() => _statusText = 'Using tool: ${event.data}...');
           break;
@@ -268,12 +279,16 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     try {
       bool available = await _speech.initialize(
         onStatus: (status) async {
+          if (status == 'listening') {
+            _isWakeWordListening = true;
+          }
           if (status == 'done' || status == 'notListening') {
+            _isWakeWordListening = false;
             await Future.delayed(const Duration(milliseconds: 500));
             if (!mounted) return;
             
             final config = Provider.of<AppState>(context, listen: false).config;
-            if (config?.voiceHandling.wakeWordEnabled == true && !_isRecording && !_isRecordingStarting) {
+            if (config?.voiceHandling.wakeWordEnabled == true && !_isRecording && !_isRecordingStarting && !_isProcessing) {
               _startWakeWordListening();
             }
           }
@@ -298,10 +313,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   void _startWakeWordListening() {
     final config = Provider.of<AppState>(context, listen: false).config;
-    if (config?.voiceHandling.wakeWordEnabled != true || _isRecording || _isRecordingStarting) return;
+    if (config?.voiceHandling.wakeWordEnabled != true || _isRecording || _isRecordingStarting || _isProcessing) return;
+    if (_speech.isListening || _isWakeWordListening || _isWakeWordStarting) return;
+    final DateTime now = DateTime.now();
+    if (_lastWakeWordStartAt != null &&
+        now.difference(_lastWakeWordStartAt!).inMilliseconds < 800) {
+      return;
+    }
 
     try {
-      _speech.listen(
+      _isWakeWordStarting = true;
+      _lastWakeWordStartAt = now;
+      final Future<dynamic> listenFuture = _speech.listen(
       onResult: (result) {
         final name = config?.assistantName.toLowerCase() ?? 'claw';
         final transcript = result.recognizedWords.toLowerCase();
@@ -314,7 +337,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         );
 
         if (transcript.contains(name) || isClawFuzzy) {
-          _startRecording();
+          if (!_isProcessing) {
+            _startRecording();
+          }
         }
       },
       listenFor: const Duration(seconds: 30),
@@ -322,7 +347,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       partialResults: true,
       cancelOnError: false,
     );
-    } catch(e) { debugPrint("Wake word error: $e"); }
+      listenFuture.whenComplete(() {
+        _isWakeWordStarting = false;
+      });
+    } catch (e) {
+      _isWakeWordStarting = false;
+      debugPrint("Wake word error: $e");
+    }
   }
 
 
@@ -338,18 +369,31 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _sendText() async {
-
+    if (_isSending) return; // Strict lock on double-clicks
     if (_textController.text.trim().isEmpty) return;
 
+    // FULL DUPLEX BARGE-IN for Text: Abort current processing/audio if any
+    if (_isProcessing || _audioPlayer.state == PlayerState.playing || _audioQueue.isNotEmpty) {
+      _stopProcessing();
+      await Future.delayed(const Duration(milliseconds: 100)); // Let state settle
+    }
+
     final text = _textController.text.trim();
+    _isSending = true; // Lock immediately before any async work
+    
     _textController.clear();
     _addMessage('User', text);
 
-    setState(() => _isProcessing = true);
+    setState(() {
+      _isProcessing = true;
+      _isSending = false; // Open for next turn after state is synced
+      _currentRequestId = Object();
+    });
+
     try {
       final appState = Provider.of<AppState>(context, listen: false);
       final stream = appState.apiService.streamTextChat(text, _currentChatId);
-      await _handleSSEStream(stream);
+      await _handleSSEStream(stream, _currentRequestId);
     } catch (e) {
       if (!_isAbortError(e)) _addMessage('System', 'Error: $e');
     } finally {
@@ -360,6 +404,32 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         });
       }
     }
+  }
+
+  Future<void> _retryLastMessage() async {
+    if (_isProcessing || _isSending || _messages.length < 2) return;
+    if (_messages.last['sender'] != 'Agent') return;
+    // Walk back to find the last user message
+    final lastUserMsg = _messages.reversed.firstWhere(
+      (m) => m['sender'] == 'User',
+      orElse: () => {'text': ''},
+    );
+    final textToRetry = lastUserMsg['text'] ?? '';
+    if (textToRetry.isEmpty || textToRetry == '(Voice Message)') return;
+
+    setState(() {
+      // Remove last AI message
+      if (_messages.last['sender'] == 'Agent') {
+        _messages.removeLast();
+      }
+      // Remove last User message so it can be re-added naturally by _sendText
+      if (_messages.isNotEmpty && _messages.last['sender'] == 'User') {
+        _messages.removeLast();
+      }
+    });
+
+    _textController.text = textToRetry;
+    await _sendText();
   }
 
   Future<void> _toggleRecording() async {
@@ -384,6 +454,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       final config = Provider.of<AppState>(context, listen: false).config;
       
       if (_speech.isListening) {
+        _isWakeWordListening = false;
         await _speech.stop();
         // CRITICAL FOR WINDOWS: Wait for the OS to release the hardware microphone lock
         await Future.delayed(const Duration(milliseconds: 600)); 
@@ -456,6 +527,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         setState(() {
           _isRecording = false;
           _isProcessing = true;
+          _currentRequestId = Object();
           _amplitude = 0.0;
         });
       }
@@ -465,7 +537,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         _addMessage('User', '(Voice Message)');
         final appState = Provider.of<AppState>(context, listen: false);
         final stream = appState.apiService.streamAudioChat(path, _currentChatId);
-        await _handleSSEStream(stream);
+        await _handleSSEStream(stream, _currentRequestId);
       }
     } catch (e) {
       if (!_isAbortError(e)) _addMessage('System', 'Error processing audio: $e');
@@ -491,7 +563,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   Future<void> _processAudioQueue() async {
     _isPlayingAudioQueue = true;
-    while (_audioQueue.isNotEmpty && _isProcessing) {
+    while (_audioQueue.isNotEmpty) {
       final base64Data = _audioQueue.removeAt(0);
       try {
         final bytes = base64Decode(base64Data);
@@ -501,8 +573,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         
         await _audioPlayer.play(DeviceFileSource(file.path));
         
-        // Wait for player to finish or get interrupted by Barge-in
-        while (_audioPlayer.state == PlayerState.playing && _isProcessing) {
+        // Wait for player to finish or get interrupted by Barge-in.
+        // Barge-in calls _audioPlayer.stop(), which changes state to stopped and exits this loop.
+        while (_audioPlayer.state == PlayerState.playing) {
           await Future.delayed(const Duration(milliseconds: 100));
         }
       } catch (e) {
@@ -639,6 +712,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                 },
               ),
               ListTile(
+                leading: const Icon(Icons.biotech),
+                title: const Text('Evolution'),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const EvolutionScreen()));
+                },
+              ),
+              ListTile(
                 leading: const Icon(Icons.send),
                 title: const Text('Channels'),
                 onTap: () {
@@ -688,13 +769,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                         width: 30,
                         height: 30,
                         decoration: BoxDecoration(
-                          color: isUser ? Colors.blue.shade100 : Colors.teal.shade500,
+                          color: isUser
+                              ? Colors.blue.shade100
+                              : (isSystem ? Colors.orange.shade200 : Colors.teal.shade500),
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Icon(
-                          isUser ? Icons.person : Icons.smart_toy,
+                          isUser ? Icons.person : (isSystem ? Icons.info_outline : Icons.smart_toy),
                           size: 20,
-                          color: isUser ? Colors.blue.shade700 : Colors.white,
+                          color: isUser
+                              ? Colors.blue.shade700
+                              : (isSystem ? Colors.orange.shade900 : Colors.white),
                         ),
                       ),
                       const SizedBox(width: 16),
@@ -702,12 +787,25 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              msg['sender']!,
-                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  msg['sender']!,
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                ),
+                                if (index == _messages.length - 1 && msg['sender'] == 'Agent' && !_isProcessing)
+                                  IconButton(
+                                    icon: const Icon(Icons.refresh, size: 16, color: Colors.grey),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    onPressed: _retryLastMessage,
+                                    tooltip: 'Retry last message',
+                                  ),
+                              ],
                             ),
                             const SizedBox(height: 4),
-                            if (isUser || isSystem)
+                            if (isUser)
                               Text(
                                 msg['text'] ?? '',
                                 style: const TextStyle(fontSize: 15, height: 1.5, color: Colors.black87),
@@ -717,10 +815,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                                 data: msg['text'] ?? '',
                                 selectable: true,
                                 styleSheet: MarkdownStyleSheet(
-                                  p: const TextStyle(fontSize: 15, height: 1.5, color: Colors.black87),
+                                  p: TextStyle(
+                                    fontSize: 15,
+                                    height: 1.5,
+                                    color: isSystem ? Colors.orange.shade900 : Colors.black87,
+                                  ),
                                   codeblockPadding: const EdgeInsets.all(12),
                                   codeblockDecoration: BoxDecoration(
-                                    color: Colors.grey[200],
+                                    color: isSystem ? Colors.orange[100] : Colors.grey[200],
                                     borderRadius: BorderRadius.circular(8),
                                   ),
                                 ),
@@ -872,4 +974,3 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     );
   }
 }
-

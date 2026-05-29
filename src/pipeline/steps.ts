@@ -8,6 +8,65 @@ import { registerStep, StepResult } from './pipeline-engine';
 import { deliverToChannel } from './channels';
 import { historyManager } from '../agents/agent-history';
 
+interface SearchSnippet {
+  title: string;
+  url: string;
+  description: string;
+}
+
+function buildPipelineScopedChatId(config: Record<string, any>, suffix: string): string {
+  if (config.chat_id) return config.chat_id;
+  const pipelineId = String(config.__pipelineId || 'pipeline');
+  const runId = String(config.__pipelineRunId || 'run');
+  // Use dashes instead of colons (colons are invalid in Windows file paths)
+  return `pipeline-${pipelineId}-run-${runId}-${suffix}`;
+}
+
+function formatSearchSnippets(snippets: SearchSnippet[]): string {
+  return snippets
+    .map((r: SearchSnippet, i: number) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description}`)
+    .join('\n\n');
+}
+
+function stripHtml(value: string): string {
+  return value
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, '\'')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function searchDuckDuckGoFallback(query: string, maxResults: number): Promise<SearchSnippet[]> {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const response = await fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (compatible; pipeline-research-bot/1.0)',
+    },
+  });
+  if (!response.ok) {
+    return [];
+  }
+  const html = await response.text();
+  const matches = [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)];
+  return matches
+    .slice(0, maxResults)
+    .map((match: RegExpMatchArray) => {
+      const rawHref = String(match[1] || '');
+      const hrefMatch = rawHref.match(/[?&]uddg=([^&]+)/);
+      const urlValue = hrefMatch ? decodeURIComponent(hrefMatch[1]) : rawHref;
+      return {
+        title: stripHtml(String(match[2] || 'Untitled result')),
+        url: urlValue,
+        description: 'Fetched via DuckDuckGo fallback search.',
+      };
+    })
+    .filter((item: SearchSnippet) => item.title.length > 0 && item.url.length > 0);
+}
+
 // ── ai_task: Run a prompt through the main agent ──────────────────────────────
 
 registerStep('ai_task', async (config, context): Promise<StepResult> => {
@@ -21,9 +80,10 @@ registerStep('ai_task', async (config, context): Promise<StepResult> => {
     const { ReactAgent } = await import('../agents/react-agent');
     const agent = new ReactAgent();
     await agent.initialize([]);
+    const chatId = buildPipelineScopedChatId(config, 'ai_task');
 
     let result = '';
-    for await (const event of agent.processStream(fullPrompt, config.chat_id || 'pipeline', new AbortController().signal)) {
+    for await (const event of agent.processStream(fullPrompt, chatId, new AbortController().signal)) {
       if (event.type === 'text_done') result = event.data;
     }
     return { success: true, output: result || 'No response from agent.' };
@@ -38,18 +98,49 @@ registerStep('research', async (config, context): Promise<StepResult> => {
   const query = config.query || context || '';
   if (!query) return { success: false, output: 'No search query provided.' };
 
+  const maxResults = Number(config.max_results || 5);
+  const snippets: SearchSnippet[] = [];
+  let googleError: string | null = null;
+
+  // Primary provider: googlethis
   try {
-    // Use the existing googlethis package
     const google = require('googlethis');
     const results = await google.search(query, { page: 0, safe: false });
-    const snippets = (results.results || [])
-      .slice(0, config.max_results || 5)
-      .map((r: any, i: number) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description}`)
-      .join('\n\n');
-    return { success: true, output: snippets || 'No results found.', data: results.results };
+    const primarySnippets = (results.results || [])
+      .slice(0, maxResults)
+      .map((r: any) => ({
+        title: String(r.title || '').trim(),
+        url: String(r.url || '').trim(),
+        description: String(r.description || '').trim(),
+      }))
+      .filter((r: SearchSnippet) => r.title && r.url);
+    snippets.push(...primarySnippets);
   } catch (e: any) {
-    return { success: false, output: `Research failed: ${e.message}` };
+    googleError = e.message;
   }
+
+  // Fallback provider: DuckDuckGo - used when Google fails OR returns no results
+  if (snippets.length === 0) {
+    try {
+      const ddgSnippets = await searchDuckDuckGoFallback(query, maxResults);
+      snippets.push(...ddgSnippets);
+    } catch (fallbackError: any) {
+      const baseError = googleError ? `Google: ${googleError}` : 'Google returned no results';
+      return {
+        success: false,
+        output: `Research failed. ${baseError}. DuckDuckGo fallback also failed: ${fallbackError.message}`,
+      };
+    }
+  }
+
+  if (snippets.length === 0) {
+    const reason = googleError ? `Google error: ${googleError}` : 'No results from any provider';
+    return { success: false, output: `No research results found for query: "${query}". ${reason}` };
+  }
+
+  // Success - fallback worked even if Google failed
+  const source = googleError ? ' (via DuckDuckGo fallback)' : '';
+  return { success: true, output: formatSearchSnippets(snippets) + source, data: snippets };
 });
 
 // ── browse: Playwright browser automation ─────────────────────────────────────
@@ -93,18 +184,25 @@ registerStep('browse', async (config, context): Promise<StepResult> => {
 // ── summarize: LLM summarization of context ───────────────────────────────────
 
 registerStep('summarize', async (config, context): Promise<StepResult> => {
-  if (!context) return { success: false, output: 'Nothing to summarize (no input from previous step).' };
+  if (!context) {
+    return {
+      success: true,
+      output: 'Skipped summarize step (no input from previous step).',
+      data: { skipped: true },
+    };
+  }
 
   const prompt = config.prompt || 'Summarize the following content concisely:';
   try {
     const { ReactAgent } = await import('../agents/react-agent');
     const agent = new ReactAgent();
     await agent.initialize([]);
+    const chatId = buildPipelineScopedChatId(config, 'summarize');
 
     let result = '';
     for await (const event of agent.processStream(
       `${prompt}\n\n${context.substring(0, 8000)}`,
-      'pipeline-summarize',
+      chatId,
       new AbortController().signal
     )) {
       if (event.type === 'text_done') result = event.data;
@@ -139,9 +237,10 @@ registerStep('generate_doc', async (config, context): Promise<StepResult> => {
     const { ReactAgent } = await import('../agents/react-agent');
     const agent = new ReactAgent();
     await agent.initialize([]);
+    const chatId = buildPipelineScopedChatId(config, 'generate_doc');
 
     let result = '';
-    for await (const event of agent.processStream(fullPrompt, 'pipeline-doc', new AbortController().signal)) {
+    for await (const event of agent.processStream(fullPrompt, chatId, new AbortController().signal)) {
       if (event.type === 'text_done') result = event.data;
     }
 
@@ -163,11 +262,26 @@ registerStep('generate_doc', async (config, context): Promise<StepResult> => {
 registerStep('deliver', async (config, context): Promise<StepResult> => {
   // Support both 'channel' and 'type' for robustness (some models hallucinate 'type')
   const channel = config.channel || config.type || 'history';
-  const message = config.message || context || 'No content to deliver.';
   
-  // For push channel, we allow passing a 'title'
-  const settings = { ...config.settings };
+  // For history channel: prioritize pipeline context (actual output) over config.message
+  // For other channels (push, email, etc.): use config.message as the notification text
+  const message = channel === 'history'
+    ? (context || config.message || 'No content to deliver.')
+    : (config.message || context || 'No content to deliver.');
+
+  // Build settings from config.settings + top-level config fields for HistoryProvider
+  const settings: Record<string, string> = { ...config.settings };
   if (config.title && !settings.title) settings.title = config.title;
+  
+  // Use pipeline's own ID for chat_id (not generated from name)
+  const effectiveChatId = config.chat_id || config.__pipelineId || 'execution-pipeline';
+  if (!settings.chat_id) settings.chat_id = effectiveChatId;
+  
+  // Use pipeline name + date for chat_title
+  const effectiveTitle = config.chat_title || (config.__pipelineName 
+    ? `${config.__pipelineName} - ${new Date().toISOString().split('T')[0]}`
+    : undefined);
+  if (effectiveTitle && !settings.chat_title) settings.chat_title = effectiveTitle;
 
   const result = await deliverToChannel(channel, message, settings);
   return { success: result.startsWith('✅'), output: result };
@@ -206,12 +320,19 @@ registerStep('get_system_info', async (config, context): Promise<StepResult> => 
 });
 
 registerStep('save_history', async (config, context): Promise<StepResult> => {
-  const chatId = config.chat_id || 'pipeline-output';
+  // Use pipeline's own ID for chat_id (not generated from name)
+  const chatId = config.chat_id || config.__pipelineId || 'execution-pipeline';
+  
+  // Use pipeline name + date for chat_title
+  const chatTitle = config.chat_title || (config.__pipelineName 
+    ? `${config.__pipelineName} - ${new Date().toISOString().split('T')[0]}`
+    : 'Pipeline Execution');
+  
   const tag = config.tag || 'pipeline';
   const { SystemMessage } = await import('@langchain/core/messages');
   const thread = historyManager.getThread(chatId);
   thread.push(new SystemMessage({ content: `[${tag}] ${context || 'Empty pipeline output.'}` }));
   historyManager.setThread(chatId, thread);
-  await historyManager.saveChat(chatId);
+  await historyManager.saveChat(chatId, chatTitle);
   return { success: true, output: `✅ Saved to history (${chatId}).` };
 });

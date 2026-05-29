@@ -1,14 +1,16 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/channel_provider.dart';
 
-/// Channel icons & metadata for the UI
 const _channelMeta = {
-  'discord': {'icon': Icons.discord, 'color': Color(0xFF5865F2), 'fields': ['webhook_url']},
-  'telegram': {'icon': Icons.telegram, 'color': Color(0xFF2AABEE), 'fields': ['bot_token', 'chat_id']},
-  'whatsapp': {'icon': Icons.chat, 'color': Color(0xFF25D366), 'fields': ['twilio_sid', 'twilio_token', 'from_number', 'to_number']},
-  'email': {'icon': Icons.email, 'color': Color(0xFFEA4335), 'fields': ['smtp_host', 'smtp_port', 'email_user', 'email_pass', 'to_email']},
-  'history': {'icon': Icons.history, 'color': Color(0xFF757575), 'fields': ['chat_id']},
+  'discord': {'icon': Icons.discord, 'color': Color(0xFF5865F2)},
+  'telegram': {'icon': Icons.telegram, 'color': Color(0xFF2AABEE)},
+  'whatsapp': {'icon': Icons.chat, 'color': Color(0xFF25D366)},
+  'slack': {'icon': Icons.abc, 'color': Color(0xFFE01E5A)},
+  'email': {'icon': Icons.email, 'color': Color(0xFFEA4335)},
+  'history': {'icon': Icons.history, 'color': Color(0xFF757575)},
+  'push': {'icon': Icons.notifications, 'color': Color(0xFFFFA000)},
 };
 
 class ChannelsScreen extends StatefulWidget {
@@ -17,244 +19,311 @@ class ChannelsScreen extends StatefulWidget {
   State<ChannelsScreen> createState() => _ChannelsScreenState();
 }
 
-class _ChannelsScreenState extends State<ChannelsScreen> {
+class _ChannelsScreenState extends State<ChannelsScreen> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  List<Map<String, dynamic>> _pendingPairings = [];
+  Map<String, dynamic> _approvedPairings = {};
+  bool _isLoadingPairings = false;
+
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ChannelProvider>().loadChannels();
+      _loadData();
     });
   }
 
-  Future<void> _showConnectDialog(String type, ChannelProvider provider) async {
-    final meta = _channelMeta[type];
-    final fields = (meta?['fields'] as List<String>?) ?? [];
-    final existing = provider.getChannel(type);
+  Future<void> _loadData() async {
+    final provider = context.read<ChannelProvider>();
+    provider.loadChannels();
+    setState(() => _isLoadingPairings = true);
+    final pending = await provider.getPendingPairings();
+    final approved = await provider.getApprovedPairings();
+    setState(() {
+      _pendingPairings = pending;
+      _approvedPairings = approved;
+      _isLoadingPairings = false;
+    });
+  }
 
-    final result = await showDialog<Map<String, String>>(
+  IconData _getIcon(String type) => (_channelMeta[type]?['icon'] as IconData?) ?? Icons.link;
+  Color _getColor(String type) => (_channelMeta[type]?['color'] as Color?) ?? Colors.blueAccent;
+
+  Future<void> _showWhatsAppQR() async {
+    final provider = context.read<ChannelProvider>();
+    showDialog(
       context: context,
-      barrierColor: Colors.black.withOpacity(0.4),
-      builder: (ctx) => _ChannelConnectDialog(
-        type: type,
-        fields: fields,
-        existingSettings: (existing?['settings'] as Map?)?.cast<String, dynamic>(),
-        icon: (meta?['icon'] as IconData?) ?? Icons.link,
-        color: (meta?['color'] as Color?) ?? Colors.blueAccent,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        title: Text('Connecting to WhatsApp...'),
+        content: SizedBox(height: 100, child: Center(child: CircularProgressIndicator())),
       ),
     );
 
-    if (result != null) {
-      final name = '${type[0].toUpperCase()}${type.substring(1)} Channel';
-      await provider.connectChannel(type, name, result);
+    Map<String, dynamic>? finalStatus;
+    
+    // Poll up to 8 times (12 seconds) for the QR code to be generated
+    for (int i = 0; i < 8; i++) {
+        await Future.delayed(const Duration(milliseconds: 1500));
+        if (!mounted) return;
+        
+        finalStatus = await provider.getWhatsAppStatus();
+        if (finalStatus['qr'] != null || finalStatus['connected'] == true) {
+            break;
+        }
     }
-  }
+    
+    Navigator.pop(context); // close loading dialog
 
-  @override
-  Widget build(BuildContext context) {
-    final provider = context.watch<ChannelProvider>();
+    if (finalStatus == null) return;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Delivery Channels', style: TextStyle(fontWeight: FontWeight.w600)),
-        backgroundColor: Colors.white, foregroundColor: Colors.black87, elevation: 0,
-      ),
-      backgroundColor: const Color(0xFFF5F5F5),
-      body: provider.isLoading
-        ? const Center(child: CircularProgressIndicator())
-        : ListView(
-            padding: const EdgeInsets.all(16),
+    if (finalStatus['connected'] == true && finalStatus['qr'] == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('WhatsApp is already connected.')));
+      return;
+    }
+
+    if (finalStatus['qr'] != null && finalStatus['qr'] is String) {
+      final base64String = finalStatus['qr'].split(',').last;
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Scan QR Code'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              const Padding(
-                padding: EdgeInsets.only(bottom: 16),
-                child: Text('Connect channels to receive pipeline outputs via Discord, Telegram, WhatsApp, Email, or local history.',
-                  style: TextStyle(color: Colors.black54, fontSize: 14)),
-              ),
-              ...provider.supported.map((type) {
-                final meta = _channelMeta[type];
-                final connected = provider.isConnected(type);
-                final icon = (meta?['icon'] as IconData?) ?? Icons.link;
-                final color = (meta?['color'] as Color?) ?? Colors.grey;
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  child: ListTile(
-                    leading: CircleAvatar(backgroundColor: color.withOpacity(0.15), child: Icon(icon, color: color)),
-                    title: Text(type[0].toUpperCase() + type.substring(1), style: const TextStyle(fontWeight: FontWeight.w600)),
-                    subtitle: Text(connected ? 'Connected ✅' : 'Not connected'),
-                    trailing: connected
-                      ? Row(mainAxisSize: MainAxisSize.min, children: [
-                          IconButton(icon: const Icon(Icons.edit, size: 20), onPressed: () => _showConnectDialog(type, provider)),
-                          IconButton(icon: const Icon(Icons.link_off, color: Colors.red, size: 20), onPressed: () => provider.disconnectChannel(type)),
-                        ])
-                      : ElevatedButton(
-                          onPressed: () => _showConnectDialog(type, provider),
-                          style: ElevatedButton.styleFrom(backgroundColor: color),
-                          child: const Text('Connect', style: TextStyle(color: Colors.white)),
-                        ),
-                  ),
-                );
-              }),
+              const Text('Open WhatsApp on your phone\n-> Linked Devices\n-> Link a Device', textAlign: TextAlign.center),
+              const SizedBox(height: 16),
+              Image.memory(base64Decode(base64String), width: 250, height: 250),
             ],
           ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Done')),
+          ],
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('QR code not ready. Try again in a few seconds.')));
+    }
+  }
+
+  Future<void> _showTestChatDialog(String type, String id) async {
+    final controller = TextEditingController();
+    final provider = context.read<ChannelProvider>();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Test Chat: $type'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Send a manual message to $id', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 16),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(hintText: 'Type message...', border: OutlineInputBorder()),
+              maxLines: 3,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () async {
+              final msg = controller.text.trim();
+              if (msg.isEmpty) return;
+              Navigator.pop(ctx);
+              final success = await provider.sendTestMessage(type, id, msg);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(success ? '✅ Message sent!' : '❌ Failed to send message.')),
+                );
+              }
+            },
+            child: const Text('Send'),
+          ),
+        ],
+      ),
     );
   }
-}
 
-class _ChannelConnectDialog extends StatefulWidget {
-  final String type;
-  final List<String> fields;
-  final Map<String, dynamic>? existingSettings;
-  final IconData icon;
-  final Color color;
-
-  const _ChannelConnectDialog({
-    required this.type,
-    required this.fields,
-    this.existingSettings,
-    required this.icon,
-    required this.color,
-  });
-
-  @override
-  State<_ChannelConnectDialog> createState() => _ChannelConnectDialogState();
-}
-
-class _ChannelConnectDialogState extends State<_ChannelConnectDialog> {
-  final Map<String, TextEditingController> _controllers = {};
-
-  @override
-  void initState() {
-    super.initState();
-    for (final f in widget.fields) {
-      final val = widget.existingSettings?[f]?.toString() ?? '';
-      _controllers[f] = TextEditingController(text: val);
-    }
+  Widget _buildChannelSettings() {
+    final provider = context.watch<ChannelProvider>();
+    return RefreshIndicator(
+      onRefresh: _loadData,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text('Channel Services', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          const Text('Enable or disable core channel services. API tokens are managed via the backend environment (.env).', style: TextStyle(color: Colors.black54)),
+          const SizedBox(height: 16),
+          ...provider.supported.map((type) {
+            final connected = provider.isConnected(type);
+            final color = _getColor(type);
+            return Card(
+              margin: const EdgeInsets.only(bottom: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              child: ListTile(
+                leading: CircleAvatar(backgroundColor: color.withOpacity(0.15), child: Icon(_getIcon(type), color: color)),
+                title: Text(type[0].toUpperCase() + type.substring(1), style: const TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text(connected ? 'Running' : 'Stopped'),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (type == 'whatsapp' && connected) ...[
+                      IconButton(
+                        icon: const Icon(Icons.phonelink_erase),
+                        tooltip: 'Reset WhatsApp Session',
+                        onPressed: () async {
+                          final confirm = await showDialog<bool>(
+                            context: context,
+                            builder: (ctx) => AlertDialog(
+                              title: const Text('Reset WhatsApp?'),
+                              content: const Text('This will delete your current WhatsApp session to fix connection issues. You will need to scan a new QR code.'),
+                              actions: [
+                                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+                                TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Reset', style: TextStyle(color: Colors.red))),
+                              ],
+                            ),
+                          );
+                          if (confirm == true) {
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Resetting session... Please wait.')));
+                            await provider.resetWhatsApp();
+                            await Future.delayed(const Duration(seconds: 2));
+                            _loadData(); // reload UI
+                          }
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.qr_code),
+                        tooltip: 'Show QR Code',
+                        onPressed: _showWhatsAppQR,
+                      ),
+                    ],
+                    Switch(
+                      value: connected,
+                      activeColor: color,
+                      onChanged: (val) async {
+                        final exists = provider.getChannel(type) != null;
+                        if (!exists && val) {
+                           await provider.connectChannel(type, '${type.toUpperCase()} Channel', {});
+                        } else {
+                           await provider.toggleChannel(type);
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
   }
 
-  @override
-  void dispose() {
-    for (final c in _controllers.values) {
-      c.dispose();
-    }
-    super.dispose();
+  Widget _buildPairingDashboard() {
+    return RefreshIndicator(
+      onRefresh: _loadData,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text('Pending Pairing Requests', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          const Text('Approve devices trying to communicate with VoiceClaw.', style: TextStyle(color: Colors.black54)),
+          const SizedBox(height: 16),
+          if (_isLoadingPairings) const Center(child: CircularProgressIndicator()),
+          if (!_isLoadingPairings && _pendingPairings.isEmpty)
+            const Padding(padding: EdgeInsets.all(16), child: Text('No pending requests', style: TextStyle(color: Colors.black38, fontStyle: FontStyle.italic))),
+            
+          ..._pendingPairings.map((p) {
+             return Card(
+               margin: const EdgeInsets.only(bottom: 8),
+               child: ListTile(
+                 leading: CircleAvatar(backgroundColor: _getColor(p['channelType']).withOpacity(0.1), child: Icon(_getIcon(p['channelType']), color: _getColor(p['channelType']))),
+                 title: Text('${p['senderName']} (${p['senderId']})', style: const TextStyle(fontWeight: FontWeight.bold)),
+                 subtitle: Text('Code: ${p['code']} • Channel: ${p['channelType']}'),
+                 trailing: Row(
+                   mainAxisSize: MainAxisSize.min,
+                   children: [
+                     IconButton(icon: const Icon(Icons.close, color: Colors.grey), onPressed: () async {
+                       await context.read<ChannelProvider>().rejectPairing(p['code']);
+                       _loadData();
+                     }),
+                     ElevatedButton(
+                       style: ElevatedButton.styleFrom(backgroundColor: Colors.black, foregroundColor: Colors.white),
+                       onPressed: () async {
+                         await context.read<ChannelProvider>().approvePairing(p['code']);
+                         _loadData();
+                       },
+                       child: const Text('Approve'),
+                     ),
+                   ],
+                 )
+               ),
+             );
+          }).toList(),
+          
+          const SizedBox(height: 32),
+          const Text('Approved Endpoints', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          ..._approvedPairings.entries.expand((entry) {
+             final channelType = entry.key;
+             final List ids = entry.value;
+             return ids.map((id) => Card(
+               margin: const EdgeInsets.only(bottom: 8),
+               child: ListTile(
+                 leading: CircleAvatar(backgroundColor: _getColor(channelType).withOpacity(0.1), child: Icon(_getIcon(channelType), color: _getColor(channelType))),
+                 title: Text(id.toString()),
+                 subtitle: Text(channelType[0].toUpperCase() + channelType.substring(1)),
+                 trailing: Row(
+                   mainAxisSize: MainAxisSize.min,
+                   children: [
+                     IconButton(
+                       icon: const Icon(Icons.chat_bubble_outline, size: 20),
+                       tooltip: 'Test Message',
+                       onPressed: () => _showTestChatDialog(channelType, id.toString()),
+                     ),
+                     IconButton(icon: const Icon(Icons.link_off, color: Colors.red), onPressed: () async {
+                         await context.read<ChannelProvider>().revokePairing(channelType, id.toString());
+                         _loadData();
+                     }),
+                   ],
+                 ),
+               )
+             ));
+          }),
+          if (!_isLoadingPairings && _approvedPairings.isEmpty)
+            const Padding(padding: EdgeInsets.all(16), child: Text('No approved endpoints yet', style: TextStyle(color: Colors.black38, fontStyle: FontStyle.italic))),
+        ],
+      )
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-      elevation: 0,
-      backgroundColor: Colors.transparent,
-      child: Container(
-        padding: const EdgeInsets.all(24),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(24),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.1),
-              blurRadius: 20,
-              offset: const Offset(0, 10),
-            ),
+    return Scaffold(
+      backgroundColor: const Color(0xFFF5F5F5),
+      appBar: AppBar(
+        title: const Text('Channel Connections', style: TextStyle(fontWeight: FontWeight.w600)),
+        backgroundColor: Colors.white, foregroundColor: Colors.black87, elevation: 0,
+        bottom: TabBar(
+          controller: _tabController,
+          labelColor: Colors.black87,
+          indicatorColor: Colors.black87,
+          tabs: const [
+            Tab(text: 'Pairing Dashboard'),
+            Tab(text: 'Services'),
           ],
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircleAvatar(
-              radius: 30,
-              backgroundColor: widget.color.withOpacity(0.1),
-              child: Icon(widget.icon, color: widget.color, size: 32),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Connect ${widget.type[0].toUpperCase()}${widget.type.substring(1)}',
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: -0.5),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Configure your delivery settings to receive notifications.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey[600], fontSize: 13),
-            ),
-            const SizedBox(height: 24),
-            Flexible(
-              child: SingleChildScrollView(
-                child: Column(
-                  children: widget.fields.map((f) => Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          f.replaceAll('_', ' ').toUpperCase(),
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey[500],
-                            letterSpacing: 0.5,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        TextField(
-                          controller: _controllers[f],
-                          obscureText: f.contains('token') || f.contains('pass') || f.contains('sid'),
-                          decoration: InputDecoration(
-                            hintText: 'Enter ${f.replaceAll('_', ' ')}...',
-                            hintStyle: TextStyle(color: Colors.grey[400], fontSize: 14),
-                            filled: true,
-                            fillColor: Colors.grey[50],
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide: BorderSide(color: Colors.grey[200]!),
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide: BorderSide(color: widget.color, width: 1.5),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  )).toList(),
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            Row(
-              children: [
-                Expanded(
-                  child: TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    ),
-                    child: Text('Cancel', style: TextStyle(color: Colors.grey[600], fontWeight: FontWeight.w600)),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: () {
-                      final results = _controllers.map((k, v) => MapEntry(k, v.text.trim()));
-                      Navigator.pop(context, results);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.black87,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    ),
-                    child: const Text('Connect', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _buildPairingDashboard(),
+          _buildChannelSettings(),
+        ],
       ),
     );
   }

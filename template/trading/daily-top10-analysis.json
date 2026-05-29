@@ -1,0 +1,27 @@
+{
+  "id": "trading-daily-top10-analysis",
+  "name": "Daily Top 10 Stock Analysis",
+  "category": "trading/daily",
+  "description": "Research and summarize top watchlist symbols with key metrics and trend commentary.",
+  "steps": [
+    {
+      "type": "research",
+      "config": {
+        "max_results": 10,
+        "query": "Analyze top stocks: {{symbols}} including market sentiment, trend and key business updates."
+      }
+    },
+    {
+      "type": "summarize",
+      "config": {
+        "prompt": "Summarize each symbol with trend, major news impact, and risk points."
+      }
+    },
+    {
+      "type": "deliver",
+      "config": {
+        "channel": "history"
+      }
+    }
+  ]
+}

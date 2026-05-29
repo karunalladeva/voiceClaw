@@ -19,6 +19,36 @@ export class AgentHistoryManager {
     if (!fsSync.existsSync(this.chatsDir)) {
       fsSync.mkdirSync(this.chatsDir, { recursive: true });
     }
+    this.recoverTempFiles().catch((e: any) => {
+      console.warn(`[History] Recovery scan failed: ${e.message}`);
+    });
+  }
+
+  private async recoverTempFiles(): Promise<void> {
+    try {
+      const files = await fs.readdir(this.chatsDir);
+      for (const file of files) {
+        if (!file.endsWith('.tmp')) continue;
+        const fullPath = path.join(this.chatsDir, file);
+        const finalPath = fullPath.slice(0, -4);
+        try {
+          const text = await fs.readFile(fullPath, 'utf-8');
+          JSON.parse(text);
+          await fs.rename(fullPath, finalPath);
+          console.log(`[History] Recovered temp chat file: ${path.basename(finalPath)}`);
+        } catch {
+          await fs.unlink(fullPath).catch(() => {});
+        }
+      }
+    } catch {
+      // non-critical
+    }
+  }
+
+  private async writeJsonAtomic(targetPath: string, value: unknown): Promise<void> {
+    const tempPath = `${targetPath}.tmp`;
+    await fs.writeFile(tempPath, JSON.stringify(value, null, 2), 'utf-8');
+    await fs.rename(tempPath, targetPath);
   }
 
   async listChats(): Promise<{ id: string; title: string; updatedAt: number }[]> {
@@ -27,8 +57,12 @@ export class AgentHistoryManager {
       const list = [];
       for (const file of files) {
         if (!file.endsWith('.json')) continue;
-        const data = JSON.parse(await fs.readFile(path.join(this.chatsDir, file), 'utf-8'));
-        list.push({ id: data.id, title: data.title, updatedAt: data.updatedAt });
+        try {
+          const data = JSON.parse(await fs.readFile(path.join(this.chatsDir, file), 'utf-8'));
+          list.push({ id: data.id, title: data.title, updatedAt: data.updatedAt });
+        } catch {
+          // Skip malformed files instead of crashing list operation.
+        }
       }
       return list.sort((a, b) => b.updatedAt - a.updatedAt);
     } catch {
@@ -42,7 +76,8 @@ export class AgentHistoryManager {
     try {
       const p = path.join(this.chatsDir, `${chatId}.json`);
       if (fsSync.existsSync(p)) {
-        const raw = JSON.parse(await fs.readFile(p, 'utf-8')) as ChatThread;
+        const text = await fs.readFile(p, 'utf-8');
+        const raw = JSON.parse(text) as ChatThread;
         const msgs: BaseMessage[] = [];
         for (const m of raw.messages) {
           if (m.role === 'user') msgs.push(new HumanMessage({ content: m.content }));
@@ -80,7 +115,7 @@ export class AgentHistoryManager {
     };
 
     try {
-      await fs.writeFile(path.join(this.chatsDir, `${chatId}.json`), JSON.stringify(doc, null, 2), 'utf-8');
+      await this.writeJsonAtomic(path.join(this.chatsDir, `${chatId}.json`), doc);
     } catch (e: any) {
       console.warn(`[History] Failed to save chat ${chatId}: ${e.message}`);
     }

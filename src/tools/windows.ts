@@ -351,7 +351,7 @@ export const windowsMouseMoveTool = tool(
 );
 
 export const windowsMouseClickTool = tool(
-  async ({ button, doubleClick, x, y }) => {
+  async ({ button, doubleClick, x, y, verifyVisualChange }) => {
     const script = `
       Add-Type @"
         using System;
@@ -363,6 +363,31 @@ export const windowsMouseClickTool = tool(
           public const int RIGHTDOWN = 0x08; public const int RIGHTUP = 0x10;
         }
 "@
+      
+      if ($${verifyVisualChange ? 'true' : 'false'}) {
+        $hashCode = @"
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+          function Get-ScreenHash {
+            $Bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $Bmp = New-Object System.Drawing.Bitmap $Bounds.Width, $Bounds.Height
+            $G = [System.Drawing.Graphics]::FromImage($Bmp)
+            $G.CopyFromScreen($Bounds.X, $Bounds.Y, 0, 0, $Bmp.Size)
+            $R = 0; $G_c = 0; $B_c = 0; $samples = 0
+            for ($i = 0; $i -lt $Bmp.Width; $i += 100) {
+              for ($j = 0; $j -lt $Bmp.Height; $j += 100) {
+                $color = $Bmp.GetPixel($i, $j)
+                $R += $color.R; $G_c += $color.G; $B_c += $color.B
+                $samples++
+              }
+            }
+            $G.Dispose(); $Bmp.Dispose()
+            return "$([math]::Round($R/$samples))-$([math]::Round($G_c/$samples))-$([math]::Round($B_c/$samples))"
+          }
+"@
+        Invoke-Expression $hashCode
+        $hash1 = Get-ScreenHash
+      }
       if ('${x}' -ne 'undefined' -and '${y}' -ne 'undefined') {
         [Mouse]::SetCursorPos(${x}, ${y})
         Start-Sleep -Milliseconds 50
@@ -375,6 +400,16 @@ export const windowsMouseClickTool = tool(
         Start-Sleep -Milliseconds 50
         [Mouse]::mouse_event($down, 0, 0, 0, 0); [Mouse]::mouse_event($up, 0, 0, 0, 0)
       }
+      
+      if ($${verifyVisualChange ? 'true' : 'false'}) {
+        Start-Sleep -Milliseconds 1500
+        $hash2 = Get-ScreenHash
+        if ($hash1 -eq $hash2) {
+          Write-Output "Action_Failed: UI Static. Screen did not change after click. Try semantic search or recalculate coordinates."
+          exit
+        }
+      }
+      
       Write-Output "Clicked ${button}"
     `;
     return await runPowerShell(script, 5000);
@@ -386,7 +421,8 @@ export const windowsMouseClickTool = tool(
       button: z.enum(['left', 'right']).optional().default('left'), 
       doubleClick: z.boolean().optional().default(false),
       x: z.number().optional().describe('X coordinate to click on'),
-      y: z.number().optional().describe('Y coordinate to click on')
+      y: z.number().optional().describe('Y coordinate to click on'),
+      verifyVisualChange: z.boolean().optional().default(false).describe('Set true to verify if UI changed after clicking. Returns Action_Failed if static.')
     }),
   }
 );
@@ -547,6 +583,52 @@ export const windowsSmartOpenTool = tool(
   }
 );
 
+export const windowsSemanticSearchTool = tool(
+  async ({ elementName }) => {
+    const script = `
+      Add-Type -AssemblyName UIAutomationClient
+      Add-Type -AssemblyName UIAutomationTypes
+      $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+      $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, "${elementName}")
+      $element = $desktop.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+      if ($element) {
+        $rect = $element.Current.BoundingRectangle
+        if ($rect.IsEmpty -eq $false) {
+            $x = [math]::Round($rect.Left + ($rect.Width / 2))
+            $y = [math]::Round($rect.Top + ($rect.Height / 2))
+            Write-Output "Found '${elementName}' at X:$x, Y:$y"
+        } else {
+            Write-Output "Found '${elementName}' but it has no visible bounds."
+        }
+      } else {
+        Write-Output "Element '${elementName}' not found in UI tree. Fallback to windows_read_screen."
+      }
+    `;
+    return await runPowerShell(script, 15000);
+  },
+  {
+    name: 'windows_semantic_search',
+    description: 'Fallback search: Query the Windows UI tree directly for an exact element Name/Label to get valid X,Y coordinates. Use if vision clicks fail.',
+    schema: z.object({ elementName: z.string().describe('Exact or partial name of the UI element') }),
+  }
+);
+
+export const windowsJanitorTool = tool(
+  async () => {
+    const script = `
+      Add-Type -AssemblyName System.Windows.Forms
+      [System.Windows.Forms.SendKeys]::SendWait('%{F4}')
+      Write-Output "Executed Alt+F4 to close the active window obstruction."
+    `;
+    return await runPowerShell(script, 5000);
+  },
+  {
+    name: 'windows_close_obstruction',
+    description: 'The Janitor Protocol: Close an unexpected or obstructive pop-up/window by sending Alt+F4.',
+    schema: z.object({}),
+  }
+);
+
 export const allWindowsTools: any[] = [
   windowsOpenAppTool,
   windowsOpenUrlTool,
@@ -569,4 +651,6 @@ export const allWindowsTools: any[] = [
   windowsFindAppTool,
   windowsListAppsTool,
   windowsSmartOpenTool,
+  windowsSemanticSearchTool,
+  windowsJanitorTool,
 ];

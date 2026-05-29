@@ -1,6 +1,22 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { BaseSkill, SkillDefinition } from '../skills/base-skill';
+import { resolveToolsByIds } from '../skills/tool-resolver';
+
+type SkillManifestEntry = {
+  id: string;
+  name: string;
+  description: string;
+  triggerDescription: string;
+  systemPrompt: string;
+  tools?: string[];
+  enabled?: boolean;
+  model?: string;
+  temperature?: number;
+  category?: string;
+  tags?: string[];
+  dependencies?: string[];
+};
 
 export class SkillLoader {
   static async loadDefaultSkills(skillsDir?: string): Promise<SkillDefinition[]> {
@@ -12,15 +28,11 @@ export class SkillLoader {
 
     const skipFiles = new Set(['base-skill', 'registry', 'index', 'loader', 'ondemand']);
 
-    const files = fs.readdirSync(dir).filter(f => {
-      const ext = path.extname(f);
-      const name = path.basename(f, ext);
-      return (ext === '.ts' || ext === '.js') && !skipFiles.has(name) && !f.endsWith('.d.ts');
-    });
+    const files = this.collectSkillModuleFiles(dir, skipFiles);
 
     for (const file of files) {
       try {
-        const modulePath = path.join(dir, file);
+        const modulePath = file;
         const mod = await import(modulePath);
         const SkillClass = mod.default;
 
@@ -37,8 +49,78 @@ export class SkillLoader {
         console.error(`[SkillLoader] Failed to load skill from ${file}:`, err.message);
       }
     }
+
+    const manifestSkills = this.loadManifestSkills(dir);
+    manifestSkills.forEach((skill: SkillDefinition) => loadedSkills.push(skill));
     
     return loadedSkills;
+  }
+
+  private static collectSkillModuleFiles(
+    rootDir: string,
+    skipFiles: Set<string>,
+    acc: string[] = [],
+  ): string[] {
+    const entries = fs.readdirSync(rootDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const abs = path.join(rootDir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.')) continue;
+        this.collectSkillModuleFiles(abs, skipFiles, acc);
+        continue;
+      }
+      const ext = path.extname(entry.name);
+      const name = path.basename(entry.name, ext);
+      if ((ext === '.ts' || ext === '.js') && !skipFiles.has(name) && !entry.name.endsWith('.d.ts')) {
+        if (entry.name.endsWith('.spec.ts') || entry.name.endsWith('.test.ts')) continue;
+        acc.push(abs);
+      }
+    }
+    return acc;
+  }
+
+  private static loadManifestSkills(skillsDir: string): SkillDefinition[] {
+    const loaded: SkillDefinition[] = [];
+    const manifestFiles = this.collectManifestFiles(skillsDir);
+    for (const manifestPath of manifestFiles) {
+      try {
+        const raw = fs.readFileSync(manifestPath, 'utf-8');
+        const entries = JSON.parse(raw) as SkillManifestEntry[];
+        for (const entry of entries) {
+          if (!entry.id || !entry.name || !entry.systemPrompt) continue;
+          loaded.push({
+            id: entry.id,
+            name: entry.name,
+            description: entry.description,
+            category: entry.category,
+            tags: entry.tags || [],
+            dependencies: entry.dependencies || [],
+            triggerDescription: entry.triggerDescription,
+            systemPrompt: entry.systemPrompt,
+            tools: resolveToolsByIds(entry.tools || []),
+            enabled: entry.enabled ?? true,
+            model: entry.model,
+            temperature: entry.temperature,
+          });
+        }
+      } catch (err: any) {
+        console.error(`[SkillLoader] Failed to parse manifest ${manifestPath}:`, err.message);
+      }
+    }
+    return loaded;
+  }
+
+  private static collectManifestFiles(rootDir: string, acc: string[] = []): string[] {
+    const entries = fs.readdirSync(rootDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const abs = path.join(rootDir, entry.name);
+      if (entry.isDirectory()) {
+        this.collectManifestFiles(abs, acc);
+      } else if (entry.isFile() && entry.name === 'skill-manifest.json') {
+        acc.push(abs);
+      }
+    }
+    return acc;
   }
 
   static async loadLearnedSkills(learnedSkillsDir?: string): Promise<string> {

@@ -6,7 +6,9 @@ import { MCPClientManager } from './mcp-client';
 import { modelRouter } from '../models/model-router';
 
 const WORKSPACE = path.join(process.cwd(), 'workspace');
-const LEARNED_SKILLS_DIR = path.join(WORKSPACE, 'learned', 'skills');
+const LEARNED_SKILLS_DRAFT_DIR = path.join(WORKSPACE, 'learned-skills-draft');
+const LEARNED_SKILLS_VALIDATED_DIR = path.join(WORKSPACE, 'learned-skills-validated');
+const LEARNED_SKILLS_ENABLED_DIR = path.join(WORKSPACE, 'learned-skills');
 const MACROS_DIR = path.join(WORKSPACE, 'learned', 'macros');
 
 export interface Macro {
@@ -31,6 +33,49 @@ const FAILURE_PHRASES = [
   "i lack the",
 ];
 
+const TRANSIENT_ERROR_PHRASES = [
+  'timed out',
+  'timeout',
+  'connection refused',
+  'fetch failed',
+  'temporarily unavailable',
+  'service unavailable',
+  'rate limit',
+];
+
+const TOOL_ERROR_PHRASES = [
+  'tool execution failed',
+  'tool failed',
+  'error:',
+  'failed to load',
+];
+
+const TIME_SENSITIVE_MEMORY_PHRASES = [
+  'today',
+  'current',
+  'latest',
+  'price',
+  'rate',
+  'weather',
+  'news',
+  'score',
+  'market',
+];
+
+export type FailureType =
+  | 'none'
+  | 'capability_gap'
+  | 'tool_error'
+  | 'transient_infra'
+  | 'context_overflow'
+  | 'unknown_failure';
+
+export interface FailureAssessment {
+  shouldRetry: boolean;
+  failureType: FailureType;
+  reason: string;
+}
+
 function slugify(text: string): string {
   return text
     .toLowerCase()
@@ -52,12 +97,66 @@ export class LearningEngine {
 
   // ── Should Retry? ──────────────────────────────────────────────────────────
 
+  assessFailure(response: string): FailureAssessment {
+    const lower = response.toLowerCase();
+    if (!response.trim()) {
+      return {
+        shouldRetry: true,
+        failureType: 'unknown_failure',
+        reason: 'Empty model response.',
+      };
+    }
+    if (lower.includes('recursion limit') || lower.includes('context window') || lower.includes('token limit')) {
+      return {
+        shouldRetry: true,
+        failureType: 'context_overflow',
+        reason: 'Response indicates context/token overflow.',
+      };
+    }
+    if (TRANSIENT_ERROR_PHRASES.some(phrase => lower.includes(phrase))) {
+      return {
+        shouldRetry: true,
+        failureType: 'transient_infra',
+        reason: 'Response indicates transient infrastructure/network issue.',
+      };
+    }
+    if (TOOL_ERROR_PHRASES.some(phrase => lower.includes(phrase))) {
+      return {
+        shouldRetry: true,
+        failureType: 'tool_error',
+        reason: 'Response indicates tool execution failure.',
+      };
+    }
+    if (FAILURE_PHRASES.some(phrase => lower.includes(phrase))) {
+      return {
+        shouldRetry: true,
+        failureType: 'capability_gap',
+        reason: 'Model indicates inability/capability gap.',
+      };
+    }
+    return {
+      shouldRetry: false,
+      failureType: 'none',
+      reason: 'No retry indicators found.',
+    };
+  }
+
   /**
-   * Detects whether the agent's response indicates it cannot complete the task.
+   * Backward-compatible wrapper used by existing callers.
    */
   shouldRetry(response: string): boolean {
-    const lower = response.toLowerCase();
-    return FAILURE_PHRASES.some(phrase => lower.includes(phrase));
+    return this.assessFailure(response).shouldRetry;
+  }
+
+  private isMemoryCandidateValid(content: string): boolean {
+    const normalized = content.trim();
+    if (!normalized) return false;
+    if (normalized.length < 6 || normalized.length > 320) return false;
+    const lower = normalized.toLowerCase();
+    if (TIME_SENSITIVE_MEMORY_PHRASES.some(p => lower.includes(p))) return false;
+    if (lower.startsWith('http://') || lower.startsWith('https://')) return false;
+    if (lower.includes('no_memory')) return false;
+    return true;
   }
 
   // ── Auto Memory Store ──────────────────────────────────────────────────────
@@ -94,8 +193,18 @@ export class LearningEngine {
 
       const parsed = JSON.parse(jsonMatch[0]);
       if (parsed.content) {
+        const content = String(parsed.content).trim();
+        if (!this.isMemoryCandidateValid(content)) return;
         const tags = Array.isArray(parsed.tags) ? parsed.tags : [];
-        await mcpManager.addMemory(parsed.content, tags);
+        const sanitizedTags: string[] = Array.from(
+          new Set(
+            tags
+              .map((t: any) => String(t || '').trim().toLowerCase())
+              .filter((t: string) => t.length > 1 && t.length < 40),
+          ),
+        );
+        sanitizedTags.push('source:auto', `created:${new Date().toISOString().split('T')[0]}`);
+        await mcpManager.addMemory(content, sanitizedTags);
         console.log('[LearningEngine] Auto-stored memory:', parsed.content.substring(0, 60));
       }
     } catch (err: any) {
@@ -153,7 +262,7 @@ export class LearningEngine {
           if (macro.trigger === normalizedIntent) {
             return macro;
           }
-        } catch {}
+        } catch { }
       }
     } catch {
       // Ignored
@@ -214,7 +323,7 @@ export class LearningEngine {
       const nameMatch = skillContent.match(/^---\s*\nname:\s*(.+)/m);
       const skillName = nameMatch ? slugify(nameMatch[1].trim()) : slugify(taskDescription);
 
-      const skillDir = path.join(LEARNED_SKILLS_DIR, skillName);
+      const skillDir = path.join(LEARNED_SKILLS_DRAFT_DIR, skillName);
       await fs.mkdir(skillDir, { recursive: true });
       const skillPath = path.join(skillDir, 'SKILL.md');
 
@@ -223,7 +332,7 @@ export class LearningEngine {
       if (!finalContent.includes('created:')) {
         finalContent = finalContent.replace(
           /^---/,
-          `---\ncreated: ${new Date().toISOString().split('T')[0]}`
+          `---\nstage: draft\ncreated: ${new Date().toISOString().split('T')[0]}`
         );
       }
 
@@ -240,24 +349,28 @@ export class LearningEngine {
 
   async listLearnedSkills(): Promise<Array<{ name: string; description: string; content: string; path: string }>> {
     try {
-      await fs.mkdir(LEARNED_SKILLS_DIR, { recursive: true });
-      const entries = await fs.readdir(LEARNED_SKILLS_DIR, { withFileTypes: true });
+      await fs.mkdir(LEARNED_SKILLS_DRAFT_DIR, { recursive: true });
+      await fs.mkdir(LEARNED_SKILLS_VALIDATED_DIR, { recursive: true });
+      await fs.mkdir(LEARNED_SKILLS_ENABLED_DIR, { recursive: true });
+      const dirs = [LEARNED_SKILLS_DRAFT_DIR, LEARNED_SKILLS_VALIDATED_DIR, LEARNED_SKILLS_ENABLED_DIR];
       const skills = [];
-
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const skillPath = path.join(LEARNED_SKILLS_DIR, entry.name, 'SKILL.md');
-        try {
-          const content = await fs.readFile(skillPath, 'utf-8');
-          const nameMatch = content.match(/^name:\s*(.+)/m);
-          const descMatch = content.match(/^description:\s*(.+)/m);
-          skills.push({
-            name: nameMatch?.[1]?.trim() ?? entry.name,
-            description: descMatch?.[1]?.trim() ?? '',
-            content,
-            path: skillPath,
-          });
-        } catch { /* skip missing */ }
+      for (const dir of dirs) {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const skillPath = path.join(dir, entry.name, 'SKILL.md');
+          try {
+            const content = await fs.readFile(skillPath, 'utf-8');
+            const nameMatch = content.match(/^name:\s*(.+)/m);
+            const descMatch = content.match(/^description:\s*(.+)/m);
+            skills.push({
+              name: nameMatch?.[1]?.trim() ?? entry.name,
+              description: descMatch?.[1]?.trim() ?? '',
+              content,
+              path: skillPath,
+            });
+          } catch { /* skip missing */ }
+        }
       }
 
       return skills;
@@ -268,8 +381,34 @@ export class LearningEngine {
 
   async deleteLearnedSkill(name: string): Promise<boolean> {
     try {
-      const skillDir = path.join(LEARNED_SKILLS_DIR, slugify(name));
-      await fs.rm(skillDir, { recursive: true, force: true });
+      const slug = slugify(name);
+      await fs.rm(path.join(LEARNED_SKILLS_DRAFT_DIR, slug), { recursive: true, force: true });
+      await fs.rm(path.join(LEARNED_SKILLS_VALIDATED_DIR, slug), { recursive: true, force: true });
+      await fs.rm(path.join(LEARNED_SKILLS_ENABLED_DIR, slug), { recursive: true, force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async promoteLearnedSkill(name: string, targetStage: 'validated' | 'enabled'): Promise<boolean> {
+    const slug = slugify(name);
+    const fromDraft = path.join(LEARNED_SKILLS_DRAFT_DIR, slug, 'SKILL.md');
+    const fromValidated = path.join(LEARNED_SKILLS_VALIDATED_DIR, slug, 'SKILL.md');
+    const source = targetStage === 'validated' ? fromDraft : (fsSync.existsSync(fromValidated) ? fromValidated : fromDraft);
+    const targetDir = targetStage === 'validated'
+      ? path.join(LEARNED_SKILLS_VALIDATED_DIR, slug)
+      : path.join(LEARNED_SKILLS_ENABLED_DIR, slug);
+    const target = path.join(targetDir, 'SKILL.md');
+    try {
+      if (!fsSync.existsSync(source)) return false;
+      await fs.mkdir(targetDir, { recursive: true });
+      let content = await fs.readFile(source, 'utf-8');
+      content = content.replace(/^stage:\s*(draft|validated|enabled)\s*$/m, `stage: ${targetStage}`);
+      if (!/^stage:\s*/m.test(content)) {
+        content = content.replace(/^---/, `---\nstage: ${targetStage}`);
+      }
+      await fs.writeFile(target, content, 'utf-8');
       return true;
     } catch {
       return false;

@@ -1,0 +1,26 @@
+{
+  "id": "trading-single-symbol-deep-dive",
+  "name": "Single Symbol Deep Dive",
+  "category": "trading/deep-dive",
+  "description": "Deep-dive one symbol using news + technical summary and produce concise recommendation context.",
+  "steps": [
+    {
+      "type": "research",
+      "config": {
+        "query": "Latest analysis and major catalysts for {{symbols}} stock."
+      }
+    },
+    {
+      "type": "summarize",
+      "config": {
+        "prompt": "Provide a deep dive summary including catalyst, risk, sentiment, and near-term setup."
+      }
+    },
+    {
+      "type": "deliver",
+      "config": {
+        "channel": "history"
+      }
+    }
+  ]
+}
