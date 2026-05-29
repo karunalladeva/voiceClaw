@@ -9,8 +9,146 @@ import {
   orchestrationStore,
   routineManager,
 } from './index';
+import { loadHistory, loadPipelineTemplates, runPipeline, type Pipeline } from '../pipeline/pipeline-engine';
+import { SkillRegistry } from '../skills/registry';
+import { loadApprovedWorkspaceSkills, loadApprovedWorkspaceTemplates } from '../creator/workspace-creator';
+import { notifyOrchestrationUpdate } from '../admin/admin-server';
 
 const router = Router();
+
+const SUPPORTED_STEP_TYPES = new Set([
+  'ai_task',
+  'research',
+  'browse',
+  'summarize',
+  'generate_doc',
+  'deliver',
+  'save_history',
+  'get_system_info',
+]);
+
+const TRADING_STEP_TYPE_MAP: Record<string, string> = {
+  input_validation: 'ai_task',
+  market_data_fetch: 'research',
+  technical_analysis: 'ai_task',
+  fundamental_analysis: 'ai_task',
+  risk_assessment: 'ai_task',
+  buy_sell_signal: 'ai_task',
+  position_sizing: 'ai_task',
+  order_generation: 'ai_task',
+  reason_documentation: 'ai_task',
+  output_formatting: 'ai_task',
+};
+
+function normalizeTemplateStep(
+  step: { type: string; config?: Record<string, any> },
+  templateName: string,
+): { type: string; config: Record<string, any> } {
+  const rawType = String(step?.type || '').trim();
+  const originalConfig = { ...(step?.config || {}) };
+  const detailLevel = String(originalConfig.detail_level || 'full').trim().toLowerCase();
+  if (!rawType) {
+    return {
+      type: 'ai_task',
+      config: {
+        prompt: `Continue the workflow for "${templateName}" with best effort based on previous context.`,
+      },
+    };
+  }
+  if (SUPPORTED_STEP_TYPES.has(rawType)) {
+    return { type: rawType, config: originalConfig };
+  }
+  const mappedType = TRADING_STEP_TYPE_MAP[rawType];
+  if (!mappedType) {
+    return {
+      type: 'ai_task',
+      config: {
+        prompt: `Execute workflow phase "${rawType}" for template "${templateName}". Use context and config to produce actionable output.\nConfig: ${JSON.stringify(originalConfig)}`,
+      },
+    };
+  }
+  if (mappedType === 'research') {
+    return {
+      type: 'research',
+      config: {
+        query: originalConfig.query || originalConfig.symbol || originalConfig.ticker || `Market analysis for ${templateName}`,
+        max_results: Number(originalConfig.max_results || 5),
+        ...originalConfig,
+      },
+    };
+  }
+  if (rawType === 'reason_documentation') {
+    if (detailLevel === 'summary') {
+      return {
+        type: 'summarize',
+        config: {
+          prompt: originalConfig.prompt || `Summarize rationale and recommendation for "${templateName}".`,
+          ...originalConfig,
+        },
+      };
+    }
+    return {
+      type: 'ai_task',
+      config: {
+        prompt:
+          originalConfig.prompt ||
+          `Create full reasoning documentation for "${templateName}" using complete prior context. Include risk factors, evidence, and clear recommendation.`,
+        ...originalConfig,
+      },
+    };
+  }
+  if (rawType === 'output_formatting') {
+    return {
+      type: 'ai_task',
+      config: {
+        prompt:
+          originalConfig.prompt ||
+          `Format the complete prior context as the final response for "${templateName}". Preserve all important details unless detail_level is explicitly summary.`,
+        ...originalConfig,
+      },
+    };
+  }
+  if (mappedType === 'deliver') {
+    const deliverConfig: Record<string, any> = {
+      channel: originalConfig.channel || 'history',
+      ...originalConfig,
+    };
+    // Keep pipeline context as the default payload.
+    // Only override with an explicit user-provided message.
+    if (!Object.prototype.hasOwnProperty.call(originalConfig, 'message')) {
+      delete deliverConfig.message;
+    }
+    return {
+      type: 'deliver',
+      config: deliverConfig,
+    };
+  }
+  if (mappedType === 'summarize') {
+    return {
+      type: 'summarize',
+      config: {
+        prompt: originalConfig.prompt || `Summarize the rationale and recommendation for "${templateName}".`,
+        ...originalConfig,
+      },
+    };
+  }
+  return {
+    type: 'ai_task',
+    config: {
+      prompt: originalConfig.prompt || `Execute "${rawType}" for template "${templateName}" with this config: ${JSON.stringify(originalConfig)}`,
+      ...originalConfig,
+    },
+  };
+}
+
+router.use((req, res, next) => {
+  res.on('finish', () => {
+    if (req.method === 'GET') return;
+    if (res.statusCode >= 400) return;
+    notifyOrchestrationUpdate('orchestration');
+  });
+  next();
+});
 
 router.get('/companies', async (_req, res) => {
   try {
@@ -516,6 +654,107 @@ router.get('/activity', async (req, res) => {
     const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
     const activity = await governanceEngine.getActivityLog(companyId, limit);
     res.json({ activity });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/trading/templates', async (_req, res) => {
+  try {
+    const templates = await loadPipelineTemplates();
+    const workspaceTemplates = await loadApprovedWorkspaceTemplates('trading');
+    const merged = [...workspaceTemplates, ...templates];
+    res.json({ templates: merged });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/trading/runs', async (req, res) => {
+  try {
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 30;
+    const history = await loadHistory();
+    res.json({ runs: history.slice(0, Math.max(1, Math.min(limit, 100))) });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/trading/skills', async (_req, res) => {
+  try {
+    const registry = new SkillRegistry();
+    await registry.discover();
+    const discovered = registry
+      .getAllSkills()
+      .filter((item) => item.id.startsWith('trading-') || item.category === 'trading')
+      .map((item) => ({
+        id: item.id,
+        name: item.name,
+        category: item.category || 'general',
+        description: item.description,
+        enabled: item.enabled,
+        tags: item.tags || [],
+      }));
+    const workspace = await loadApprovedWorkspaceSkills('trading');
+    res.json({ skills: [...workspace, ...discovered] });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/trading/run-template', async (req, res) => {
+  try {
+    const { templateId, symbols } = req.body;
+    if (!templateId) {
+      return res.status(400).json({ error: 'templateId required' });
+    }
+    const templates = await loadPipelineTemplates();
+    const workspaceTemplates = await loadApprovedWorkspaceTemplates('trading');
+    const template = [...workspaceTemplates, ...templates].find((item) => item.id === templateId);
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    if (!Array.isArray(template.steps) || template.steps.length === 0) {
+      return res.status(422).json({ error: 'Template has no runnable steps. Add at least one valid step.' });
+    }
+    const templateSymbols = Array.isArray(symbols) ? symbols.map((s) => String(s).trim()).filter(Boolean) : [];
+    const normalizedSteps = template.steps.map((step) =>
+      normalizeTemplateStep(step as { type: string; config?: Record<string, any> }, template.name),
+    );
+    const hasOutputStep = normalizedSteps.some((step) => step.type === 'deliver' || step.type === 'save_history');
+    if (!hasOutputStep) {
+      normalizedSteps.push({
+        type: 'deliver',
+        config: {
+          channel: 'history',
+          scope: `template-${template.id}`,
+          chat_title: `Execution / Template: ${template.name}`,
+        },
+      });
+    }
+    const pipeline: Pipeline = {
+      id: `trading_run_${Date.now()}`,
+      name: template.name,
+      trigger: 'manual',
+      enabled: true,
+      createdAt: Date.now(),
+      steps: normalizedSteps.map((normalized) => {
+        const config = { ...(normalized.config || {}) };
+        if (templateSymbols.length > 0) {
+          config.symbols = templateSymbols;
+          config.symbol = config.symbol || templateSymbols[0];
+          if (typeof config.query === 'string') {
+            config.query = config.query.replace(/\{\{symbols\}\}/g, templateSymbols.join(', '));
+          }
+        }
+        return {
+          type: normalized.type as any,
+          config,
+        };
+      }),
+    };
+    const result = await runPipeline(pipeline);
+    res.json({ success: true, run: result, template });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

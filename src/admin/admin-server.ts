@@ -14,6 +14,23 @@ interface AdminClient {
 
 const clients: Map<string, AdminClient> = new Map();
 
+export function broadcastAdminMessage(payload: Record<string, unknown>): void {
+  const message = JSON.stringify(payload);
+  clients.forEach((client) => {
+    if (client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(message);
+    }
+  });
+}
+
+export function notifyOrchestrationUpdate(topic: string): void {
+  broadcastAdminMessage({
+    type: 'orchestration:update',
+    topic,
+    timestamp: Date.now(),
+  });
+}
+
 export function setupAdminWebSocket(server: any): WebSocketServer {
   const wss = new WebSocketServer({ server, path: '/admin/ws' });
 
@@ -108,13 +125,21 @@ function handleClientMessage(clientId: string, client: AdminClient, msg: any) {
 }
 
 export function setupAdminRoutes(app: express.Application) {
-  app.use('/admin', express.static(path.join(__dirname, 'public'), {
-    setHeaders: (res, path) => {
-      if (path.endsWith('.html')) {
+  const adminPublicDir = path.join(__dirname, 'public');
+  const adminIndexHtml = path.join(adminPublicDir, 'index.html');
+
+  app.use('/admin', express.static(adminPublicDir, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) {
         res.setHeader('Cache-Control', 'no-cache');
       }
     }
   }));
+
+  // SPA routes (chat is a separate page, same bundle)
+  app.get(['/admin/chat', '/chat'], (_req, res) => {
+    res.sendFile(adminIndexHtml);
+  });
 
   app.get('/admin/api/stats', (_req, res) => {
     res.json(agentEvents.getStats());
@@ -165,5 +190,14 @@ export function setupAdminRoutes(app: express.Application) {
 
   app.get('/admin/api/config', (_req, res) => {
     res.json(configManager.getConfig());
+  });
+
+  app.post('/admin/api/config', async (req, res) => {
+    try {
+      await configManager.updateConfig(req.body);
+      res.json({ success: true, config: configManager.getConfig() });
+    } catch (error: any) {
+      res.status(500).json({ error: 'Failed to update config', details: error.message });
+    }
   });
 }

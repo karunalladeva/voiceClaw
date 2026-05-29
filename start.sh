@@ -39,17 +39,17 @@ echo "[start.sh] Starting backend..."
 ) &
 BACKEND_PID=$!
 
-echo "[start.sh] Ensuring Flutter dependencies..."
-(
-  cd "$CLIENT_DIR"
-  flutter pub get
-)
+# echo "[start.sh] Ensuring Flutter dependencies..."
+# (
+#   cd "$CLIENT_DIR"
+#   flutter pub get
+# )
 
-echo "[start.sh] Starting Windows Flutter app..."
-(
-  cd "$CLIENT_DIR"
-  flutter run -d windows
-) &
+# echo "[start.sh] Starting Windows Flutter app..."
+# (
+#   cd "$CLIENT_DIR"
+#   flutter run -d windows
+# ) &
 APP_PID=$!
 
 echo "[start.sh] Backend PID: $BACKEND_PID"

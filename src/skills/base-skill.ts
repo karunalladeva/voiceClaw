@@ -4,6 +4,9 @@ export interface SkillDefinition {
   id: string;
   name: string;
   description: string;
+  category?: string;
+  tags?: string[];
+  dependencies?: string[];
   systemPrompt: string;
   /** When the main agent should route to this skill (used by the router LLM) */
   triggerDescription: string;

@@ -5,3 +5,5 @@ export { TaskBoard } from './TaskBoard';
 export { ApprovalsPanel } from './ApprovalsPanel';
 export { BudgetDashboard } from './BudgetDashboard';
 export { ActivityLog } from './ActivityLog';
+export { TradingDashboard } from './TradingDashboard';
+export { CreatorDashboard } from './CreatorDashboard';

@@ -6,6 +6,8 @@ import { ApprovalsPanel } from './ApprovalsPanel';
 import { BudgetDashboard } from './BudgetDashboard';
 import { ActivityLog } from './ActivityLog';
 import { RoutineList } from './RoutineList';
+import { TradingDashboard } from './TradingDashboard';
+import { CreatorDashboard } from './CreatorDashboard';
 import {
   useCompanies,
   useOrgAgents,
@@ -15,9 +17,10 @@ import {
   useBudget,
   useRoutines,
 } from '@/hooks/useOrchestration';
+import { useOrchestrationLive } from '@/hooks/useOrchestrationLive';
 import type { Company } from '@/types/orchestration';
 
-type Tab = 'overview' | 'tasks' | 'routines' | 'org' | 'budget' | 'activity';
+type Tab = 'overview' | 'tasks' | 'routines' | 'creator' | 'org' | 'budget' | 'activity' | 'trading';
 
 export function OrchestrationDashboard() {
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
@@ -25,14 +28,15 @@ export function OrchestrationDashboard() {
   const [showCreateCompany, setShowCreateCompany] = useState(false);
   const [newCompanyName, setNewCompanyName] = useState('');
   const [newCompanyMission, setNewCompanyMission] = useState('');
+  const liveRevision = useOrchestrationLive();
 
-  const { companies, createCompany } = useCompanies();
-  const { agents, createAgent, updateAgent, triggerHeartbeat } = useOrgAgents(selectedCompany?.id);
-  const { tasks, createTask } = useTasks(selectedCompany?.id);
-  const { approvals, approve, reject } = useApprovals(selectedCompany?.id);
-  const { activity } = useActivity(selectedCompany?.id);
-  const { spending, requestBudget } = useBudget(selectedCompany?.id || '');
-  const { routines, createRoutine, toggleRoutine, deleteRoutine } = useRoutines(selectedCompany?.id);
+  const { companies, createCompany } = useCompanies(liveRevision);
+  const { agents, createAgent, updateAgent, triggerHeartbeat } = useOrgAgents(selectedCompany?.id, liveRevision);
+  const { tasks, createTask } = useTasks(selectedCompany?.id, liveRevision);
+  const { approvals, approve, reject } = useApprovals(selectedCompany?.id, liveRevision);
+  const { activity } = useActivity(selectedCompany?.id, liveRevision);
+  const { spending, requestBudget } = useBudget(selectedCompany?.id || '', liveRevision);
+  const { routines, createRoutine, toggleRoutine, deleteRoutine } = useRoutines(selectedCompany?.id, liveRevision);
 
   const handleCreateCompany = async () => {
     if (newCompanyName && newCompanyMission) {
@@ -50,6 +54,8 @@ export function OrchestrationDashboard() {
     { id: 'overview', label: 'Overview' },
     { id: 'tasks', label: 'Tasks' },
     { id: 'routines', label: 'Routines' },
+    { id: 'trading', label: 'Trading' },
+    { id: 'creator', label: 'Creator' },
     { id: 'org', label: 'Organization' },
     { id: 'budget', label: 'Budget' },
     { id: 'activity', label: 'Activity' },
@@ -173,6 +179,14 @@ export function OrchestrationDashboard() {
 
           {activeTab === 'routines' && (
             <RoutineList routines={routines} agents={agents} companyId={selectedCompany.id} onCreateRoutine={createRoutine} onToggleRoutine={toggleRoutine} onDeleteRoutine={deleteRoutine} />
+          )}
+
+          {activeTab === 'trading' && (
+            <TradingDashboard />
+          )}
+
+          {activeTab === 'creator' && (
+            <CreatorDashboard />
           )}
 
           {activeTab === 'org' && (

@@ -22,6 +22,7 @@ import { evolutionScheduler } from '../services/evolution-scheduler';
 import { setupAdminWebSocket, setupAdminRoutes } from '../admin/admin-server';
 import { agentEvents } from '../admin/agent-events';
 import { setupOrchestrationRoutes } from '../orchestration/routes';
+import { setupCreatorRoutes } from '../creator/routes';
 import { orchestrationStore, heartbeatScheduler, agentRegistry, routineScheduler } from '../orchestration';
 import { capSpeechPlain, selectPlainTextForTts } from '../utils/speech-for-tts';
 import { inferenceActivity } from '../utils/inference-activity';
@@ -1132,6 +1133,7 @@ export const startServer = async (port: number = 3000) => {
   // ── Setup Orchestration (Paperclip-style) ──────────────────────────────────
   await orchestrationStore.initialize();
   setupOrchestrationRoutes(app);
+  setupCreatorRoutes(app);
   
   // Set up heartbeat handler to use the main agent
   heartbeatScheduler.setHandler(async (orgAgent, task, context) => {

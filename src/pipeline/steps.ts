@@ -18,7 +18,8 @@ function buildPipelineScopedChatId(config: Record<string, any>, suffix: string):
   if (config.chat_id) return config.chat_id;
   const pipelineId = String(config.__pipelineId || 'pipeline');
   const runId = String(config.__pipelineRunId || 'run');
-  return `pipeline:${pipelineId}:run:${runId}:${suffix}`;
+  // Use dashes instead of colons (colons are invalid in Windows file paths)
+  return `pipeline-${pipelineId}-run-${runId}-${suffix}`;
 }
 
 function formatSearchSnippets(snippets: SearchSnippet[]): string {
@@ -98,11 +99,11 @@ registerStep('research', async (config, context): Promise<StepResult> => {
   if (!query) return { success: false, output: 'No search query provided.' };
 
   const maxResults = Number(config.max_results || 5);
+  const snippets: SearchSnippet[] = [];
+  let googleError: string | null = null;
 
+  // Primary provider: googlethis
   try {
-    const snippets: SearchSnippet[] = [];
-
-    // Primary provider: googlethis
     const google = require('googlethis');
     const results = await google.search(query, { page: 0, safe: false });
     const primarySnippets = (results.results || [])
@@ -114,28 +115,32 @@ registerStep('research', async (config, context): Promise<StepResult> => {
       }))
       .filter((r: SearchSnippet) => r.title && r.url);
     snippets.push(...primarySnippets);
-
-    // Fallback provider: DuckDuckGo HTML results, only when Google yields no usable rows.
-    if (snippets.length === 0) {
-      try {
-        const ddgSnippets = await searchDuckDuckGoFallback(query, maxResults);
-        snippets.push(...ddgSnippets);
-      } catch (fallbackError: any) {
-        return {
-          success: false,
-          output: `Research failed (fallback error): ${fallbackError.message}`,
-        };
-      }
-    }
-
-    if (snippets.length === 0) {
-      return { success: false, output: `No research results found for query: "${query}"` };
-    }
-
-    return { success: true, output: formatSearchSnippets(snippets), data: snippets };
   } catch (e: any) {
-    return { success: false, output: `Research failed: ${e.message}` };
+    googleError = e.message;
   }
+
+  // Fallback provider: DuckDuckGo - used when Google fails OR returns no results
+  if (snippets.length === 0) {
+    try {
+      const ddgSnippets = await searchDuckDuckGoFallback(query, maxResults);
+      snippets.push(...ddgSnippets);
+    } catch (fallbackError: any) {
+      const baseError = googleError ? `Google: ${googleError}` : 'Google returned no results';
+      return {
+        success: false,
+        output: `Research failed. ${baseError}. DuckDuckGo fallback also failed: ${fallbackError.message}`,
+      };
+    }
+  }
+
+  if (snippets.length === 0) {
+    const reason = googleError ? `Google error: ${googleError}` : 'No results from any provider';
+    return { success: false, output: `No research results found for query: "${query}". ${reason}` };
+  }
+
+  // Success - fallback worked even if Google failed
+  const source = googleError ? ' (via DuckDuckGo fallback)' : '';
+  return { success: true, output: formatSearchSnippets(snippets) + source, data: snippets };
 });
 
 // ── browse: Playwright browser automation ─────────────────────────────────────
@@ -257,11 +262,26 @@ registerStep('generate_doc', async (config, context): Promise<StepResult> => {
 registerStep('deliver', async (config, context): Promise<StepResult> => {
   // Support both 'channel' and 'type' for robustness (some models hallucinate 'type')
   const channel = config.channel || config.type || 'history';
-  const message = config.message || context || 'No content to deliver.';
   
-  // For push channel, we allow passing a 'title'
-  const settings = { ...config.settings };
+  // For history channel: prioritize pipeline context (actual output) over config.message
+  // For other channels (push, email, etc.): use config.message as the notification text
+  const message = channel === 'history'
+    ? (context || config.message || 'No content to deliver.')
+    : (config.message || context || 'No content to deliver.');
+
+  // Build settings from config.settings + top-level config fields for HistoryProvider
+  const settings: Record<string, string> = { ...config.settings };
   if (config.title && !settings.title) settings.title = config.title;
+  
+  // Use pipeline's own ID for chat_id (not generated from name)
+  const effectiveChatId = config.chat_id || config.__pipelineId || 'execution-pipeline';
+  if (!settings.chat_id) settings.chat_id = effectiveChatId;
+  
+  // Use pipeline name + date for chat_title
+  const effectiveTitle = config.chat_title || (config.__pipelineName 
+    ? `${config.__pipelineName} - ${new Date().toISOString().split('T')[0]}`
+    : undefined);
+  if (effectiveTitle && !settings.chat_title) settings.chat_title = effectiveTitle;
 
   const result = await deliverToChannel(channel, message, settings);
   return { success: result.startsWith('✅'), output: result };
@@ -300,12 +320,19 @@ registerStep('get_system_info', async (config, context): Promise<StepResult> => 
 });
 
 registerStep('save_history', async (config, context): Promise<StepResult> => {
-  const chatId = config.chat_id || buildPipelineScopedChatId(config, 'output');
+  // Use pipeline's own ID for chat_id (not generated from name)
+  const chatId = config.chat_id || config.__pipelineId || 'execution-pipeline';
+  
+  // Use pipeline name + date for chat_title
+  const chatTitle = config.chat_title || (config.__pipelineName 
+    ? `${config.__pipelineName} - ${new Date().toISOString().split('T')[0]}`
+    : 'Pipeline Execution');
+  
   const tag = config.tag || 'pipeline';
   const { SystemMessage } = await import('@langchain/core/messages');
   const thread = historyManager.getThread(chatId);
   thread.push(new SystemMessage({ content: `[${tag}] ${context || 'Empty pipeline output.'}` }));
   historyManager.setThread(chatId, thread);
-  await historyManager.saveChat(chatId);
+  await historyManager.saveChat(chatId, chatTitle);
   return { success: true, output: `✅ Saved to history (${chatId}).` };
 });

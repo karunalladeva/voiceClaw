@@ -451,12 +451,15 @@ class HistoryProvider implements IChannelProvider {
   name = 'History';
   // History is output-only — saves to internal chat history
   async send(message: string, settings: Record<string, string>): Promise<string> {
-    const chatId = settings.chat_id || 'pipeline-output';
+    // Use pipeline's own ID directly for chat_id, with fallback
+    const chatId = settings.chat_id || 'execution-pipeline';
+    // Use pipeline name + date for title, with fallback
+    const chatTitle = settings.chat_title || `Pipeline Execution - ${new Date().toISOString().split('T')[0]}`;
     const { SystemMessage } = await import('@langchain/core/messages');
     const thread = historyManager.getThread(chatId);
     thread.push(new SystemMessage({ content: `[Pipeline Output] ${message}` }));
     historyManager.setThread(chatId, thread);
-    await historyManager.saveChat(chatId);
+    await historyManager.saveChat(chatId, chatTitle);
     return `✅ Saved to chat history (${chatId}).`;
   }
 }

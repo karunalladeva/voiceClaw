@@ -7,12 +7,14 @@ import { ActiveAgents } from '@/components/ActiveAgents'
 import { SystemLogs } from '@/components/SystemLogs'
 import { EventsPanel } from '@/components/EventsPanel'
 import { OrchestrationDashboard } from '@/components/orchestration'
+import { SettingsDashboard } from '@/components/settings'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useModels, useSystemInfo, useMetrics } from '@/hooks/useApi'
+import { useVoiceChat } from '@/hooks/useVoiceChat'
 import { formatNumber } from '@/lib/utils'
 import type { Runtime, MCPMetrics } from '@/types'
 
-type View = 'dashboard' | 'orchestration'
+type View = 'dashboard' | 'orchestration' | 'settings'
 
 const defaultRuntime: Runtime = {
   activeSkillExecutions: 0,
@@ -33,9 +35,10 @@ const defaultMcp: MCPMetrics = {
 export default function App() {
   const [view, setView] = useState<View>('dashboard')
   const { connected, stats, agents, events } = useWebSocket()
-  const { models, masterId } = useModels()
+  const { models, masterId, setMaster, settingMasterId } = useModels()
   const system = useSystemInfo()
   const metrics = useMetrics()
+  const voice = useVoiceChat()
 
   const runtime: Runtime = { ...defaultRuntime, ...metrics.runtime }
   const mcp: MCPMetrics = { ...defaultMcp, ...metrics.mcp }
@@ -64,9 +67,20 @@ export default function App() {
         system={system} 
         view={view}
         onViewChange={setView}
+        voiceState={voice.state}
+        voiceStatusText={voice.statusText}
+        voiceIdleLabel={voice.idleLabel}
+        voiceAmplitude={voice.amplitude}
+        onVoicePillClick={voice.handlePillClick}
       />
       
-      <Sidebar models={models} masterId={masterId} system={system} />
+      <Sidebar
+        models={models}
+        masterId={masterId}
+        settingMasterId={settingMasterId}
+        system={system}
+        onSetMaster={setMaster}
+      />
       
       <main className="bg-background overflow-y-auto">
         <div className="p-6 flex flex-col gap-6">
@@ -118,8 +132,10 @@ export default function App() {
               
               <SystemLogs events={events} connected={connected} />
             </>
-          ) : (
+          ) : view === 'orchestration' ? (
             <OrchestrationDashboard />
+          ) : (
+            <SettingsDashboard />
           )}
         </div>
       </main>

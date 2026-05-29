@@ -48,6 +48,15 @@ export interface StepResult {
 
 const PIPELINES_FILE = path.join(process.cwd(), 'workspace', 'pipelines.json');
 const HISTORY_FILE = path.join(process.cwd(), 'workspace', 'pipeline-history.json');
+const TEMPLATE_ROOT = path.join(process.cwd(), 'template');
+
+export interface PipelineTemplate {
+  id: string;
+  name: string;
+  category: string;
+  description?: string;
+  steps: PipelineStep[];
+}
 
 export async function loadPipelines(): Promise<Pipeline[]> {
   try {
@@ -56,6 +65,65 @@ export async function loadPipelines(): Promise<Pipeline[]> {
     }
   } catch { }
   return [];
+}
+
+export async function loadPipelineTemplates(): Promise<PipelineTemplate[]> {
+  const templates: PipelineTemplate[] = [];
+  try {
+    if (!fsSync.existsSync(TEMPLATE_ROOT)) {
+      return loadLegacyTemplatesFallback();
+    }
+    const files = collectTemplateFiles(TEMPLATE_ROOT);
+    for (const file of files) {
+      try {
+        const parsed = JSON.parse(await fs.readFile(file, 'utf-8')) as Partial<PipelineTemplate>;
+        if (!parsed.id || !parsed.name || !Array.isArray(parsed.steps)) continue;
+        const relative = path.relative(TEMPLATE_ROOT, file);
+        const folderCategory = path.dirname(relative).replace(/\\/g, '/');
+        templates.push({
+          id: parsed.id,
+          name: parsed.name,
+          description: parsed.description,
+          category: parsed.category || (folderCategory === '.' ? 'general' : folderCategory),
+          steps: parsed.steps as PipelineStep[],
+        });
+      } catch {
+        // Skip malformed template files, do not break runtime.
+      }
+    }
+  } catch {
+    return loadLegacyTemplatesFallback();
+  }
+  if (templates.length === 0) {
+    return loadLegacyTemplatesFallback();
+  }
+  return templates;
+}
+
+async function loadLegacyTemplatesFallback(): Promise<PipelineTemplate[]> {
+  const pipelines = await loadPipelines();
+  return pipelines.map((pipeline: Pipeline) => ({
+    id: `legacy-${pipeline.id}`,
+    name: `${pipeline.name} (Legacy Template)`,
+    category: 'legacy/workspace',
+    description: 'Auto-derived from workspace/pipelines.json for backward compatibility.',
+    steps: pipeline.steps,
+  }));
+}
+
+function collectTemplateFiles(rootDir: string, acc: string[] = []): string[] {
+  const entries = fsSync.readdirSync(rootDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      collectTemplateFiles(full, acc);
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith('.json')) {
+      acc.push(full);
+    }
+  }
+  return acc;
 }
 
 export async function savePipelines(pipelines: Pipeline[]): Promise<void> {
@@ -197,6 +265,8 @@ export async function runPipeline(pipeline: Pipeline): Promise<{ success: boolea
     pipelineName: pipeline.name,
     ranAt: Date.now(),
     success: allSuccess,
+    // Truncation here is log-only for history storage size control.
+    // It does not affect what gets delivered to channels/history chats during step execution.
     stepResults: outputs.map((o, i) => ({ type: pipeline.steps[i]?.type || 'unknown', success: o.success, output: o.output.substring(0, 500) })),
   });
 

@@ -62,7 +62,77 @@ export interface Model {
   model: string
   provider: string
   enabled: boolean
+  isMaster?: boolean
+  role?: string
+  capabilities?: Record<string, unknown>
 }
+
+export interface AppConfig {
+  llm: {
+    model: string
+    temperature: number
+  }
+  stt: {
+    mode: 'transcribe' | 'direct'
+  }
+  tts: {
+    engine: 'kokoro' | 'qwen'
+    defaultVoice: string
+  }
+  agent: {
+    enableInternet: boolean
+    maxParallelSkills: number
+    skillQueueTimeoutMs: number
+  }
+  memory: {
+    enabled: boolean
+  }
+  learning: {
+    autoMemoryStore: boolean
+    autoSkillCreate: boolean
+    autoMacroCreate: boolean
+    retryOnFail: boolean
+    maxRetries: number
+  }
+  cache: {
+    mode: 'memory' | 'redis'
+    redisUrl?: string
+  }
+  voiceHandling: {
+    vadEnabled: boolean
+    wakeWordEnabled: boolean
+    autoListen: boolean
+  }
+  assistantName: string
+}
+
+export interface MemoryEntry {
+  id: string
+  content: string
+  tags?: string[]
+  createdAt?: string
+}
+
+export interface MemoryStatus {
+  available: boolean
+  enabled: boolean
+}
+
+export interface LearnedSkill {
+  name: string
+  description: string
+  content: string
+  stage: 'draft' | 'validated' | 'enabled'
+}
+
+export interface WorkspaceFile {
+  name: string
+  isDir: boolean
+  sizeBytes: number
+  modifiedAt: string | null
+}
+
+export type WorkspaceCategories = Record<string, WorkspaceFile[]>
 
 export interface SystemInfo {
   platform: string

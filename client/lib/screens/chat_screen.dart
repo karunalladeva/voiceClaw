@@ -41,7 +41,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   // Siri-like features
   double _amplitude = 0.0;
   bool _isWakeWordListening = false;
+  bool _isWakeWordStarting = false;
   DateTime? _lastVoiceActivity;
+  DateTime? _lastWakeWordStartAt;
   StreamSubscription? _amplitudeSub;
   StreamSubscription? _audioPlayerSub;
   late AnimationController _pulseController;
@@ -277,7 +279,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     try {
       bool available = await _speech.initialize(
         onStatus: (status) async {
+          if (status == 'listening') {
+            _isWakeWordListening = true;
+          }
           if (status == 'done' || status == 'notListening') {
+            _isWakeWordListening = false;
             await Future.delayed(const Duration(milliseconds: 500));
             if (!mounted) return;
             
@@ -308,9 +314,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   void _startWakeWordListening() {
     final config = Provider.of<AppState>(context, listen: false).config;
     if (config?.voiceHandling.wakeWordEnabled != true || _isRecording || _isRecordingStarting || _isProcessing) return;
+    if (_speech.isListening || _isWakeWordListening || _isWakeWordStarting) return;
+    final DateTime now = DateTime.now();
+    if (_lastWakeWordStartAt != null &&
+        now.difference(_lastWakeWordStartAt!).inMilliseconds < 800) {
+      return;
+    }
 
     try {
-      _speech.listen(
+      _isWakeWordStarting = true;
+      _lastWakeWordStartAt = now;
+      final Future<dynamic> listenFuture = _speech.listen(
       onResult: (result) {
         final name = config?.assistantName.toLowerCase() ?? 'claw';
         final transcript = result.recognizedWords.toLowerCase();
@@ -333,7 +347,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       partialResults: true,
       cancelOnError: false,
     );
-    } catch(e) { debugPrint("Wake word error: $e"); }
+      listenFuture.whenComplete(() {
+        _isWakeWordStarting = false;
+      });
+    } catch (e) {
+      _isWakeWordStarting = false;
+      debugPrint("Wake word error: $e");
+    }
   }
 
 
@@ -434,6 +454,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       final config = Provider.of<AppState>(context, listen: false).config;
       
       if (_speech.isListening) {
+        _isWakeWordListening = false;
         await _speech.stop();
         // CRITICAL FOR WINDOWS: Wait for the OS to release the hardware microphone lock
         await Future.delayed(const Duration(milliseconds: 600)); 
@@ -748,13 +769,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                         width: 30,
                         height: 30,
                         decoration: BoxDecoration(
-                          color: isUser ? Colors.blue.shade100 : Colors.teal.shade500,
+                          color: isUser
+                              ? Colors.blue.shade100
+                              : (isSystem ? Colors.orange.shade200 : Colors.teal.shade500),
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Icon(
-                          isUser ? Icons.person : Icons.smart_toy,
+                          isUser ? Icons.person : (isSystem ? Icons.info_outline : Icons.smart_toy),
                           size: 20,
-                          color: isUser ? Colors.blue.shade700 : Colors.white,
+                          color: isUser
+                              ? Colors.blue.shade700
+                              : (isSystem ? Colors.orange.shade900 : Colors.white),
                         ),
                       ),
                       const SizedBox(width: 16),
@@ -780,7 +805,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                               ],
                             ),
                             const SizedBox(height: 4),
-                            if (isUser || isSystem)
+                            if (isUser)
                               Text(
                                 msg['text'] ?? '',
                                 style: const TextStyle(fontSize: 15, height: 1.5, color: Colors.black87),
@@ -790,10 +815,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                                 data: msg['text'] ?? '',
                                 selectable: true,
                                 styleSheet: MarkdownStyleSheet(
-                                  p: const TextStyle(fontSize: 15, height: 1.5, color: Colors.black87),
+                                  p: TextStyle(
+                                    fontSize: 15,
+                                    height: 1.5,
+                                    color: isSystem ? Colors.orange.shade900 : Colors.black87,
+                                  ),
                                   codeblockPadding: const EdgeInsets.all(12),
                                   codeblockDecoration: BoxDecoration(
-                                    color: Colors.grey[200],
+                                    color: isSystem ? Colors.orange[100] : Colors.grey[200],
                                     borderRadius: BorderRadius.circular(8),
                                   ),
                                 ),

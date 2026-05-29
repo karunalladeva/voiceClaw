@@ -10,7 +10,7 @@ import type {
 
 const API_BASE = '/orchestration';
 
-export function useCompanies() {
+export function useCompanies(liveRevision: number = 0) {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -28,9 +28,7 @@ export function useCompanies() {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 30000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, liveRevision]);
 
   const createCompany = async (name: string, mission: string) => {
     const res = await fetch(`${API_BASE}/companies`, {
@@ -48,7 +46,7 @@ export function useCompanies() {
   return { companies, loading, refresh, createCompany };
 }
 
-export function useOrgAgents(companyId?: string) {
+export function useOrgAgents(companyId?: string, liveRevision: number = 0) {
   const [agents, setAgents] = useState<OrgAgent[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -69,9 +67,7 @@ export function useOrgAgents(companyId?: string) {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 10000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, liveRevision]);
 
   const createAgent = async (agent: Partial<OrgAgent>) => {
     const res = await fetch(`${API_BASE}/agents`, {
@@ -109,7 +105,7 @@ export function useOrgAgents(companyId?: string) {
   return { agents, loading, refresh, createAgent, updateAgent, triggerHeartbeat };
 }
 
-export function useTasks(companyId?: string) {
+export function useTasks(companyId?: string, liveRevision: number = 0) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -130,9 +126,7 @@ export function useTasks(companyId?: string) {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 5000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, liveRevision]);
 
   const createTask = async (task: Partial<Task>) => {
     const res = await fetch(`${API_BASE}/tasks`, {
@@ -150,7 +144,7 @@ export function useTasks(companyId?: string) {
   return { tasks, loading, refresh, createTask };
 }
 
-export function useGoals(companyId?: string) {
+export function useGoals(companyId?: string, liveRevision: number = 0) {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -171,14 +165,12 @@ export function useGoals(companyId?: string) {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 30000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, liveRevision]);
 
   return { goals, loading, refresh };
 }
 
-export function useApprovals(companyId?: string) {
+export function useApprovals(companyId?: string, liveRevision: number = 0) {
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -199,9 +191,7 @@ export function useApprovals(companyId?: string) {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 5000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, liveRevision]);
 
   const approve = async (id: string, reviewerId: string = 'admin', notes?: string) => {
     const res = await fetch(`${API_BASE}/approvals/${id}/approve`, {
@@ -232,7 +222,7 @@ export function useApprovals(companyId?: string) {
   return { approvals, loading, refresh, approve, reject };
 }
 
-export function useActivity(companyId?: string) {
+export function useActivity(companyId?: string, liveRevision: number = 0) {
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -253,14 +243,12 @@ export function useActivity(companyId?: string) {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 5000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, liveRevision]);
 
   return { activity, loading, refresh };
 }
 
-export function useBudget(companyId: string) {
+export function useBudget(companyId: string, liveRevision: number = 0) {
   const [spending, setSpending] = useState<{
     totalCostUSD: number;
     byAgent: Record<string, number>;
@@ -283,10 +271,8 @@ export function useBudget(companyId: string) {
   useEffect(() => {
     if (companyId) {
       refresh();
-      const interval = setInterval(refresh, 30000);
-      return () => clearInterval(interval);
     }
-  }, [companyId, refresh]);
+  }, [companyId, refresh, liveRevision]);
 
   const requestBudget = async (agentId: string, newLimitUSD: number, reason: string) => {
     const res = await fetch(`${API_BASE}/approvals/request-budget`, {
@@ -300,7 +286,7 @@ export function useBudget(companyId: string) {
   return { spending, loading, refresh, requestBudget };
 }
 
-export function useRoutines(companyId?: string) {
+export function useRoutines(companyId?: string, liveRevision: number = 0) {
   const [routines, setRoutines] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -321,9 +307,7 @@ export function useRoutines(companyId?: string) {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 5000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, liveRevision]);
 
   const createRoutine = async (routine: any) => {
     const res = await fetch(`${API_BASE}/routines`, {
@@ -359,4 +343,202 @@ export function useRoutines(companyId?: string) {
   };
 
   return { routines, loading, refresh, createRoutine, toggleRoutine, deleteRoutine };
+}
+
+export interface TradingTemplate {
+  id: string;
+  name: string;
+  category: string;
+  description?: string;
+}
+
+export interface TradingRun {
+  pipelineId: string;
+  pipelineName: string;
+  ranAt: number;
+  success: boolean;
+  stepResults: Array<{ type: string; success: boolean; output: string }>;
+}
+
+export interface TradingSkillInfo {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  enabled: boolean;
+  tags: string[];
+}
+
+export interface CreatorItemMeta {
+  id: string;
+  name: string;
+  slug: string;
+  type: 'skill' | 'mcp' | 'template';
+  purpose: string;
+  status: 'draft' | 'approved' | 'disabled';
+  source: 'generator' | 'manual';
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  lastEditedAt?: string;
+  notes?: string;
+  relativeDir: string;
+}
+
+export interface CreatorItemDetail {
+  meta: CreatorItemMeta;
+  content: Record<string, string>;
+}
+
+export function useTradingAdmin() {
+  const [templates, setTemplates] = useState<TradingTemplate[]>([]);
+  const [runs, setRuns] = useState<TradingRun[]>([]);
+  const [skills, setSkills] = useState<TradingSkillInfo[]>([]);
+  const [creatorItems, setCreatorItems] = useState<CreatorItemMeta[]>([]);
+  const [creatorPurposes, setCreatorPurposes] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [templateRes, runsRes, skillsRes, creatorRes, purposeRes] = await Promise.all([
+        fetch(`${API_BASE}/trading/templates`),
+        fetch(`${API_BASE}/trading/runs?limit=20`),
+        fetch(`${API_BASE}/trading/skills`),
+        fetch(`/creator/items`),
+        fetch(`/creator/purposes`),
+      ]);
+      const templateData = await templateRes.json();
+      const runData = await runsRes.json();
+      const skillData = await skillsRes.json();
+      const creatorData = await creatorRes.json();
+      const purposeData = await purposeRes.json();
+      setTemplates(templateData.templates || []);
+      setRuns(runData.runs || []);
+      setSkills(skillData.skills || []);
+      setCreatorItems(creatorData.items || []);
+      setCreatorPurposes(purposeData.purposes || []);
+    } catch (err) {
+      console.error('Failed to fetch trading admin data:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const runTemplate = async (templateId: string, symbols: string[]) => {
+    const res = await fetch(`${API_BASE}/trading/run-template`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ templateId, symbols }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        success: false,
+        error: data?.error || `Run failed (${res.status})`,
+      };
+    }
+    await refresh();
+    return data;
+  };
+
+  const checkConflict = async (type: 'skill' | 'mcp' | 'template', name: string, purpose: string) => {
+    const res = await fetch('/creator/check-conflict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, name, purpose }),
+    });
+    return await res.json();
+  };
+
+  const generateItems = async (payload: {
+    name: string;
+    purpose: string;
+    prompt: string;
+    generate: { skill?: boolean; mcp?: boolean; template?: boolean };
+  }) => {
+    const res = await fetch('/creator/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    await refresh();
+    return data;
+  };
+
+  const getCreatorItem = async (type: 'skill' | 'mcp' | 'template', slug: string): Promise<CreatorItemDetail | null> => {
+    const res = await fetch(`/creator/items/${type}/${slug}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.item || null;
+  };
+
+  const updateCreatorItem = async (type: 'skill' | 'mcp' | 'template', slug: string, payload: {
+    name?: string;
+    purpose?: string;
+    notes?: string;
+    content?: string;
+  }) => {
+    const res = await fetch(`/creator/items/${type}/${slug}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    await refresh();
+    return data;
+  };
+
+  const regenerateCreatorItem = async (type: 'skill' | 'mcp' | 'template', slug: string, prompt: string) => {
+    const res = await fetch(`/creator/items/${type}/${slug}/regenerate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    const data = await res.json();
+    await refresh();
+    return data;
+  };
+
+  const setCreatorStatus = async (type: 'skill' | 'mcp' | 'template', slug: string, status: 'draft' | 'approved' | 'disabled') => {
+    const res = await fetch(`/creator/items/${type}/${slug}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    const data = await res.json();
+    await refresh();
+    return data;
+  };
+
+  const deleteCreatorItem = async (type: 'skill' | 'mcp' | 'template', slug: string) => {
+    const res = await fetch(`/creator/items/${type}/${slug}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    await refresh();
+    return data;
+  };
+
+  return {
+    templates,
+    runs,
+    skills,
+    creatorItems,
+    creatorPurposes,
+    loading,
+    refresh,
+    runTemplate,
+    checkConflict,
+    generateItems,
+    getCreatorItem,
+    updateCreatorItem,
+    regenerateCreatorItem,
+    setCreatorStatus,
+    deleteCreatorItem,
+  };
 }
