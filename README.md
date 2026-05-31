@@ -318,6 +318,119 @@ npm run admin:build
 
 Creator, evolution, and channel routes: `src/creator/routes.ts`, `src/api/server.ts`.
 
+**ComfyUI (image/video generation)** — `GET/POST /comfyui/*` when `comfyui.enabled` is true. See [ComfyUI integration](#comfyui-image--video-generation) below.
+
+---
+
+## ComfyUI image & video generation
+
+VoiceClaw can generate images and videos by submitting workflows to a [ComfyUI](https://github.com/comfyanonymous/ComfyUI) server via its native REST + WebSocket API.
+
+### Prerequisites
+
+1. **ComfyUI running** (default `http://127.0.0.1:8000`)
+2. **Models** matching bundled workflows (e.g. `v1-5-pruned-emaonly.safetensors` for `txt2img-basic`)
+3. **Custom nodes** for video (`txt2video-basic` requires ComfyUI-AnimateDiff-Evolved)
+
+### Enable in config
+
+**Admin UI:** Settings → **ComfyUI** → Connection section → enable, set server URL, save.
+
+Or add to `workspace/config.json` manually:
+
+```json
+{
+  "comfyui": {
+    "enabled": true,
+    "baseUrl": "http://127.0.0.1:8000",
+    "requestTimeoutMs": 300000,
+    "outputDir": "workspace/generated",
+    "maxConcurrentJobs": 1
+  }
+}
+```
+
+Optional env override: `COMFYUI_BASE_URL=http://127.0.0.1:8000` in `.env`.
+
+### Chat / voice usage
+
+Ask naturally: *"Draw a sunset over mountains"* or *"Create a video of ocean waves."* The master agent routes to the **comfyui-creator** skill, which uses `txt2img-basic` for images and `txt2video-basic` for video.
+
+### Custom workflows
+
+Drop workflow JSON files into `workspace/comfyui/workflows/`. Each file uses this wrapper format:
+
+```json
+{
+  "id": "my-workflow",
+  "name": "My Workflow",
+  "type": "image",
+  "description": "What this workflow does",
+  "injections": {
+    "prompt": { "nodeId": "6", "field": "text" },
+    "negativePrompt": { "nodeId": "7", "field": "text" },
+    "seed": { "nodeId": "3", "field": "seed" },
+    "width": { "nodeId": "5", "field": "width" },
+    "height": { "nodeId": "5", "field": "height" }
+  },
+  "workflow": { ... ComfyUI API-format graph ... }
+}
+```
+
+Workspace workflows override bundled templates with the same `id`. Reload without restart: `POST /comfyui/workflows/reload`.
+
+Bundled defaults live in `template/comfyui/`.
+
+### Admin UI (Settings → ComfyUI)
+
+Open **Admin** → **Settings** → **ComfyUI** tab (`/admin/`):
+
+| Feature | What it does |
+|---------|----------------|
+| **Server status** | Shows whether ComfyUI is enabled and reachable |
+| **Upload JSON** | Upload wrapper or raw ComfyUI workflow to `workspace/comfyui/workflows/` |
+| **Import from ComfyUI** | Lists workflows saved in ComfyUI (`userdata/workflows/`), auto-suggests injections, import to workspace |
+| **Edit injections** | Expand a workspace template to edit prompt/seed/width node mappings |
+| **Delete** | Remove workspace templates (bundled templates are read-only) |
+| **Reload registry** | Rescan template folders without restarting the server |
+
+### REST API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/comfyui/health` | ComfyUI reachability and queue status |
+| `GET` | `/comfyui/workflows` | List available workflows |
+| `GET` | `/comfyui/workflows/:id` | Get full workflow with injections |
+| `PUT` | `/comfyui/workflows/:id` | Update workspace workflow |
+| `DELETE` | `/comfyui/workflows/:id` | Delete workspace workflow |
+| `POST` | `/comfyui/workflows/upload` | Upload JSON template (multipart `file`) |
+| `POST` | `/comfyui/workflows/import` | Import from ComfyUI userdata |
+| `GET` | `/comfyui/userdata/workflows` | List workflows saved in ComfyUI |
+| `POST` | `/comfyui/workflows/reload` | Reload workspace workflows |
+| `POST` | `/comfyui/generate` | Submit generation job |
+| `GET` | `/comfyui/jobs/:promptId` | Poll job status |
+| `GET` | `/comfyui/outputs/:promptId/:filename` | Download generated file |
+
+**Generate an image:**
+
+```bash
+curl -X POST http://localhost:3000/comfyui/generate \
+  -H "Content-Type: application/json" \
+  -d '{"workflowId":"txt2img-basic","prompt":"sunset over mountains","width":512,"height":512}'
+```
+
+**Async mode (long video jobs):**
+
+```bash
+curl -X POST "http://localhost:3000/comfyui/generate?async=true" \
+  -H "Content-Type: application/json" \
+  -d '{"workflowId":"txt2video-basic","prompt":"ocean waves on a beach"}'
+
+curl http://localhost:3000/comfyui/jobs/{promptId}
+```
+
+Outputs are saved under `workspace/generated/{promptId}/` and served at `/comfyui/outputs/{promptId}/{filename}`.
+
 ---
 
 ## Project structure
@@ -335,11 +448,12 @@ voice-to-voice/
 │   ├── services/           # Evolution, PII sanitizer, schedulers
 │   ├── pipeline/           # Channels & pipeline engine
 │   ├── creator/            # Workspace/skill creator
+│   ├── comfyui/            # ComfyUI REST routes
 │   ├── skills/             # Skill implementations & manifests
-│   └── tools/              # OS, market, finance tools
+│   └── tools/              # OS, market, finance, ComfyUI tools
 ├── workspace/              # Runtime config, chats, skills (created at onboard)
 ├── scripts/                # Onboard, evolution training, skill generation
-├── template/               # Trading & workflow templates
+├── template/               # Trading & ComfyUI workflow templates
 ├── channels.md             # Channel setup guide
 ├── start.sh                # Dev launcher (backend)
 └── .env.example            # Environment template
@@ -379,6 +493,7 @@ voice-to-voice/
 | Microphone blocked | Use HTTPS or localhost; grant browser/OS permissions |
 | MCP tools failing | Verify tokens in `.env`; check admin MCP metrics |
 | High VRAM usage | Reduce vision context in config; check `vram-monitor` logs |
+| ComfyUI unreachable | Start ComfyUI; set `comfyui.enabled` and `COMFYUI_BASE_URL`; check `/comfyui/health` |
 
 ---
 

@@ -8,6 +8,10 @@ import { StreamEvent } from './react-agent';
 import { modelRegistry } from '../models/model-registry';
 import { modelRouter } from '../models/model-router';
 import { createProvider } from '../models/provider-factory';
+import { truncateToolMessages } from '../utils/tool-output-truncate';
+
+const SKILL_RECURSION_LIMIT = 20;
+const SKILL_RUN_TIMEOUT_MS = 180_000;
 
 export class AgentFactory {
   private cache: Map<string, any> = new Map();
@@ -124,7 +128,10 @@ export class AgentFactory {
           }
         } else if (event.event === 'on_tool_start') {
           if (fullText) fullText = '';
+          console.log(`[AgentFactory] Skill "${skill.name}" tool: ${event.name || 'unknown'}`);
           yield { type: 'tool_call', data: event.name || 'unknown' };
+        } else if (event.event === 'on_tool_end') {
+          console.log(`[AgentFactory] Skill "${skill.name}" tool done: ${event.name || 'unknown'}`);
         }
       }
 

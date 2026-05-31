@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AppConfig } from '@/types'
 import { useConfig } from '@/hooks/useApi'
+import { clearAllChatHistory } from '@/lib/chatApi'
 import {
   SettingsSection,
   SettingsCard,
@@ -10,10 +11,11 @@ import {
   SettingsSwitch,
   SettingsSlider,
   SettingsNavButton,
+  SettingsDangerButton,
   SettingsToast,
 } from './SettingsControls'
 
-type SettingsTab = 'general' | 'models' | 'memory' | 'skills' | 'workspace'
+import type { SettingsTab } from './settings-tabs'
 
 interface GeneralSettingsFormProps {
   onNavigate: (tab: SettingsTab) => void
@@ -41,6 +43,7 @@ export function GeneralSettingsForm({ onNavigate }: GeneralSettingsFormProps) {
   const { config, loading, saving, saveConfig } = useConfig()
   const [form, setForm] = useState<AppConfig>(defaultForm)
   const [toast, setToast] = useState<{ message: string; variant: 'success' | 'error' } | null>(null)
+  const [clearingHistory, setClearingHistory] = useState(false)
 
   useEffect(() => {
     if (config) {
@@ -64,6 +67,28 @@ export function GeneralSettingsForm({ onNavigate }: GeneralSettingsFormProps) {
       message: ok ? 'Preferences updated successfully' : 'Failed to save configuration',
       variant: ok ? 'success' : 'error',
     })
+  }
+
+  const handleClearAllHistory = async () => {
+    if (
+      !confirm(
+        'Delete ALL saved conversations (Telegram, WhatsApp, admin chats, pipelines)?\n\nSummaries and archived messages will be removed. This cannot be undone.',
+      )
+    ) {
+      return
+    }
+    setClearingHistory(true)
+    try {
+      const result = await clearAllChatHistory()
+      setToast({ message: result.message, variant: 'success' })
+    } catch (err) {
+      setToast({
+        message: err instanceof Error ? err.message : 'Failed to clear history',
+        variant: 'error',
+      })
+    } finally {
+      setClearingHistory(false)
+    }
   }
 
   if (loading && !config) {
@@ -249,6 +274,21 @@ export function GeneralSettingsForm({ onNavigate }: GeneralSettingsFormProps) {
       <SettingsCard>
         <SettingsRow label="Browse Workspace Files" subtitle="View and manage data, media, and skill files.">
           <SettingsNavButton label="Open Workspace" onClick={() => onNavigate('workspace')} />
+        </SettingsRow>
+      </SettingsCard>
+
+      <SettingsSection title="Conversation history" />
+      <SettingsCard>
+        <SettingsRow
+          label="Clear all chat history"
+          subtitle="Deletes every file in workspace/chats (all channels and admin chats), summaries, and response caches."
+        >
+          <SettingsDangerButton
+            label="Clear history"
+            onClick={() => void handleClearAllHistory()}
+            disabled={clearingHistory}
+            loading={clearingHistory}
+          />
         </SettingsRow>
       </SettingsCard>
 

@@ -82,3 +82,24 @@ export function capSpeechPlain(plain: string, maxChars: number, suffix: string):
   const truncated = lastBreak > 80 ? slice.substring(0, lastBreak + 1).trim() : slice.trim();
   return `${truncated} ${suffix}`.trim();
 }
+
+/** Split capped plain text into sentence chunks for faster time-to-first-audio. */
+export function splitIntoTtsChunks(plain: string, maxChunkChars: number = 220): string[] {
+  const trimmed = plain.trim();
+  if (!trimmed) return [];
+  if (trimmed.length <= maxChunkChars) return [trimmed];
+  const parts = trimmed.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [trimmed];
+  const chunks: string[] = [];
+  let current = '';
+  for (const part of parts) {
+    const next = current ? `${current} ${part.trim()}` : part.trim();
+    if (next.length > maxChunkChars && current) {
+      chunks.push(current.trim());
+      current = part.trim();
+    } else {
+      current = next;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.length > 0 ? chunks : [trimmed];
+}

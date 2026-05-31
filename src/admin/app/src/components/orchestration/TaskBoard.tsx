@@ -1,15 +1,51 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import type { Task, TaskStatus, TaskPriority, OrgAgent } from '@/types/orchestration';
+import type { Task, TaskStatus, TaskPriority, OrgAgent, ReviewDecision } from '@/types/orchestration';
+import { PIPELINE_MODE_LABEL } from '@/types/orchestration';
+import { getTaskStatusHints, AWAITING_USER_LABEL, AWAITING_PARENT_LABEL } from './taskStatusHelpers';
+import { MarkdownField } from './MarkdownField';
+import { TaskDetailPanel } from './TaskDetailPanel';
+import { TaskLabelsField } from './TaskLabelsField';
+import { TaskDependencyPicker } from './TaskDependencyPicker';
 
 interface Props {
   tasks: Task[];
   agents: OrgAgent[];
   companyId: string;
   onTaskClick?: (task: Task) => void;
-  onCreateTask?: (task: Partial<Task>) => Promise<any>;
+  onCreateTask?: (task: Partial<Task> & { blockedBy?: string[] }) => Promise<any>;
   onRunNow?: (agentId: string) => void;
+  onReview?: (
+    taskId: string,
+    payload: {
+      reviewerId?: string;
+      decision: ReviewDecision;
+      notes?: string;
+      nextAssigneeId?: string;
+    },
+  ) => Promise<void>;
+  onUpdateTask?: (
+    taskId: string,
+    updates: {
+      title?: string;
+      description?: string;
+      priority?: TaskPriority;
+      status?: TaskStatus;
+      assigneeId?: string | null;
+      blockedBy?: string[];
+      labels?: string[];
+    },
+  ) => Promise<{ task?: Task } | void>;
+  fetchWorkProducts?: (taskId: string) => Promise<import('@/types/orchestration').WorkProduct[]>;
+  fetchComments?: (taskId: string) => Promise<import('@/types/orchestration').TaskComment[]>;
+  fetchSubtasks?: (taskId: string) => Promise<Task[]>;
+  delegateTeam?: (taskId: string, options?: { supersede?: boolean; managerId?: string }) => Promise<void>;
+  refreshTaskContext?: (taskId: string) => Promise<void>;
+  refreshRootContext?: (rootTaskId: string) => Promise<void>;
+  requestClarification?: (taskId: string, question: string) => Promise<void>;
+  addTaskComment?: (taskId: string, content: string) => Promise<void>;
+  onTasksRefresh?: () => void;
 }
 
 const columns: { status: TaskStatus; label: string; color: string }[] = [
@@ -30,6 +66,7 @@ const priorityColors: Record<TaskPriority, string> = {
 function TaskCard({ task, agents, onTaskClick, onRunNow }: { task: Task; agents: OrgAgent[]; onTaskClick?: (task: Task) => void; onRunNow?: (agentId: string) => void }) {
   const assignee = agents.find(a => a.id === task.assigneeId);
   const checkedOut = agents.find(a => a.id === task.checkedOutBy);
+  const statusHints = getTaskStatusHints(task);
 
   return (
     <Card
@@ -43,13 +80,37 @@ function TaskCard({ task, agents, onTaskClick, onRunNow }: { task: Task; agents:
             {task.priority}
           </Badge>
         </div>
+        {statusHints.map((hint) => (
+          <p
+            key={hint}
+            className={`text-[10px] mb-1 ${
+              hint.includes('Waiting for your') || hint.includes('human')
+                ? 'text-cyan-400'
+                : hint.includes('parent')
+                  ? 'text-violet-400'
+                  : hint.includes('review')
+                    ? 'text-purple-400'
+                    : 'text-amber-500/90'
+            }`}
+          >
+            {hint}
+          </p>
+        ))}
         
         {task.labels.length > 0 && (
           <div className="flex flex-wrap gap-1 mb-2">
             {task.labels.map(label => (
               <span
                 key={label}
-                className="px-1.5 py-0.5 text-xs bg-gray-700 rounded text-gray-400"
+                className={`px-1.5 py-0.5 text-xs rounded ${
+                  label === PIPELINE_MODE_LABEL
+                    ? 'bg-emerald-900/50 text-emerald-300 border border-emerald-800'
+                    : label === AWAITING_USER_LABEL
+                      ? 'bg-cyan-900/50 text-cyan-300 border border-cyan-800'
+                      : label === AWAITING_PARENT_LABEL
+                        ? 'bg-violet-900/50 text-violet-300 border border-violet-800'
+                        : 'bg-gray-700 text-gray-400'
+                }`}
               >
                 {label}
               </span>
@@ -88,12 +149,39 @@ function TaskCard({ task, agents, onTaskClick, onRunNow }: { task: Task; agents:
   );
 }
 
-export function TaskBoard({ tasks, agents, companyId, onTaskClick, onCreateTask, onRunNow }: Props) {
+export function TaskBoard({
+  tasks,
+  agents,
+  companyId,
+  onTaskClick,
+  onCreateTask,
+  onRunNow,
+  onReview,
+  onUpdateTask,
+  fetchWorkProducts,
+  fetchComments,
+  fetchSubtasks,
+  delegateTeam,
+  refreshTaskContext,
+  refreshRootContext,
+  requestClarification,
+  addTaskComment,
+  onTasksRefresh,
+}: Props) {
   const [isCreating, setIsCreating] = useState(false);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newPriority, setNewPriority] = useState<any>('medium');
   const [newAssignee, setNewAssignee] = useState('');
+  const [newBlockedBy, setNewBlockedBy] = useState<string[]>([]);
+  const [newLabels, setNewLabels] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!selectedTask) return;
+    const fresh = tasks.find(t => t.id === selectedTask.id);
+    if (fresh) setSelectedTask(fresh);
+  }, [tasks, selectedTask?.id]);
 
   const handleCreate = async () => {
     if (newTitle && onCreateTask) {
@@ -104,12 +192,21 @@ export function TaskBoard({ tasks, agents, companyId, onTaskClick, onCreateTask,
         priority: newPriority,
         assigneeId: newAssignee || undefined,
         createdBy: 'admin',
+        blockedBy: newBlockedBy.length > 0 ? newBlockedBy : undefined,
+        labels: newLabels.length > 0 ? newLabels : undefined,
       });
       setIsCreating(false);
       setNewTitle('');
       setNewDesc('');
       setNewAssignee('');
+      setNewBlockedBy([]);
+      setNewLabels([]);
     }
+  };
+
+  const handleTaskClick = (task: Task) => {
+    setSelectedTask(task);
+    onTaskClick?.(task);
   };
 
   return (
@@ -139,15 +236,14 @@ export function TaskBoard({ tasks, agents, companyId, onTaskClick, onCreateTask,
                   placeholder="Task title..."
                 />
               </div>
-              <div className="space-y-1.5">
-                <label className="text-xs text-gray-400">Description</label>
-                <textarea
-                  value={newDesc}
-                  onChange={e => setNewDesc(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-green-500 h-20 resize-none"
-                  placeholder="Details..."
-                />
-              </div>
+              <MarkdownField
+                label="Description"
+                value={newDesc}
+                onChange={setNewDesc}
+                placeholder={'## Goal\n- Step one\n- Step two'}
+                minRows={5}
+                accent="green"
+              />
             </div>
             
             <div className="space-y-3">
@@ -177,6 +273,12 @@ export function TaskBoard({ tasks, agents, companyId, onTaskClick, onCreateTask,
                   ))}
                 </select>
               </div>
+              <TaskLabelsField labels={newLabels} onChange={setNewLabels} showPipelineToggle />
+              <TaskDependencyPicker
+                tasks={tasks}
+                selectedIds={newBlockedBy}
+                onChange={setNewBlockedBy}
+              />
             </div>
             
             <div className="flex flex-col gap-2 justify-end h-full">
@@ -195,6 +297,34 @@ export function TaskBoard({ tasks, agents, companyId, onTaskClick, onCreateTask,
             </div>
           </div>
         </div>
+      )}
+
+      {selectedTask && onUpdateTask && fetchWorkProducts && fetchComments && (
+        <TaskDetailPanel
+          task={selectedTask}
+          agents={agents}
+          tasks={tasks}
+          onClose={() => setSelectedTask(null)}
+          onUpdateTask={async (taskId, updates) => {
+            const data = await onUpdateTask(taskId, updates);
+            if (data?.task) setSelectedTask(data.task);
+          }}
+          onReview={onReview}
+          fetchWorkProducts={fetchWorkProducts}
+          fetchComments={fetchComments}
+          fetchSubtasks={fetchSubtasks}
+          delegateTeam={delegateTeam}
+          refreshTaskContext={refreshTaskContext}
+          refreshRootContext={refreshRootContext}
+          requestClarification={requestClarification}
+          addTaskComment={addTaskComment}
+          onSelectTask={(t) => setSelectedTask(t)}
+          onTasksChanged={() => {
+            onTasksRefresh?.();
+            const fresh = tasks.find((t) => t.id === selectedTask.id);
+            if (fresh) setSelectedTask(fresh);
+          }}
+        />
       )}
 
       <div className="grid grid-cols-5 gap-4 flex-1 min-h-0">
@@ -219,7 +349,7 @@ export function TaskBoard({ tasks, agents, companyId, onTaskClick, onCreateTask,
                     key={task.id}
                     task={task}
                     agents={agents}
-                    onTaskClick={onTaskClick}
+                    onTaskClick={handleTaskClick}
                     onRunNow={onRunNow}
                   />
                 ))

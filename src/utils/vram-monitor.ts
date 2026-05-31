@@ -1,6 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { modelRegistry } from '../models/model-registry';
+import { unloadAllRunningLocalModels, unloadLocalModel } from '../models/local-model-lifecycle';
 import { orchestrationStore } from '../orchestration/store';
 import { cache } from './cache';
 import { inferenceActivity } from './inference-activity';
@@ -59,23 +60,16 @@ export class VramMonitor {
 
   async unloadLocalModels() {
      try {
+       const suspended = await unloadAllRunningLocalModels(null);
        const enabledModels = modelRegistry.getEnabled();
-       let unloadedCount = 0;
-       
        for (const model of enabledModels) {
-         if (model.provider === 'ollama' && model.baseUrl) {
-            await fetch(`${model.baseUrl}/api/generate`, {
-               method: 'POST',
-               headers: { 'Content-Type': 'application/json' },
-               body: JSON.stringify({ model: model.model, keep_alive: 0 })
-            }).catch(() => {});
-            unloadedCount++;
+         if (model.provider === 'ollama' || model.provider === 'llamacpp') {
+            await unloadLocalModel(model, model.model).catch(() => {});
          }
-         // LMStudio unloads via TTL natively, but if it gains an unload API, add here.
        }
-       
-       if (unloadedCount > 0) {
-         console.log(`[VRAM Monitor] Successfully issued unload commands to ${unloadedCount} local model(s).`);
+       const count = Math.max(suspended.length, enabledModels.filter((m) => m.provider === 'ollama' || m.provider === 'llamacpp').length);
+       if (count > 0) {
+         console.log(`[VRAM Monitor] Issued unload commands to ${count} local model(s).`);
        }
      } catch (err) {
        console.warn('[VRAM Monitor] Failed to unload local models:', err);

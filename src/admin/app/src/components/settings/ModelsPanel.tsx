@@ -1,18 +1,25 @@
-import { useState } from 'react'
-import { Plus, Radar, RefreshCw, Star, Pencil, Trash2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Plus, Radar, RefreshCw, Star, Pencil, Trash2, ExternalLink } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useModelsAdmin } from '@/hooks/useApi'
 import type { Model } from '@/types'
 import { SettingsToast } from './SettingsControls'
 
-const PROVIDERS = ['ollama', 'openai', 'anthropic', 'google', 'mistral', 'groq', 'custom']
+const PROVIDERS = ['ollama', 'llamacpp', 'lmstudio', 'openai', 'anthropic', 'google', 'mistral', 'groq', 'custom']
 
-export function ModelsPanel() {
+const LOCAL_PROVIDERS = new Set(['ollama', 'llamacpp', 'lmstudio'])
+
+interface ModelsPanelProps {
+  onNavigate?: (tab: 'llamacpp') => void
+}
+
+export function ModelsPanel({ onNavigate }: ModelsPanelProps) {
   const { models, loading, error, detecting, fetchModels, saveModel, deleteModel, setMaster, detectModel, detectAll } =
     useModelsAdmin()
   const [editing, setEditing] = useState<Model | null>(null)
   const [isNew, setIsNew] = useState(false)
+  const [serverModels, setServerModels] = useState<Array<{ id: string; status?: string }>>([])
   const [toast, setToast] = useState<{ message: string; variant: 'success' | 'error' } | null>(null)
 
   const showToast = (message: string, variant: 'success' | 'error' = 'success') => {
@@ -35,6 +42,21 @@ export function ModelsPanel() {
     setEditing({ ...model })
     setIsNew(false)
   }
+
+  useEffect(() => {
+    if (!editing || editing.provider !== 'llamacpp') {
+      setServerModels([])
+      return
+    }
+    const baseUrl = editing.baseUrl?.trim()
+    const query = baseUrl ? `?baseUrl=${encodeURIComponent(baseUrl)}` : ''
+    fetch(`/llamacpp/models${query}`)
+      .then((res) => (res.ok ? res.json() : { models: [] }))
+      .then((data: { models?: Array<{ id: string; status?: string }> }) => {
+        setServerModels(data.models ?? [])
+      })
+      .catch(() => setServerModels([]))
+  }, [editing?.provider, editing?.baseUrl, editing?.model])
 
   const handleSave = async () => {
     if (!editing) return
@@ -126,6 +148,25 @@ export function ModelsPanel() {
       </div>
 
       {error && <p className="text-destructive text-sm mb-4">{error}</p>}
+
+      <Card className="p-4 mb-4 flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium">llama.cpp models</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Discover, load, and run GGUF models from the dedicated llama.cpp settings tab.
+          </p>
+        </div>
+        {onNavigate && (
+          <button
+            type="button"
+            onClick={() => onNavigate('llamacpp')}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border hover:bg-secondary shrink-0"
+          >
+            <ExternalLink className="w-4 h-4" />
+            Open llama.cpp
+          </button>
+        )}
+      </Card>
 
       {models.length === 0 ? (
         <Card className="p-10 text-center text-muted-foreground">No models configured yet.</Card>
@@ -231,13 +272,45 @@ export function ModelsPanel() {
               </label>
               <label className="text-sm">
                 <span className="text-muted-foreground">Model</span>
-                <input
-                  type="text"
-                  value={editing.model}
-                  onChange={(e) => setEditing({ ...editing, model: e.target.value })}
-                  className="mt-1 w-full bg-secondary border border-border rounded-md px-3 py-2 text-sm"
-                />
+                {editing.provider === 'llamacpp' && serverModels.length > 0 ? (
+                  <select
+                    value={editing.model}
+                    onChange={(e) => setEditing({ ...editing, model: e.target.value })}
+                    className="mt-1 w-full bg-secondary border border-border rounded-md px-3 py-2 text-sm"
+                  >
+                    <option value="">Select from server...</option>
+                    {serverModels.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.id}{entry.status ? ` (${entry.status})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={editing.model}
+                    onChange={(e) => setEditing({ ...editing, model: e.target.value })}
+                    className="mt-1 w-full bg-secondary border border-border rounded-md px-3 py-2 text-sm"
+                  />
+                )}
               </label>
+              {LOCAL_PROVIDERS.has(editing.provider) && (
+                <label className="text-sm">
+                  <span className="text-muted-foreground">Base URL</span>
+                  <input
+                    type="text"
+                    value={editing.baseUrl ?? ''}
+                    onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
+                    placeholder={editing.provider === 'ollama' ? 'http://localhost:11434' : editing.provider === 'llamacpp' ? 'http://127.0.0.1:8080' : 'http://localhost:1234/v1'}
+                    className="mt-1 w-full bg-secondary border border-border rounded-md px-3 py-2 text-sm"
+                  />
+                  {editing.provider === 'llamacpp' && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Leave empty to use llama.cpp tab connection settings.
+                    </p>
+                  )}
+                </label>
+              )}
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"

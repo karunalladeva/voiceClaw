@@ -4,7 +4,7 @@ import { useChat } from '@/hooks/useChat'
 import { ChatSidebar } from '@/components/chat/ChatSidebar'
 import { ChatMessage } from '@/components/chat/ChatMessage'
 
-export function ChatDashboard() {
+export function ChatDashboard({ onOpenPipelines }: { onOpenPipelines?: () => void }) {
   const chat = useChat()
   const canSend = chat.inputText.trim().length > 0 && !chat.isProcessing
 
@@ -21,6 +21,7 @@ export function ChatDashboard() {
         onNewChat={chat.createNewChat}
         onSelectChat={(id) => void chat.switchChat(id)}
         onDeleteChat={(id) => void chat.removeChat(id)}
+        onOpenPipelines={onOpenPipelines}
       />
 
       <div className="flex-1 flex flex-col min-w-0">

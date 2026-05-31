@@ -12,11 +12,10 @@
  */
 
 import { ChannelMessage, loadChannels, getProvider, getInputCapableChannels } from './channels';
+import { extractMediaAttachments } from '../utils/media-attachments';
 import { STTModule } from '../stt/whisper';
 import { ReactAgent } from '../agents/react-agent';
-import * as path from 'path';
-import * as fs from 'fs/promises';
-import * as os from 'os';
+import { agentEvents } from '../admin/agent-events';
 import { configManager } from '../config/index';
 
 export interface PendingPairing {
@@ -56,15 +55,16 @@ class ChannelInputManager {
       if (this.activeListeners.has(ch.type)) continue; // already running
 
       await this.startChannel(ch.type).catch(e => {
-        console.error(`[ChannelInput] Failed to start ${ch.type}:`, e.message);
+        const message = `[ChannelInput] Failed to start ${ch.type}: ${e.message}`;
+        console.error(message);
+        agentEvents.log('error', message, { channelType: ch.type });
       });
     }
   }
 
-  /** Start listening on a specific channel */
+  /** Start listening on a specific channel (no-op if already active). */
   async startChannel(type: string): Promise<void> {
     if (this.activeListeners.has(type)) {
-      console.log(`[ChannelInput] ${type} is already listening. Stop it first.`);
       return;
     }
 
@@ -77,10 +77,12 @@ class ChannelInputManager {
     const config = channels.find(c => c.type === type);
     const settings = config?.settings || {};
 
+    agentEvents.log('info', `[ChannelInput] Starting listener for: ${type}`, { channelType: type });
     console.log(`[ChannelInput] Starting listener for: ${type}`);
     const stop = await provider.startListening(settings, (msg) => this.handleMessage(msg));
 
     this.activeListeners.set(type, { stop, startedAt: Date.now() });
+    agentEvents.log('info', `[ChannelInput] ${type} listener active`, { channelType: type });
     console.log(`[ChannelInput] ✅ ${type} listener active.`);
   }
 
@@ -94,6 +96,7 @@ class ChannelInputManager {
 
     listener.stop();
     this.activeListeners.delete(type);
+    agentEvents.log('info', `[ChannelInput] ${type} listener stopped`, { channelType: type });
     console.log(`[ChannelInput] 🛑 ${type} listener stopped.`);
   }
 
@@ -109,6 +112,17 @@ class ChannelInputManager {
   /** Restart a specific channel (stop then start) */
   async restartChannel(type: string): Promise<void> {
     await this.stopChannel(type);
+    if (type === 'whatsapp') {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+    await this.startChannel(type);
+  }
+
+  /** Start only when not already listening (safe for toggle/save). */
+  async ensureChannelRunning(type: string): Promise<void> {
+    if (this.activeListeners.has(type)) {
+      return;
+    }
     await this.startChannel(type);
   }
 
@@ -153,11 +167,28 @@ class ChannelInputManager {
     // Optionally notify the user. For true bidirectional, we need settings, which might not be available easily without replyFn.
     // For now, they will find out when they message again.
     console.log(`[ChannelInput] ✅ Approved pairing for ${pairing.senderName} (${pairing.channelType})`);
+    agentEvents.log('info', `[ChannelInput] Approved pairing for ${pairing.senderName} on ${pairing.channelType}`, {
+      channelType: pairing.channelType,
+      senderId: pairing.senderId,
+    });
     return true;
   }
 
   rejectPairing(code: string): boolean {
     return this.pendingPairings.delete(code);
+  }
+
+  private async runAgent(input: string, chatId: string): Promise<string> {
+    if (!this.agent) {
+      throw new Error('No agent available');
+    }
+    let response = '';
+    for await (const event of this.agent.processStream(input, chatId)) {
+      if (event.type === 'text_done' || event.type === 'error') {
+        response = typeof event.data === 'string' ? event.data : String(event.data);
+      }
+    }
+    return response || 'Sorry, I could not generate a response.';
   }
 
   /**
@@ -166,7 +197,9 @@ class ChannelInputManager {
    */
   private async handleMessage(msg: ChannelMessage): Promise<void> {
     if (!this.agent) {
-      console.error('[ChannelInput] No agent available — dropping message.');
+      const message = '[ChannelInput] No agent available — dropping message.';
+      console.error(message);
+      agentEvents.log('error', message, { channelType: msg.channelType });
       return;
     }
 
@@ -194,6 +227,11 @@ class ChannelInputManager {
         });
         
         console.log(`[ChannelInput] Unauthorized access from ${msg.senderName} (${msg.senderId}). Generated pairing code: ${code}`);
+        agentEvents.log('warn', `[ChannelInput] Pairing required for ${msg.senderName} on ${msg.channelType} (code: ${code})`, {
+          channelType: msg.channelType,
+          senderId: msg.senderId,
+          senderName: msg.senderName,
+        });
         try {
             await msg.replyFn(`🔒 VoiceClaw Pairing Required.\n\nYour pairing code is: *${code}*\n\nPlease approve this code in your admin dashboard to start chatting.`);
         } catch (e) {
@@ -203,32 +241,49 @@ class ChannelInputManager {
     }
 
     const chatId = `channel-${msg.channelType}-${msg.senderId}`;
-    console.log(`[ChannelInput] 📩 ${msg.channelType}/${msg.senderName}: ${msg.text?.substring(0, 100) || '[audio]'}`);
+    const preview = msg.text?.substring(0, 100) || '[audio]';
+    console.log(`[ChannelInput] 📩 ${msg.channelType}/${msg.senderName}: ${preview}`);
+    agentEvents.log('info', `[Channel:${msg.channelType}] Message from ${msg.senderName}: ${preview}`, {
+      chatId,
+      channelType: msg.channelType,
+      senderId: msg.senderId,
+      senderName: msg.senderName,
+    });
 
     try {
       let input: string;
 
       if (msg.audioBuffer) {
-        // Transcribe audio to text first
         console.log(`[ChannelInput] Transcribing ${msg.audioMime || 'audio'} from ${msg.channelType}...`);
+        agentEvents.log('info', `[Channel:${msg.channelType}] Transcribing voice message from ${msg.senderName}`, {
+          chatId,
+          channelType: msg.channelType,
+        });
         const ext = this.mimeToExtension(msg.audioMime || 'audio/ogg');
         input = await this.transcribeAudio(msg.audioBuffer, ext);
         console.log(`[ChannelInput] Transcription: "${input.substring(0, 100)}"`);
+        agentEvents.log('info', `[Channel:${msg.channelType}] Transcription: "${input.substring(0, 120)}"`, { chatId });
       } else if (msg.text) {
         input = msg.text;
       } else {
         console.warn('[ChannelInput] Message has no text or audio — ignoring.');
+        agentEvents.log('warn', `[Channel:${msg.channelType}] Ignored empty message from ${msg.senderName}`, { chatId });
         return;
       }
 
-      // Process through the agent (non-streaming for channel responses)
-      const response = await this.agent.process(input, chatId);
+      const response = await this.runAgent(input, chatId);
+      const attachments = extractMediaAttachments(response);
 
-      // Send back to the same channel
-      await msg.replyFn(response);
-      console.log(`[ChannelInput] ✅ Replied on ${msg.channelType}: "${response.substring(0, 80)}..."`);
+      await msg.replyFn(response, attachments);
+      console.log(`[ChannelInput] ✅ Replied on ${msg.channelType}: "${response.substring(0, 80)}..."${attachments.length ? ` (+${attachments.length} media)` : ''}`);
+      agentEvents.log('info', `[Channel:${msg.channelType}] Replied to ${msg.senderName}: "${response.substring(0, 120)}"`, {
+        chatId,
+        channelType: msg.channelType,
+      });
     } catch (err: any) {
-      console.error(`[ChannelInput] Error processing message from ${msg.channelType}:`, err.message);
+      const errorMessage = `[ChannelInput] Error processing message from ${msg.channelType}: ${err.message}`;
+      console.error(errorMessage);
+      agentEvents.log('error', errorMessage, { chatId, channelType: msg.channelType });
       try {
         await msg.replyFn('Sorry, I encountered an error processing your message. Please try again.');
       } catch {}

@@ -140,7 +140,7 @@ export default function App() {
         </div>
       </main>
       
-      <EventsPanel events={events} />
+      <EventsPanel events={events} agents={agents} />
     </div>
   )
 }

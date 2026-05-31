@@ -306,11 +306,21 @@ function makeTools(): DynamicStructuredTool[] {
       chatId: z.string().describe('Chat ID').default('default'),
     }),
     func: async ({ chatId }) => {
-      const thread = historyManager.getThread(chatId);
-      if (thread.length === 0) return 'No history for this conversation.';
-      return thread.map((m, i) =>
-        `[${i + 1}] (${m.getType()}): ${m.content.toString().substring(0, 200)}`
-      ).join('\n');
+      await historyManager.loadChat(chatId);
+      const summaries = historyManager.getSummaries(chatId);
+      const active = await historyManager.buildLlmContextMessages(chatId, 12000);
+      if (active.length === 0 && summaries.length === 0) {
+        return 'No history for this conversation.';
+      }
+      const parts: string[] = [];
+      if (summaries.length > 0) {
+        parts.push(`Summaries (${summaries.length}): ${historyManager.getCombinedSummariesText(chatId).substring(0, 800)}`);
+      }
+      parts.push(
+        'Active turns (isSummarized=false):',
+        ...active.map((m, i) => `[${i + 1}] (${m.getType()}): ${m.content.toString().substring(0, 200)}`),
+      );
+      return parts.join('\n');
     },
   });
 

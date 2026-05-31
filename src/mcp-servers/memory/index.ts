@@ -6,6 +6,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import * as fs from "fs/promises";
 import * as path from "path";
 import { MongoClient, Collection } from "mongodb";
+import { filterMemoriesForContext, isValidLongTermMemory } from "../../agents/memory-policy";
 
 // Create MCP server
 const server = new Server(
@@ -196,6 +197,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
+      if (!isValidLongTermMemory(content, tags)) {
+        return {
+          content: [{ type: "text", text: "Skipped: content looks like chat history or automation setup, not a durable user fact." }],
+        };
+      }
+
       const newItem: MemoryItem = {
         id: Date.now().toString(),
         timestamp: new Date().toISOString(),
@@ -262,7 +269,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      const filteredResults = results.filter(m => m.combinedScore > 0.1);
+      const filteredResults = filterMemoriesForContext(
+        results.filter(m => m.combinedScore > 0.1),
+      );
       filteredResults.sort((a, b) => b.combinedScore - a.combinedScore || b.timestamp.localeCompare(a.timestamp));
 
       if (filteredResults.length === 0) {
@@ -289,7 +298,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         results = await getMemory();
         results.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
       }
-      return { content: [{ type: "text", text: JSON.stringify(results) }] };
+      return { content: [{ type: "text", text: JSON.stringify(filterMemoriesForContext(results)) }] };
 
     } else if (name === "delete_memory") {
       const id = args.id as string;

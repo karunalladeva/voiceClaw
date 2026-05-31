@@ -66,6 +66,12 @@ export default defineConfig({
       '/chats': {
         target: 'http://localhost:3000',
       },
+      '/comfyui': {
+        target: 'http://localhost:3000',
+      },
+      '/llamacpp': {
+        target: 'http://localhost:3000',
+      },
     },
   },
 })

@@ -157,6 +157,27 @@ class AgentEventEmitter extends EventEmitter {
         }
         break;
 
+      case 'model:loading':
+        const loadingAgent = this.activeAgents.get(agentId);
+        if (loadingAgent) {
+          loadingAgent.status = 'thinking';
+        }
+        break;
+
+      case 'model:inference_start':
+        const inferStartAgent = this.activeAgents.get(agentId);
+        if (inferStartAgent) {
+          inferStartAgent.status = 'thinking';
+        }
+        break;
+
+      case 'model:inference_end':
+        const inferEndAgent = this.activeAgents.get(agentId);
+        if (inferEndAgent) {
+          inferEndAgent.status = 'streaming';
+        }
+        break;
+
       case 'agent:thinking':
         const thinkingAgent = this.activeAgents.get(agentId);
         if (thinkingAgent) {

@@ -16,6 +16,10 @@ export type ChatSender = 'User' | 'Agent' | 'System'
 export interface ChatMessage {
   sender: ChatSender
   text: string
+  /** True when this turn is kept in JSON but excluded from LLM context */
+  isSummarized?: boolean
+  /** Rolled-up summary block (from summaries[]), shown in UI only */
+  isSummaryBlock?: boolean
 }
 
 const VAD_SILENCE_MS = 1800
@@ -154,10 +158,13 @@ export function useChat() {
             updateLastAgentMessage(event.data)
           }
           state.agentText = event.data
-          setStatusText('Generating audio…')
+          break
+        case 'audio_start':
+          setStatusText('Speaking…')
+          audioPlayerRef.current.reset()
           break
         case 'audio':
-          setStatusText('')
+          setStatusText('Speaking…')
           audioPlayerRef.current.enqueue(event.data)
           break
         case 'error':
@@ -302,13 +309,20 @@ export function useChat() {
       setMessages([])
       setStatusText('Loading chat…')
 
-      const history = await loadChatMessages(id)
-      setMessages(
-        history.map((m) => ({
+      const { messages: history, summaries } = await loadChatMessages(id)
+      const summaryBlocks: ChatMessage[] = summaries.map((s) => ({
+        sender: 'System' as const,
+        text: s.content,
+        isSummaryBlock: true,
+      }))
+      const threadMessages: ChatMessage[] = history
+        .filter((m) => !String(m.content ?? '').startsWith('[Conversation Summary]:'))
+        .map((m) => ({
           sender: roleToSender(m.role),
           text: String(m.content ?? ''),
+          isSummarized: m.isSummarized === true,
         }))
-      )
+      setMessages([...summaryBlocks, ...threadMessages])
       setStatusText('')
     },
     [isProcessing, stopProcessing]

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import type { OrgAgent } from '@/types/orchestration';
+import { MarkdownField } from './MarkdownField';
 
 interface Props {
   routines: any[];
@@ -129,15 +130,14 @@ export function RoutineList({ routines, agents, companyId, onCreateRoutine, onTo
                   </select>
                 </div>
               </div>
-              <div className="space-y-1.5">
-                <label className="text-xs text-gray-400">Task Description</label>
-                <textarea
-                  value={newTaskDesc}
-                  onChange={e => setNewTaskDesc(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-green-500 h-16 resize-none"
-                  placeholder="Task instructions..."
-                />
-              </div>
+              <MarkdownField
+                label="Task Description"
+                value={newTaskDesc}
+                onChange={setNewTaskDesc}
+                placeholder="Task instructions (markdown)…"
+                minRows={4}
+                accent="green"
+              />
             </div>
           </div>
           <div className="flex gap-2 pt-4 justify-end">

@@ -260,3 +260,57 @@ body {
   background: transparent;
   padding: 0;
 }
+
+.chat-media-card {
+  margin: 0.75em 0;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--color-background);
+}
+
+.chat-media-image,
+.chat-media-video {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  background: #111;
+}
+
+.chat-media-pdf {
+  width: 100%;
+  background: var(--color-secondary);
+}
+
+.chat-media-pdf-frame {
+  width: 100%;
+  min-height: 360px;
+  border: 0;
+  background: white;
+}
+
+.chat-media-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--color-muted-foreground);
+  border-top: 1px solid var(--color-border);
+}
+
+.chat-media-download-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.chat-media-download-link:hover {
+  text-decoration: underline;
+}

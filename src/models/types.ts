@@ -1,6 +1,7 @@
 // ── Provider identifiers ──────────────────────────────────────────────────────
 export type ModelProvider =
   | 'ollama'      // Local Ollama (default)
+  | 'llamacpp'    // llama.cpp llama-server (router mode, OpenAI-compatible /v1)
   | 'lmstudio'    // Local LM Studio (OpenAI-compatible)
   | 'openai'      // OpenAI API
   | 'anthropic'   // Anthropic Claude

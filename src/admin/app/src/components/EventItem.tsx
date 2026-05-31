@@ -48,6 +48,12 @@ function formatEventMessage(event: AgentEvent): string {
       return `Calling tool: ${d.toolName}`
     case 'tool:completed':
       return `Tool ${d.toolName} completed (${d.duration || '?'}ms)`
+    case 'model:loading':
+      return `Loading model: ${d.modelId || 'default'}`
+    case 'model:inference_start':
+      return `Model inference started: ${d.modelId || 'default'}`
+    case 'model:inference_end':
+      return `Model inference finished: ${d.modelId || 'default'}`
     case 'model:token':
       return `Token: "${(d.token as string || '').substring(0, 30)}"`
     case 'skill:routing':

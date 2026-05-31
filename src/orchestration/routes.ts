@@ -13,6 +13,12 @@ import { loadHistory, loadPipelineTemplates, runPipeline, type Pipeline } from '
 import { SkillRegistry } from '../skills/registry';
 import { loadApprovedWorkspaceSkills, loadApprovedWorkspaceTemplates } from '../creator/workspace-creator';
 import { notifyOrchestrationUpdate } from '../admin/admin-server';
+import {
+  parseCreateAgentBody,
+  parseUpdateAgentBody,
+  listCapabilitySkills,
+  AgentBodyValidationError,
+} from './agent-body';
 
 const router = Router();
 
@@ -235,15 +241,28 @@ router.get('/agents', async (req, res) => {
   }
 });
 
+router.get('/capabilities', async (_req, res) => {
+  try {
+    const skills = await listCapabilitySkills();
+    res.json({ skills });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.post('/agents', async (req, res) => {
   try {
-    const result = await agentRegistry.create(req.body);
+    const parsed = await parseCreateAgentBody(req.body as Record<string, unknown>);
+    const result = await agentRegistry.create(parsed);
     if ('status' in result && result.status === 'pending') {
       res.json({ success: true, approval: result, message: 'Approval required for hire' });
     } else {
       res.json({ success: true, agent: result });
     }
   } catch (e: any) {
+    if (e instanceof AgentBodyValidationError) {
+      return res.status(400).json({ error: e.message });
+    }
     res.status(500).json({ error: e.message });
   }
 });
@@ -260,10 +279,14 @@ router.get('/agents/:id', async (req, res) => {
 
 router.put('/agents/:id', async (req, res) => {
   try {
-    const agent = await agentRegistry.update(req.params.id, req.body);
+    const updates = await parseUpdateAgentBody(req.body as Record<string, unknown>);
+    const agent = await agentRegistry.update(req.params.id, updates as Partial<import('./types').OrgAgent>);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
     res.json({ success: true, agent });
   } catch (e: any) {
+    if (e instanceof AgentBodyValidationError) {
+      return res.status(400).json({ error: e.message });
+    }
     res.status(500).json({ error: e.message });
   }
 });
@@ -407,9 +430,73 @@ router.get('/tasks/:id/subtasks', async (req, res) => {
   }
 });
 
+router.post('/tasks/:id/delegate-team', async (req, res) => {
+  try {
+    const task = await taskManager.getTaskById(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const managerId =
+      typeof req.body?.managerId === 'string' && req.body.managerId
+        ? req.body.managerId
+        : task.assigneeId;
+    if (!managerId) {
+      return res.status(400).json({ error: 'managerId or task.assigneeId required' });
+    }
+    const manager = await agentRegistry.getById(managerId);
+    if (!manager) return res.status(404).json({ error: 'Manager agent not found' });
+    const products = await taskManager.getWorkProducts(task.id);
+    const latest = products.sort((a, b) => b.createdAt - a.createdAt)[0];
+    const output =
+      typeof req.body?.output === 'string' && req.body.output.trim()
+        ? req.body.output
+        : latest?.content || task.description;
+    const supersede = req.body?.supersede === true;
+    const { ensureTeamDelegation, markParentAwaitingSubtasks } = await import(
+      './orchestration-delegation'
+    );
+    const { tasks: subtasks, spawnedNewly } = await ensureTeamDelegation(
+      manager,
+      task,
+      output,
+      { supersede },
+    );
+    if (spawnedNewly && subtasks.length > 0) {
+      await markParentAwaitingSubtasks(task, subtasks, managerId, supersede);
+    }
+    res.json({ success: true, subtasks, count: subtasks.length, spawnedNewly });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/tasks/:id/refresh-context', async (req, res) => {
+  try {
+    const task = await taskManager.getTaskById(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    const refreshed = await taskManager.refreshUpstreamContext(req.params.id);
+    res.json({ success: true, task: refreshed });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/tasks/refresh-context', async (req, res) => {
+  try {
+    const rootTaskId =
+      typeof req.body?.rootTaskId === 'string' ? req.body.rootTaskId.trim() : '';
+    if (!rootTaskId) {
+      return res.status(400).json({ error: 'rootTaskId required' });
+    }
+    const refreshed = await taskManager.refreshUpstreamContextForRoot(rootTaskId);
+    res.json({ success: true, tasks: refreshed, count: refreshed.length });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 router.post('/tasks/:id/subtasks', async (req, res) => {
   try {
-    const { title, description, priority, assigneeId, createdBy, labels, dueAt, goalId } = req.body;
+    const { title, description, priority, assigneeId, createdBy, labels, dueAt, goalId, blockedBy } =
+      req.body;
     if (!title || !description || !createdBy) {
       return res.status(400).json({ error: 'title, description, and createdBy required' });
     }
@@ -422,6 +509,9 @@ router.post('/tasks/:id/subtasks', async (req, res) => {
       labels,
       dueAt,
       goalId,
+      blockedBy: Array.isArray(blockedBy)
+        ? blockedBy.filter((id: unknown): id is string => typeof id === 'string')
+        : undefined,
     });
     if ('status' in result && result.status === 'pending') {
       res.json({ success: true, approval: result, message: 'Approval required for sub-task' });
@@ -470,11 +560,159 @@ router.post('/tasks/:id/complete', async (req, res) => {
   }
 });
 
+router.post('/tasks/:id/submit', async (req, res) => {
+  try {
+    const { agentId, workProduct } = req.body;
+    if (!agentId) return res.status(400).json({ error: 'agentId required' });
+    const task = await taskManager.submitForReview(req.params.id, agentId, workProduct);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.json({ success: true, task });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/tasks/:id/review', async (req, res) => {
+  try {
+    const { reviewerId, decision, notes, nextAssigneeId, spawnTask } = req.body;
+    if (!reviewerId || !decision) {
+      return res.status(400).json({ error: 'reviewerId and decision required' });
+    }
+    const task = await taskManager.processReview(req.params.id, reviewerId, {
+      decision,
+      notes,
+      nextAssigneeId,
+      spawnTask,
+    });
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.json({ success: true, task });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/tasks/:id/reassign', async (req, res) => {
+  try {
+    const { reviewerId, newAssigneeId, notes } = req.body;
+    if (!reviewerId || !newAssigneeId) {
+      return res.status(400).json({ error: 'reviewerId and newAssigneeId required' });
+    }
+    const task = await taskManager.processReview(req.params.id, reviewerId, {
+      decision: 'reassign',
+      nextAssigneeId: newAssigneeId,
+      notes,
+    });
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.json({ success: true, task });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/tasks/:id/clarifications', async (req, res) => {
+  try {
+    const { agentId, question } = req.body;
+    if (!agentId || !question) {
+      return res.status(400).json({ error: 'agentId and question required' });
+    }
+    const task = await taskManager.processReview(req.params.id, agentId, {
+      decision: 'request_clarification',
+      notes: question,
+    });
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.json({ success: true, task });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** Child agent → parent manager (org chart), not human board. */
+router.post('/tasks/:id/ask-parent', async (req, res) => {
+  try {
+    const { agentId, question } = req.body;
+    if (!agentId || !question) {
+      return res.status(400).json({ error: 'agentId and question required' });
+    }
+    const result = await taskManager.requestParentClarification(
+      req.params.id,
+      agentId,
+      question,
+    );
+    res.json({ success: true, task: result.task, parentManagerId: result.parentManagerId });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/tasks/:id/parent-answer', async (req, res) => {
+  try {
+    const { parentAgentId, answer } = req.body;
+    if (!parentAgentId || !answer) {
+      return res.status(400).json({ error: 'parentAgentId and answer required' });
+    }
+    const task = await taskManager.answerParentClarification(
+      req.params.id,
+      parentAgentId,
+      answer,
+    );
+    res.json({ success: true, task });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.get('/tasks/:id/work-products', async (req, res) => {
+  try {
+    const workProducts = await taskManager.getWorkProducts(req.params.id);
+    res.json({ workProducts });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put('/tasks/:id', async (req, res) => {
+  try {
+    const body = req.body as Record<string, unknown>;
+    const actorId = typeof body.actorId === 'string' ? body.actorId : 'admin';
+    const updates: import('./task-manager').UpdateTaskInput = {};
+    if (body.title !== undefined) updates.title = String(body.title);
+    if (body.description !== undefined) updates.description = String(body.description);
+    if (body.priority !== undefined) updates.priority = body.priority as import('./types').TaskPriority;
+    if (body.status !== undefined) updates.status = body.status as import('./types').TaskStatus;
+    if (body.assigneeId !== undefined) {
+      updates.assigneeId =
+        body.assigneeId === null || body.assigneeId === '' ? null : String(body.assigneeId);
+    }
+    if (body.blockedBy !== undefined) {
+      updates.blockedBy = Array.isArray(body.blockedBy)
+        ? body.blockedBy.filter((id): id is string => typeof id === 'string')
+        : [];
+    }
+    if (body.labels !== undefined) {
+      updates.labels = Array.isArray(body.labels)
+        ? body.labels.filter((label): label is string => typeof label === 'string')
+        : [];
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No updates provided' });
+    }
+    const task = await taskManager.updateTask(req.params.id, updates, actorId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.json({ success: true, task });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 router.put('/tasks/:id/status', async (req, res) => {
   try {
     const { status, actorId } = req.body;
-    if (!status || !actorId) return res.status(400).json({ error: 'status and actorId required' });
-    const task = await taskManager.updateStatus(req.params.id, status, actorId);
+    if (!status) return res.status(400).json({ error: 'status required' });
+    const task = await taskManager.updateStatus(
+      req.params.id,
+      status,
+      typeof actorId === 'string' ? actorId : 'admin',
+    );
     if (!task) return res.status(404).json({ error: 'Task not found' });
     res.json({ success: true, task });
   } catch (e: any) {
@@ -622,6 +860,24 @@ router.post('/approvals/:id/reject', async (req, res) => {
   }
 });
 
+router.post('/approvals/:id/clarification-response', async (req, res) => {
+  try {
+    const { reviewerId, response } = req.body;
+    if (!reviewerId || !response) {
+      return res.status(400).json({ error: 'reviewerId and response required' });
+    }
+    const approval = await governanceEngine.respondToClarification(
+      req.params.id,
+      reviewerId,
+      response,
+    );
+    if (!approval) return res.status(404).json({ error: 'Approval not found or not a clarification' });
+    res.json({ success: true, approval });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.post('/approvals/request-budget', async (req, res) => {
   try {
     const { agentId, newLimitUSD, requesterId, reason } = req.body;
@@ -654,6 +910,25 @@ router.get('/activity', async (req, res) => {
     const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
     const activity = await governanceEngine.getActivityLog(companyId, limit);
     res.json({ activity });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/agent-runs', async (req, res) => {
+  try {
+    const companyId = req.query.companyId as string | undefined;
+    if (!companyId) {
+      return res.status(400).json({ error: 'companyId is required' });
+    }
+    const agentId = req.query.agentId as string | undefined;
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    const runs = await orchestrationStore.getAgentRuns({
+      companyId,
+      agentId: agentId || undefined,
+      limit: Number.isFinite(limit) ? limit : 50,
+    });
+    res.json({ runs });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

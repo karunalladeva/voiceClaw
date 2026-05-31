@@ -60,4 +60,11 @@ export class TTSModule {
       throw error;
     }
   }
+
+  /** Load ONNX model at startup so first user utterance is not blocked on cold load. */
+  static async warmUp(voice: string = 'af_heart'): Promise<void> {
+    const tts = await this.getInstance();
+    await tts.generate('Ready.', { voice });
+    console.log('[TTS] Kokoro warm-up synthesis complete.');
+  }
 }

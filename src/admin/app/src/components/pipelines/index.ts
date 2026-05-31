@@ -1,0 +1,1 @@
+export { PipelinesDashboard } from './PipelinesDashboard'

@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
+import { agentEvents } from '../admin/agent-events';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -241,6 +242,11 @@ export async function runPipeline(pipeline: Pipeline): Promise<{ success: boolea
       const result = await executor(stepConfig, context);
       outputs.push(result);
       context = result.output; // chain output → next step input
+      agentEvents.log(
+        result.success ? 'info' : 'warn',
+        `[Pipeline] Step ${i + 1}/${pipeline.steps.length} (${step.type}): ${result.success ? 'OK' : 'FAILED'}`,
+        { pipelineId: pipeline.id, pipelineName: pipeline.name, stepType: step.type, stepIndex: i }
+      );
     } catch (err: any) {
       const msg = `Step ${i + 1} (${step.type}) failed: ${err.message}`;
       console.error(`[Pipeline] ${msg}`);
@@ -256,21 +262,43 @@ export async function runPipeline(pipeline: Pipeline): Promise<{ success: boolea
     pipeline.nextRun = computeNextRun(pipeline);
   }
 
-  const allSuccess = outputs.every(o => o.success);
-  console.log(`[Pipeline] ■ "${pipeline.name}" finished — ${allSuccess ? '✅ all passed' : '⚠️ some failed'}`);
+  const deliverSucceeded = outputs.some(
+    (output, index) => pipeline.steps[index]?.type === 'deliver' && output.success
+  );
+  const contentSteps = outputs.filter(
+    (_, index) => !['deliver', 'save_history'].includes(pipeline.steps[index]?.type || '')
+  );
+  const hasMeaningfulOutput = contentSteps.some(
+    (output) => output.success && output.output.trim().length > 80
+  );
+  const allStepsPassed = outputs.every((output) => output.success);
+  const success = allStepsPassed || (deliverSucceeded && hasMeaningfulOutput);
+  const failedStepTypes = outputs
+    .map((output, index) => ({ output, type: pipeline.steps[index]?.type || 'unknown' }))
+    .filter((entry) => !entry.output.success)
+    .map((entry) => entry.type);
+
+  if (failedStepTypes.length > 0 && success) {
+    console.log(
+      `[Pipeline] "${pipeline.name}" completed with warnings — failed steps: ${failedStepTypes.join(', ')}`
+    );
+  }
+  console.log(
+    `[Pipeline] ■ "${pipeline.name}" finished — ${success ? (allStepsPassed ? '✅ all passed' : '✅ delivered (some steps skipped/failed)') : '⚠️ failed'}`
+  );
 
   // Append to job history
   await appendHistory({
     pipelineId: pipeline.id,
     pipelineName: pipeline.name,
     ranAt: Date.now(),
-    success: allSuccess,
+    success: success,
     // Truncation here is log-only for history storage size control.
     // It does not affect what gets delivered to channels/history chats during step execution.
     stepResults: outputs.map((o, i) => ({ type: pipeline.steps[i]?.type || 'unknown', success: o.success, output: o.output.substring(0, 500) })),
   });
 
-  return { success: allSuccess, outputs };
+  return { success: success, outputs };
 }
 
 // ── Pipeline Ticker ───────────────────────────────────────────────────────────

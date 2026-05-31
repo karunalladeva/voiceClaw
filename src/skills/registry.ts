@@ -1,10 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { SkillDefinition, BaseSkill } from './base-skill';
+import { isCasualMessage, isTradingRelatedQuery } from '../agents/prompt-context';
+
+const TRADING_SKILL_PREFIX = 'trading-';
+const MAX_RANKED_TRADING_SKILLS = 10;
 
 export class SkillRegistry {
   private skills: Map<string, SkillDefinition> = new Map();
   private skillsDir: string;
+  private tradingCatalogText = '';
 
   constructor(skillsDir?: string) {
     this.skillsDir = skillsDir || path.join(process.cwd(), 'src', 'skills');
@@ -22,7 +27,71 @@ export class SkillRegistry {
     const onDemands = await SkillLoader.loadOnDemandSkills();
     onDemands.forEach(def => this.skills.set(def.id, def));
 
+    await this.reloadCreatorWorkspaceSkills();
+
+    this.rebuildTradingCatalog();
     console.log(`[SkillRegistry] Discovery complete. ${this.skills.size} native skill(s) loaded.`);
+  }
+
+  /** Reload workspace/skills from Creator (approved + draft metadata). */
+  async reloadCreatorWorkspaceSkills(): Promise<number> {
+    const { SkillLoader } = await import('../loaders/skill-loader');
+    const creatorSkills = await SkillLoader.loadCreatorWorkspaceSkills();
+    for (const def of creatorSkills) {
+      this.skills.set(def.id, def);
+    }
+    this.rebuildTradingCatalog();
+    return creatorSkills.length;
+  }
+
+  private rebuildTradingCatalog(): void {
+    const trading = this.getEnabledSkills().filter((s) => s.id.startsWith(TRADING_SKILL_PREFIX));
+    const byCategory = new Map<string, string[]>();
+    for (const skill of trading) {
+      const category = skill.category || 'general';
+      const bucket = byCategory.get(category) || [];
+      bucket.push(skill.id);
+      byCategory.set(category, bucket);
+    }
+    const lines = Array.from(byCategory.entries()).map(
+      ([category, ids]) => `- ${category}: ${ids.join(', ')}`,
+    );
+    this.tradingCatalogText = lines.join('\n');
+  }
+
+  private rankSkillsForQuery(skills: SkillDefinition[], query: string): SkillDefinition[] {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return skills;
+    const tokens = normalized.split(/\s+/).filter((w) => w.length > 2);
+    const tickerTokens = normalized.match(/\b[A-Z]{1,5}\b/g)?.map((t) => t.toLowerCase()) || [];
+    const scored = skills.map((skill) => {
+      const haystack = [
+        skill.id,
+        skill.name,
+        skill.description,
+        skill.triggerDescription,
+        ...(skill.tags || []),
+      ]
+        .join(' ')
+        .toLowerCase();
+      let score = 0;
+      for (const token of tokens) {
+        if (haystack.includes(token)) score += 3;
+      }
+      for (const ticker of tickerTokens) {
+        if (haystack.includes(ticker)) score += 2;
+      }
+      if (haystack.includes(normalized)) score += 5;
+      return { skill, score };
+    });
+    return scored
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.skill);
+  }
+
+  private formatSkillLine(skill: SkillDefinition): string {
+    return `- SKILL_ID: "${skill.id}" | NAME: "${skill.name}" | WHEN TO USE: ${skill.triggerDescription}`;
   }
 
   getSkill(id: string): SkillDefinition | undefined {
@@ -56,26 +125,56 @@ export class SkillRegistry {
   }
 
   /**
-   * Build a routing description string for the main agent to decide which skill to use.
-   * The LLM reads this to decide routing.
+   * Build a routing description for the main agent. Core skills are always listed;
+   * trading skills use a compact catalog plus query-matched detail when relevant.
    */
-  buildRoutingPrompt(): string {
-    const enabled = this.getEnabledSkills();
+  buildRoutingPrompt(userQuery?: string, allowedSkillIds?: string[]): string {
+    let enabled = this.getEnabledSkills();
+    if (allowedSkillIds && allowedSkillIds.length > 0) {
+      const allow = new Set(allowedSkillIds);
+      enabled = enabled.filter(s => allow.has(s.id));
+    }
     if (enabled.length === 0) return '';
 
-    const lines = enabled.map(s =>
-      `- SKILL_ID: "${s.id}" | NAME: "${s.name}" | WHEN TO USE: ${s.triggerDescription}`
-    );
+    const query = (userQuery || '').trim();
+    const casual = isCasualMessage(query);
+    const tradingQuery = isTradingRelatedQuery(query);
+
+    const core = enabled.filter((s) => !s.id.startsWith(TRADING_SKILL_PREFIX));
+    const trading = enabled.filter((s) => s.id.startsWith(TRADING_SKILL_PREFIX));
+
+    const coreLines = core.map((s) => this.formatSkillLine(s));
+
+    let tradingSection: string;
+    if (casual && !tradingQuery) {
+      tradingSection = `<trading_catalog compact="true">
+Trading specialists use ids starting with "trading-" via route_to_skill.
+For general market questions use voiceclaw-financial-analyst (listed above).
+Full trading catalog (by category):
+${this.tradingCatalogText || '(none)'}
+</trading_catalog>`;
+    } else {
+      const ranked = this.rankSkillsForQuery(trading, query);
+      const detailed = (ranked.length > 0 ? ranked : trading).slice(0, MAX_RANKED_TRADING_SKILLS);
+      const detailedLines = detailed.map((s) => this.formatSkillLine(s));
+      tradingSection = `<trading_catalog>
+All trading skill ids are prefixed with "trading-". Categories:
+${this.tradingCatalogText || '(none)'}
+</trading_catalog>
+${detailedLines.length > 0 ? `\nRelevant trading skills for this message:\n${detailedLines.join('\n')}` : ''}`;
+    }
+
+    const routingMode = casual && !tradingQuery ? 'compact' : tradingQuery ? 'trading-focused' : 'standard';
 
     return `
-<skills>
-You have access to specialized skills via the NATIVE JSON tool function named \`route_to_skill\`. 
-CRITICAL: DO NOT write python scripts, shell commands, or use \`shell_exec\` to launch skills. You must directly invoke the JSON \`route_to_skill\` function provided in your tool schema!
+<skills routing="${routingMode}">
+You have specialized skills via the NATIVE JSON tool \`route_to_skill\`.
+CRITICAL: DO NOT use shell_exec or scripts to launch skills — call \`route_to_skill\` directly with skillId and query.
 
-If the user's request matches a skill below, invoke \`route_to_skill\` with the corresponding SKILL_ID.
+Core skills (always available):
+${coreLines.join('\n')}
 
-Available Skills:
-${lines.join('\n')}
+${tradingSection}
 </skills>`;
   }
 

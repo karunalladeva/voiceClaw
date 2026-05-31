@@ -10,9 +10,12 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../providers/app_state.dart';
 import '../services/api_service.dart';
+import '../utils/media_attachments.dart';
+import '../widgets/chat_media_attachments.dart';
 import 'settings_screen.dart';
 import 'channels_screen.dart';
 import 'pipelines_screen.dart';
@@ -811,21 +814,66 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                                 style: const TextStyle(fontSize: 15, height: 1.5, color: Colors.black87),
                               )
                             else
-                              MarkdownBody(
-                                data: msg['text'] ?? '',
-                                selectable: true,
-                                styleSheet: MarkdownStyleSheet(
-                                  p: TextStyle(
-                                    fontSize: 15,
-                                    height: 1.5,
-                                    color: isSystem ? Colors.orange.shade900 : Colors.black87,
-                                  ),
-                                  codeblockPadding: const EdgeInsets.all(12),
-                                  codeblockDecoration: BoxDecoration(
-                                    color: isSystem ? Colors.orange[100] : Colors.grey[200],
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                ),
+                              Builder(
+                                builder: (context) {
+                                  final text = msg['text'] ?? '';
+                                  final baseUrl = context.read<AppState>().apiService.baseUrl;
+                                  final extraMedia = attachmentsNotInMarkdown(
+                                    text,
+                                    extractMediaAttachments(text, baseUrl: baseUrl),
+                                  );
+                                  return Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      MarkdownBody(
+                                        data: text,
+                                        selectable: true,
+                                        onTapLink: (text, href, title) async {
+                                          if (href == null) return;
+                                          final url = href.startsWith('http')
+                                              ? href
+                                              : '$baseUrl${normalizeMediaUrl(href, baseUrl: baseUrl)}';
+                                          final kind = classifyMediaUrl(url);
+                                          if (kind != MediaKind.pdf && kind != MediaKind.video) return;
+                                          final uri = Uri.tryParse(url);
+                                          if (uri == null) return;
+                                          await launchUrl(uri, mode: LaunchMode.externalApplication);
+                                        },
+                                        styleSheet: MarkdownStyleSheet(
+                                          p: TextStyle(
+                                            fontSize: 15,
+                                            height: 1.5,
+                                            color: isSystem ? Colors.orange.shade900 : Colors.black87,
+                                          ),
+                                          codeblockPadding: const EdgeInsets.all(12),
+                                          codeblockDecoration: BoxDecoration(
+                                            color: isSystem ? Colors.orange[100] : Colors.grey[200],
+                                            borderRadius: BorderRadius.circular(8),
+                                          ),
+                                        ),
+                                        imageBuilder: (uri, title, alt) {
+                                          final src = uri.toString().startsWith('http')
+                                              ? uri.toString()
+                                              : '$baseUrl${uri.toString()}';
+                                          return Padding(
+                                            padding: const EdgeInsets.symmetric(vertical: 8),
+                                            child: ClipRRect(
+                                              borderRadius: BorderRadius.circular(8),
+                                              child: Image.network(
+                                                src,
+                                                fit: BoxFit.contain,
+                                                errorBuilder: (context, error, stackTrace) {
+                                                  return Text('Image: $src');
+                                                },
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                      ChatMediaAttachments(attachments: extraMedia),
+                                    ],
+                                  );
+                                },
                               ),
                           ],
                         ),

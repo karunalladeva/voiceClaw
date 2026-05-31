@@ -10,6 +10,21 @@ export class TTSSwitcher {
     return configManager.getConfig().tts.engine;
   }
 
+  static async warmUp(): Promise<void> {
+    const engine = this.getPreferredEngine();
+    const voice = configManager.getConfig().tts.defaultVoice || 'af_heart';
+    try {
+      if (engine === 'kokoro') {
+        await KokoroTTS.warmUp(voice);
+      } else {
+        await this.synthesize('Ready.', voice);
+      }
+      console.log(`[TTS Switcher] Engine "${engine}" warmed up.`);
+    } catch (err: any) {
+      console.warn(`[TTS Switcher] Warm-up failed (first request may be slower): ${err.message}`);
+    }
+  }
+
   static async synthesize(text: string, voice?: string) {
     const engine = this.getPreferredEngine();
     const finalVoice = voice || configManager.getConfig().tts.defaultVoice;

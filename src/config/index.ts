@@ -65,6 +65,30 @@ export interface AppConfig {
     learningRate: number;
     quantMethod: string;
   };
+  comfyui: {
+    enabled: boolean;
+    baseUrl: string;
+    requestTimeoutMs: number;
+    outputDir: string;
+    maxConcurrentJobs: number;
+    unloadLocalModelOnGenerate: boolean;
+  };
+  llamacpp: {
+    enabled: boolean;
+    baseUrl: string;
+    host: string;
+    port: number;
+    serverBinary: string;
+    modelsDir: string;
+    modelsMax: number;
+    modelsPreset: string;
+    noModelsAutoload: boolean;
+    ctxSize: number;
+    nGpuLayers: number;
+    threads: number;
+    manageProcess: boolean;
+    apiKey: string;
+  };
   assistantName: string;
   approved_senders: Record<string, string[]>;
 }
@@ -132,6 +156,30 @@ const DEFAULT_CONFIG: AppConfig = {
     learningRate: 2e-4,
     quantMethod: 'q4_k_m',
   },
+  comfyui: {
+    enabled: false,
+    baseUrl: 'http://127.0.0.1:8000',
+    requestTimeoutMs: 300000,
+    outputDir: 'workspace/generated',
+    maxConcurrentJobs: 1,
+    unloadLocalModelOnGenerate: true,
+  },
+  llamacpp: {
+    enabled: false,
+    baseUrl: 'http://127.0.0.1:8080',
+    host: '127.0.0.1',
+    port: 8080,
+    serverBinary: '',
+    modelsDir: '',
+    modelsMax: 4,
+    modelsPreset: '',
+    noModelsAutoload: false,
+    ctxSize: 8192,
+    nGpuLayers: -1,
+    threads: 0,
+    manageProcess: false,
+    apiKey: '',
+  },
   assistantName: 'Claw',
   approved_senders: {
     discord: [],
@@ -167,7 +215,10 @@ class ConfigManager extends EventEmitter {
           ...parsed,
           speech: { ...DEFAULT_CONFIG.speech, ...(parsed.speech || {}) },
           marketData: { ...DEFAULT_CONFIG.marketData, ...(parsed.marketData || {}) },
+          comfyui: { ...DEFAULT_CONFIG.comfyui, ...(parsed.comfyui || {}) },
+          llamacpp: { ...DEFAULT_CONFIG.llamacpp, ...(parsed.llamacpp || {}) },
         };
+        this.applyEnvOverrides();
         console.log('[Config] Loaded existing configuration.');
       } catch (err: any) {
         if (err.code === 'ENOENT') {
@@ -177,6 +228,7 @@ class ConfigManager extends EventEmitter {
           console.error('[Config] Error reading config file:', err);
         }
       }
+      this.applyEnvOverrides();
 
       this.setupWatcher();
     } catch (error) {
@@ -201,7 +253,10 @@ class ConfigManager extends EventEmitter {
               ...newConfig,
               speech: { ...this.currentConfig.speech, ...(newConfig.speech || {}) },
               marketData: { ...this.currentConfig.marketData, ...(newConfig.marketData || {}) },
+              comfyui: { ...this.currentConfig.comfyui, ...(newConfig.comfyui || {}) },
+              llamacpp: { ...this.currentConfig.llamacpp, ...(newConfig.llamacpp || {}) },
             };
+            this.applyEnvOverrides();
             this.emit('configChanged', this.currentConfig);
             console.log('[Config] Hot-reloaded configuration successfully.');
           } catch (err) {
@@ -218,6 +273,31 @@ class ConfigManager extends EventEmitter {
     return { ...this.currentConfig };
   }
 
+  /** Resolve ComfyUI base URL with env override. */
+  getComfyUIBaseUrl(): string {
+    return process.env.COMFYUI_BASE_URL?.trim() || this.currentConfig.comfyui.baseUrl;
+  }
+
+  /** Resolve llama.cpp server base URL with env override. */
+  getLlamaCppBaseUrl(): string {
+    const envUrl = process.env.LLAMACPP_BASE_URL?.trim();
+    if (envUrl) return envUrl.replace(/\/+$/, '');
+    const cfg = this.currentConfig.llamacpp;
+    if (cfg.baseUrl?.trim()) return cfg.baseUrl.replace(/\/+$/, '');
+    return `http://${cfg.host || '127.0.0.1'}:${cfg.port || 8080}`;
+  }
+
+  private applyEnvOverrides(): void {
+    const comfyUrl = process.env.COMFYUI_BASE_URL?.trim();
+    if (comfyUrl) {
+      this.currentConfig.comfyui = { ...this.currentConfig.comfyui, baseUrl: comfyUrl };
+    }
+    const llamaUrl = process.env.LLAMACPP_BASE_URL?.trim();
+    if (llamaUrl) {
+      this.currentConfig.llamacpp = { ...this.currentConfig.llamacpp, baseUrl: llamaUrl };
+    }
+  }
+
   async updateConfig(newSettings: Partial<AppConfig>) {
     this.currentConfig = {
       ...this.currentConfig,
@@ -231,8 +311,11 @@ class ConfigManager extends EventEmitter {
       evolution: { ...this.currentConfig.evolution, ...(newSettings.evolution || {}) },
       speech: { ...this.currentConfig.speech, ...(newSettings.speech || {}) },
       marketData: { ...this.currentConfig.marketData, ...(newSettings.marketData || {}) },
+      comfyui: { ...this.currentConfig.comfyui, ...(newSettings.comfyui || {}) },
+      llamacpp: { ...this.currentConfig.llamacpp, ...(newSettings.llamacpp || {}) },
       approved_senders: newSettings.approved_senders || this.currentConfig.approved_senders,
     };
+    this.applyEnvOverrides();
     
     await this.saveConfig(this.currentConfig);
     this.emit('configChanged', this.currentConfig);

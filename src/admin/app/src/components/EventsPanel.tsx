@@ -1,13 +1,18 @@
 import { Activity, Loader2 } from 'lucide-react'
 import { EventItem } from './EventItem'
-import type { AgentEvent } from '@/types'
+import type { AgentEvent, Agent } from '@/types'
 
 interface EventsPanelProps {
   events: AgentEvent[]
+  agents?: Agent[]
 }
 
-export function EventsPanel({ events }: EventsPanelProps) {
-  const isActive = events.length > 0 && Date.now() - events[0].timestamp < 2000
+const ACTIVE_AGENT_STATUSES = new Set(['thinking', 'tool_call', 'streaming'])
+
+export function EventsPanel({ events, agents = [] }: EventsPanelProps) {
+  const hasActiveAgents = agents.some((agent) => ACTIVE_AGENT_STATUSES.has(agent.status))
+  const isRecentEvent = events.length > 0 && Date.now() - events[0].timestamp < 5000
+  const isActive = hasActiveAgents || isRecentEvent
   
   return (
     <aside className="bg-card p-5 overflow-y-auto">

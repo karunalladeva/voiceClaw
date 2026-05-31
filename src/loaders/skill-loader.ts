@@ -26,7 +26,7 @@ export class SkillLoader {
 
     if (!fs.existsSync(dir)) return loadedSkills;
 
-    const skipFiles = new Set(['base-skill', 'registry', 'index', 'loader', 'ondemand']);
+    const skipFiles = new Set(['base-skill', 'registry', 'index', 'loader', 'ondemand', 'tool-resolver']);
 
     const files = this.collectSkillModuleFiles(dir, skipFiles);
 
@@ -151,6 +151,77 @@ export class SkillLoader {
       console.error('[SkillLoader] Could not load learned skills:', err.message);
     }
     return '';
+  }
+
+  static parseSkillMarkdown(content: string): {
+    name?: string;
+    description?: string;
+    systemPrompt: string;
+    triggerDescription: string;
+  } {
+    const trimmed = content.trim();
+    const match = trimmed.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
+    if (!match) {
+      return {
+        systemPrompt: trimmed,
+        triggerDescription: trimmed.slice(0, 240),
+      };
+    }
+    const frontmatter = match[1];
+    const body = match[2].trim();
+    const name = frontmatter.match(/^name:\s*(.+)$/m)?.[1]?.trim();
+    const description = frontmatter.match(/^description:\s*(.+)$/m)?.[1]?.trim();
+    const desc = description || body.slice(0, 240);
+    return {
+      name,
+      description: desc,
+      systemPrompt: body || desc,
+      triggerDescription: desc,
+    };
+  }
+
+  /**
+   * Approved and draft creator skills from workspace/skills (Creator dashboard).
+   */
+  static async loadCreatorWorkspaceSkills(): Promise<SkillDefinition[]> {
+    const loaded: SkillDefinition[] = [];
+    try {
+      const { listCreatorItems } = await import('../creator/workspace-creator');
+      const items = await listCreatorItems('skill');
+      const skillsRoot = path.join(process.cwd(), 'workspace', 'skills');
+      for (const item of items) {
+        const skillPath = path.join(skillsRoot, item.slug, 'SKILL.md');
+        let content = '';
+        try {
+          content = fs.readFileSync(skillPath, 'utf-8');
+        } catch {
+          continue;
+        }
+        const parsed = this.parseSkillMarkdown(content);
+        const enabled = item.status === 'approved';
+        loaded.push({
+          id: `creator-${item.slug}`,
+          name: parsed.name || item.name,
+          description:
+            parsed.description ||
+            item.notes ||
+            `Workspace creator skill (${item.purpose}, ${item.status})`,
+          category: 'creator',
+          tags: ['creator', item.purpose, item.status],
+          dependencies: [],
+          triggerDescription: parsed.triggerDescription,
+          systemPrompt: parsed.systemPrompt || content,
+          tools: resolveToolsByIds([]),
+          enabled,
+        });
+      }
+      if (loaded.length > 0) {
+        console.log(`[SkillLoader] Loaded ${loaded.length} creator workspace skill(s).`);
+      }
+    } catch (err: any) {
+      console.error('[SkillLoader] Could not load creator workspace skills:', err.message);
+    }
+    return loaded;
   }
 
   static async loadOnDemandSkills(onDemandDir?: string): Promise<SkillDefinition[]> {

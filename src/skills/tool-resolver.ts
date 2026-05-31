@@ -2,6 +2,8 @@ import { DynamicStructuredTool } from '@langchain/core/tools';
 import { webSearchTool, webFetchTool } from '../tools/search';
 import { yahooNewsTool, yahooOhlcvTool } from '../tools/market-data';
 import { financeRecallMarketMemoryTool, financeStoreMarketMemoryTool } from '../tools/finance-memory';
+import { comfyuiListWorkflowsTool, comfyuiGenerateTool, comfyuiCheckJobTool } from '../tools/comfyui';
+import { pdfGenerateTool, pdfMergeFilesTool, pdfMergePipelineTool } from '../tools/pdf';
 
 const toolRegistry: Record<string, DynamicStructuredTool> = {
   web_search: webSearchTool,
@@ -10,6 +12,12 @@ const toolRegistry: Record<string, DynamicStructuredTool> = {
   yahoo_ohlcv: yahooOhlcvTool,
   finance_recall_market_memory: financeRecallMarketMemoryTool,
   finance_store_market_memory: financeStoreMarketMemoryTool,
+  comfyui_list_workflows: comfyuiListWorkflowsTool,
+  comfyui_generate: comfyuiGenerateTool,
+  comfyui_check_job: comfyuiCheckJobTool,
+  pdf_generate: pdfGenerateTool,
+  pdf_merge_files: pdfMergeFilesTool,
+  pdf_merge_pipeline: pdfMergePipelineTool,
 };
 
 export function resolveToolsByIds(ids: string[] = []): DynamicStructuredTool[] {

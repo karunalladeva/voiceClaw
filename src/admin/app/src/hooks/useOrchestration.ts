@@ -6,9 +6,38 @@ import type {
   Goal,
   ApprovalRequest,
   ActivityEvent,
+  AgentRunRecord,
 } from '@/types/orchestration';
 
 const API_BASE = '/orchestration';
+
+export interface CapabilitySkillInfo {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  category?: string;
+}
+
+export function useAgentCapabilities(liveRevision: number = 0) {
+  const [skills, setSkills] = useState<CapabilitySkillInfo[]>([]);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/capabilities`);
+      const data = await res.json();
+      setSkills(data.skills || []);
+    } catch (err) {
+      console.error('Failed to fetch capabilities:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh, liveRevision]);
+
+  return { capabilitySkills: skills, refreshCapabilities: refresh };
+}
 
 export function useCompanies(liveRevision: number = 0) {
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -43,7 +72,26 @@ export function useCompanies(liveRevision: number = 0) {
     return data;
   };
 
-  return { companies, loading, refresh, createCompany };
+  const updateCompanySettings = async (
+    companyId: string,
+    settings: Partial<import('@/types/orchestration').CompanySettings>,
+  ) => {
+    const res = await fetch(`${API_BASE}/companies/${companyId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to update company');
+    }
+    if (data.company) {
+      setCompanies((prev) => prev.map((c) => (c.id === companyId ? data.company : c)));
+    }
+    return data;
+  };
+
+  return { companies, loading, refresh, createCompany, updateCompanySettings };
 }
 
 export function useOrgAgents(companyId?: string, liveRevision: number = 0) {
@@ -76,6 +124,9 @@ export function useOrgAgents(companyId?: string, liveRevision: number = 0) {
       body: JSON.stringify(agent),
     });
     const data = await res.json();
+    if (!res.ok) {
+      return { error: data.error || `Request failed (${res.status})` };
+    }
     if (data.agent) {
       setAgents([...agents, data.agent]);
     }
@@ -89,6 +140,9 @@ export function useOrgAgents(companyId?: string, liveRevision: number = 0) {
       body: JSON.stringify(updates),
     });
     const data = await res.json();
+    if (!res.ok) {
+      return { error: data.error || `Request failed (${res.status})` };
+    }
     if (data.agent) {
       setAgents(agents.map(a => a.id === id ? data.agent : a));
     }
@@ -128,7 +182,7 @@ export function useTasks(companyId?: string, liveRevision: number = 0) {
     refresh();
   }, [refresh, liveRevision]);
 
-  const createTask = async (task: Partial<Task>) => {
+  const createTask = async (task: Partial<Task> & { blockedBy?: string[] }) => {
     const res = await fetch(`${API_BASE}/tasks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -141,7 +195,164 @@ export function useTasks(companyId?: string, liveRevision: number = 0) {
     return data;
   };
 
-  return { tasks, loading, refresh, createTask };
+  const updateTask = async (
+    taskId: string,
+    updates: {
+      title?: string;
+      description?: string;
+      priority?: string;
+      status?: string;
+      assigneeId?: string | null;
+      blockedBy?: string[];
+      labels?: string[];
+    },
+  ) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...updates, actorId: 'admin' }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to update task');
+    }
+    if (data.task) {
+      setTasks(prev => prev.map(t => (t.id === taskId ? data.task : t)));
+    } else {
+      await refresh();
+    }
+    return data;
+  };
+
+  const reviewTask = async (
+    taskId: string,
+    payload: { reviewerId?: string; decision: string; notes?: string; nextAssigneeId?: string },
+  ) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reviewerId: payload.reviewerId ?? 'admin', ...payload }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || `Review failed (${res.status})`);
+    }
+    if (data.task) {
+      setTasks(prev => prev.map(t => (t.id === taskId ? data.task : t)));
+    } else {
+      await refresh();
+    }
+    return data;
+  };
+
+  const fetchWorkProducts = async (taskId: string) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/work-products`);
+    const data = await res.json();
+    return data.workProducts || [];
+  };
+
+  const fetchComments = async (taskId: string) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/comments`);
+    const data = await res.json();
+    return data.comments || [];
+  };
+
+  const fetchSubtasks = async (taskId: string) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/subtasks`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load subtasks');
+    return data.tasks || [];
+  };
+
+  const delegateTeam = async (
+    taskId: string,
+    options?: { supersede?: boolean; managerId?: string },
+  ) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/delegate-team`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        supersede: options?.supersede === true,
+        managerId: options?.managerId,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Delegation failed');
+    await refresh();
+    return data;
+  };
+
+  const refreshTaskContext = async (taskId: string) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/refresh-context`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Refresh failed');
+    if (data.task) {
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+    } else {
+      await refresh();
+    }
+    return data;
+  };
+
+  const refreshRootContext = async (rootTaskId: string) => {
+    const res = await fetch(`${API_BASE}/tasks/refresh-context`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rootTaskId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Bulk refresh failed');
+    await refresh();
+    return data;
+  };
+
+  const requestClarification = async (taskId: string, question: string) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/clarifications`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId: 'admin', question }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Clarification failed');
+    if (data.task) {
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? data.task : t)));
+    } else {
+      await refresh();
+    }
+    return data;
+  };
+
+  const addTaskComment = async (taskId: string, content: string) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ authorId: 'admin', authorType: 'human', content }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to add comment');
+    return data.comment;
+  };
+
+  return {
+    tasks,
+    loading,
+    refresh,
+    createTask,
+    updateTask,
+    reviewTask,
+    fetchWorkProducts,
+    fetchComments,
+    fetchSubtasks,
+    delegateTeam,
+    refreshTaskContext,
+    refreshRootContext,
+    requestClarification,
+    addTaskComment,
+  };
 }
 
 export function useGoals(companyId?: string, liveRevision: number = 0) {
@@ -219,7 +430,20 @@ export function useApprovals(companyId?: string, liveRevision: number = 0) {
     return data;
   };
 
-  return { approvals, loading, refresh, approve, reject };
+  const respondClarification = async (id: string, response: string, reviewerId: string = 'admin') => {
+    const res = await fetch(`${API_BASE}/approvals/${id}/clarification-response`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reviewerId, response }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      setApprovals(approvals.filter(a => a.id !== id));
+    }
+    return data;
+  };
+
+  return { approvals, loading, refresh, approve, reject, respondClarification };
 }
 
 export function useActivity(companyId?: string, liveRevision: number = 0) {
@@ -246,6 +470,42 @@ export function useActivity(companyId?: string, liveRevision: number = 0) {
   }, [refresh, liveRevision]);
 
   return { activity, loading, refresh };
+}
+
+export function useAgentRuns(
+  companyId: string | undefined,
+  agentId: string | undefined,
+  liveRevision: number = 0,
+) {
+  const [runs, setRuns] = useState<AgentRunRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    if (!companyId) {
+      setRuns([]);
+      setLoading(false);
+      return;
+    }
+    try {
+      const params = new URLSearchParams({ companyId, limit: '50' });
+      if (agentId) params.set('agentId', agentId);
+      const res = await fetch(`${API_BASE}/agent-runs?${params}`);
+      const data = await res.json();
+      setRuns(data.runs || []);
+    } catch (err) {
+      console.error('Failed to fetch agent runs:', err);
+      setRuns([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [companyId, agentId]);
+
+  useEffect(() => {
+    setLoading(true);
+    refresh();
+  }, [refresh, liveRevision]);
+
+  return { runs, loading, refresh };
 }
 
 export function useBudget(companyId: string, liveRevision: number = 0) {

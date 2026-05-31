@@ -4,6 +4,10 @@ import * as path from 'path';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { MCPClientManager } from './mcp-client';
 import { modelRouter } from '../models/model-router';
+import {
+  isValidLongTermMemory,
+  shouldSkipAutoMemoryExtraction,
+} from './memory-policy';
 
 const WORKSPACE = path.join(process.cwd(), 'workspace');
 const LEARNED_SKILLS_DRAFT_DIR = path.join(WORKSPACE, 'learned-skills-draft');
@@ -148,10 +152,9 @@ export class LearningEngine {
     return this.assessFailure(response).shouldRetry;
   }
 
-  private isMemoryCandidateValid(content: string): boolean {
+  private isMemoryCandidateValid(content: string, tags: string[] = []): boolean {
+    if (!isValidLongTermMemory(content, tags)) return false;
     const normalized = content.trim();
-    if (!normalized) return false;
-    if (normalized.length < 6 || normalized.length > 320) return false;
     const lower = normalized.toLowerCase();
     if (TIME_SENSITIVE_MEMORY_PHRASES.some(p => lower.includes(p))) return false;
     if (lower.startsWith('http://') || lower.startsWith('https://')) return false;
@@ -159,25 +162,22 @@ export class LearningEngine {
     return true;
   }
 
-  // ── Auto Memory Store ──────────────────────────────────────────────────────
-
-  /**
-   * Asks the LLM to extract important facts from the conversation and stores
-   * them if any are found. Runs after every successful response.
-   */
   async autoExtractAndStore(
     userInput: string,
     agentResponse: string,
     mcpManager: MCPClientManager,
+    chatId: string = 'default',
   ): Promise<void> {
+    if (shouldSkipAutoMemoryExtraction(chatId, userInput, agentResponse)) return;
+
     try {
       const llm = await this.getLlm();
       const extractPrompt =
-        `You are a memory extraction assistant. Analyze the following conversation exchange and decide:\n` +
-        `1. Is there a new, important, storable fact (name, preference, goal, skill learned, decision)?\n` +
-        `2. If YES, write a concise memory object as JSON: { "content": "...", "tags": ["tag1"] }\n` +
-        `3. If NO, reply with exactly: NO_MEMORY\n\n` +
-        `User: ${userInput}\nAgent: ${agentResponse}`;
+        `You are a memory extraction assistant. Store ONLY durable facts about the USER (name, location, timezone, preferences, long-term goals).\n` +
+        `Do NOT store: chat summaries, stock analysis, pipeline/automation setup, one-time tasks, agent actions, or transient intents.\n` +
+        `If nothing qualifies, reply exactly: NO_MEMORY\n` +
+        `If YES, reply with JSON only: { "content": "...", "tags": ["tag1"] }\n\n` +
+        `User: ${userInput}\nAgent: ${agentResponse.substring(0, 400)}`;
 
       const result = await llm.invoke([
         new SystemMessage('You extract important facts from conversations for long-term memory.'),
@@ -194,7 +194,6 @@ export class LearningEngine {
       const parsed = JSON.parse(jsonMatch[0]);
       if (parsed.content) {
         const content = String(parsed.content).trim();
-        if (!this.isMemoryCandidateValid(content)) return;
         const tags = Array.isArray(parsed.tags) ? parsed.tags : [];
         const sanitizedTags: string[] = Array.from(
           new Set(
@@ -204,6 +203,7 @@ export class LearningEngine {
           ),
         );
         sanitizedTags.push('source:auto', `created:${new Date().toISOString().split('T')[0]}`);
+        if (!this.isMemoryCandidateValid(content, sanitizedTags)) return;
         await mcpManager.addMemory(content, sanitizedTags);
         console.log('[LearningEngine] Auto-stored memory:', parsed.content.substring(0, 60));
       }

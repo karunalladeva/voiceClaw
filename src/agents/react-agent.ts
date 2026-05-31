@@ -15,14 +15,31 @@ import { configManager } from '../config/index';
 import { modelRegistry } from '../models/model-registry';
 import { modelRouter } from '../models/model-router';
 import { learningEngine } from './learning-engine';
+import { filterMemoriesForContext, shouldSkipAutoMemoryExtraction } from './memory-policy';
 import { cache } from '../utils/cache';
 import { agentEvents } from '../admin/agent-events';
 
 
 import { historyManager } from './agent-history';
+import {
+  extractUserQueryText,
+  isCasualMessage,
+  requiresLiveLookup,
+  getLiveLookupDomain,
+  hasVolatileNumericToolOutput,
+  toolTraceHasAdequateLiveData,
+  failsCricketSanityCheck,
+  type LiveLookupDomain,
+} from './prompt-context';
+import type { AgentRunOptions } from './agent-run-options';
+import { DEFAULT_ORG_MODEL_ID } from '../orchestration/agent-normalizer';
+import { getAgentRunContext, getAgentRunStorage, toTaskArtifactScope, type AgentRunContext } from './agent-run-context';
+import { persistTaskResponse } from '../orchestration/task-response-store';
+
+export type { AgentRunOptions } from './agent-run-options';
 
 export interface StreamEvent {
-  type: 'transcription' | 'thinking' | 'tool_call' | 'token' | 'text_done' | 'audio' | 'error' | 'done';
+  type: 'transcription' | 'thinking' | 'tool_call' | 'token' | 'text_done' | 'audio_start' | 'audio' | 'error' | 'done';
   data: string;
 }
 
@@ -147,9 +164,21 @@ export class ReactAgent {
 
 
   private isTimeSensitiveQuery(query: string): boolean {
-    const timeWords = /\b(today|current|currently|now|latest|live|right now|at the moment|updated|newest|recent)\b/i;
-    const volatileTopics = /\b(price|rate|gold|silver|stock|crypto|weather|temperature|news|score|traffic|exchange|market)\b/i;
-    return timeWords.test(query) && volatileTopics.test(query);
+    return requiresLiveLookup(query);
+  }
+
+  private buildLiveDataRequiredBlock(domain: LiveLookupDomain): string {
+    const routing =
+      domain === 'markets'
+        ? 'Prefer trading or Yahoo finance market tools for symbols and quotes; use web_search then web_fetch only if no market tool applies.'
+        : 'You MUST call web_search, then web_fetch on a relevant result URL, before stating any live numbers.';
+    return `
+<live_data_required>
+This question requires fresh live data. ${routing}
+list_memories and search_memory are NOT live data sources — never use them as the only source for current scores, prices, weather, or news.
+Do not copy numbers from prior assistant messages in the chat — re-fetch every time.
+If tools fail or pages lack the fact, say live data is unavailable. Never invent or guess scores, prices, or stats.
+</live_data_required>`;
   }
 
   private buildTemporalMemoryGuard(): string {
@@ -175,8 +204,8 @@ If you need information or need to perform an action, use your tools.
 1. TTS OUTPUT: Your final answer will be spoken aloud by a Text-to-Speech engine. Keep responses brief, natural, and avoid markdown formatting.
 2. VOICE & PERSONALITY: You MUST understand and support SLANG, informal language, and cultural references fluently. Adapt your tone to match the user's level of formality. Never use bullet points in your final response.
 3. VISION ENTRITLEMENT (CRITICAL): You DO have access to the user's screen via the native JSON tool named "route_to_skill" (skillId: "screen-reader"). NEVER say you cannot see the screen or lack access. ALWAYS prioritize using the screen-reader skill if the context might be visible on their display.
-4. MEMORY INSTRUCTIONS: When the user tells you their preferences, goals, facts, or decisions, use the store_memory tool to save them for future reference. ALWAYS check provided memories first before asking for information.
-5. TEMPORAL ACCURACY: Memories may be old. For time-sensitive requests (today/current/latest prices, rates, weather, news, scores), do not answer from memory alone. Fetch fresh data with tools, or state that live data is unavailable.
+4. MEMORY INSTRUCTIONS: Use store_memory ONLY for durable user facts (name, location, timezone, long-term preferences). Do NOT store chat transcripts, stock reports, pipeline setup, or one-time tasks. If a <memory> block is present below, use it; otherwise do NOT call list_memories or search_memory for greetings, small talk, or messages under 4 words unless the user asks to recall or save something.
+5. TEMPORAL ACCURACY: Memories may be old. For any live or time-sensitive request (today/current/latest prices, rates, weather, news, sports scores, match status), you MUST fetch fresh data with the correct tools before stating numbers. Never answer from memory, chat history, or search snippets alone. For sports and news use web_search then web_fetch; for markets use trading tools first. If live data is unavailable, say so — never invent scores or prices.
 6. VOICE MINIMAL SUMMARY: When your natural-language answer is long (roughly more than a few minutes of speech), put the full detail first for the screen, then append exactly one block at the very end in this exact form (plain text inside, no markdown lists inside the block):
 <spoken_summary>
 Two to four short sentences with only the essentials for voice (example weather: place, condition, key numbers). No bullet points.
@@ -207,7 +236,13 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       modelRouter
         .getMasterModel()
         .then((llm) => {
-          this.activeModelId = modelRegistry.getMaster()?.id || 'unknown';
+          const master = modelRegistry.getMaster();
+          this.activeModelId = master?.id || 'unknown';
+          if (master) {
+            void import('../models/model-load-coordinator').then(({ modelLoadCoordinator }) => {
+              modelLoadCoordinator.noteLocalModelInUse(master);
+            });
+          }
           this.llm = llm;
           this.agentFactory.clearCache();
           this.compileGraph(this.lastTools);
@@ -228,6 +263,12 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       modelRouter
         .getMasterModel()
         .then((llm) => {
+          const master = modelRegistry.getMaster();
+          if (master) {
+            void import('../models/model-load-coordinator').then(({ modelLoadCoordinator }) => {
+              modelLoadCoordinator.noteLocalModelInUse(master);
+            });
+          }
           this.llm = llm;
           this.agentFactory.clearCache();
           if (this.lastTools.length > 0 || this.graph) {
@@ -250,6 +291,10 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       const masterConfig = modelRegistry.getMaster();
       this.activeModelId = masterConfig?.id || 'unknown';
       this.llm = await modelRouter.getMasterModel();
+      if (masterConfig) {
+        const { modelLoadCoordinator } = await import('../models/model-load-coordinator');
+        modelLoadCoordinator.noteLocalModelInUse(masterConfig);
+      }
 
 
       // 3. Connect MCP servers
@@ -301,6 +346,8 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     try {
       if (!this.llm) return;
       const modelId = this.activeModelId;
+      const { modelLoadCoordinator } = await import('../models/model-load-coordinator');
+      await modelLoadCoordinator.prepareForLocalModelLoad();
       console.log(`[Agent: ReAct] [Model: ${modelId}] Warming up model (cold-start pre-load)…`);
       await (this.llm as any).invoke([new HumanMessage({ content: 'hi' })]);
       console.log(`[Agent: ReAct] [Model: ${modelId}] Model warm-up complete. (Ollama keep_alive=-1: model stays loaded indefinitely)`);
@@ -312,19 +359,31 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
   }
 
 
-  private getSystemTools(): DynamicStructuredTool[] {
-    const validSkills = this.skillRegistry.getEnabledSkills().map(s => s.id).join(', ');
+  private getSystemTools(skillAllowlist?: string[]): DynamicStructuredTool[] {
+    let enabled = this.skillRegistry.getEnabledSkills();
+    if (skillAllowlist && skillAllowlist.length > 0) {
+      const allow = new Set(skillAllowlist);
+      enabled = enabled.filter(s => allow.has(s.id));
+    }
+    const coreSkillIds = enabled
+      .filter((s) => !s.id.startsWith('trading-'))
+      .map((s) => s.id)
+      .join(', ');
 
     return [
       new DynamicStructuredTool({
         name: 'route_to_skill',
-        description: `CRITICAL: Call this function directly! DO NOT use shell_exec or python. Route the request to a specialized skill agent. Available skill IDs: [${validSkills}]. Use this to read the screen or delegate tasks.`,
+        description:
+          `CRITICAL: Call directly — do NOT use shell_exec. Routes to a sub-agent. Core skillIds: ${coreSkillIds}. Trading skills use prefix trading-* (see system <skills> catalog). Default market analyst: voiceclaw-financial-analyst.`,
         schema: z.object({
-          skillId: z.string().describe(`The exact ID of the skill to trigger. Must be one of: ${validSkills}`),
+          skillId: z.string().describe('Exact skill id from the <skills> section (core id or trading-* id).'),
           query: z.string().describe('The specific natural language instruction for the skill'),
           priority: z.enum(['background', 'normal', 'interactive']).optional().describe('Queue priority for skill execution.'),
         }),
         func: async ({ skillId, query, priority }, runManager, config) => {
+          if (skillAllowlist && skillAllowlist.length > 0 && !skillAllowlist.includes(skillId)) {
+            return `Skill ${skillId} is not allowed for this agent run.`;
+          }
           const skill = this.skillRegistry.getSkill(skillId);
           if (!skill || !skill.enabled) return `Skill ${skillId} not found or disabled.`;
 
@@ -371,8 +430,30 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
               skillName: skill.name,
               output: finalOutput.substring(0, 200),
             });
+            const runCtx = getAgentRunContext();
+            if (runCtx && finalOutput.trim()) {
+              persistTaskResponse({
+                task: toTaskArtifactScope(runCtx),
+                responderId: skill.id,
+                responderType: 'skill',
+                content: finalOutput,
+                agentId: runCtx.orgAgentId,
+                success: true,
+              });
+            }
           } catch (e: any) {
             finalOutput = `Skill crashed: ${e.message}`;
+            const runCtx = getAgentRunContext();
+            if (runCtx) {
+              persistTaskResponse({
+                task: toTaskArtifactScope(runCtx),
+                responderId: skill.id,
+                responderType: 'skill',
+                content: finalOutput,
+                agentId: runCtx.orgAgentId,
+                success: false,
+              });
+            }
             agentEvents.emit('agent:error', {
               agentId: subAgentId,
               chatId,
@@ -391,14 +472,18 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
   // ── Graph compilation ──────────────────────────────────────────────────────
 
-  private compileGraph(tools: DynamicStructuredTool[]) {
-    if (!this.llm) {
+  private compileGraph(
+    tools: DynamicStructuredTool[],
+    llmOverride?: BaseChatModel,
+    skillAllowlist?: string[],
+  ): any {
+    const llm = llmOverride ?? this.llm;
+    if (!llm) {
       console.warn('[ReAct Agent] compileGraph called before LLM is ready — skipping.');
-      return;
+      return null;
     }
 
-    const llm = this.llm;
-    const sysTools = this.getSystemTools();
+    const sysTools = this.getSystemTools(skillAllowlist);
     const allTools = [...tools, ...sysTools];
     const llmWithTools: any = allTools.length > 0 ? (llm as any).bindTools(allTools) : llm;
 
@@ -441,24 +526,30 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       const output = await new ToolNode(allTools).invoke(state);
       // Prune massive tool results for the current turn to avoid single-turn overflow
       for (const msg of output.messages) {
-        if (msg.content && msg.content.length > 12000) {
-          const modelId = this.activeModelId;
-          console.warn(`[Agent: ReAct] [Model: ${modelId}] Summarizing massive tool output: ${msg.content.substring(0, 50)}…`);
-
-          try {
-            const fastModel = await modelRouter.getModel('summarize');
-            const summary = await Promise.race([
-              (fastModel as any).invoke([
-                new SystemMessage("You are an expert at summarizing massive tool/command outputs. Summarize the following output accurately to retain all crucial details, keeping it under 2000 characters. Make the summary fast and concise."),
-                new HumanMessage({ content: msg.content.substring(0, 40000) })
-              ]),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('Summarization Timeout')), 60000))
-            ]);
-            msg.content = `[Tool Output Summarized for Context Efficiency]:\n${(summary as any).content.toString()}`;
-          } catch (e) {
-            console.warn(`[Agent: ReAct] Summarizer failed or timed out, falling back to truncation:`, e);
-            msg.content = msg.content.substring(0, 12000) + '\n\n...[OUTPUT TRUNCATED FOR CONTEXT EFFICIENCY]...';
-          }
+        if (!msg.content || msg.content.length <= 12000) continue;
+        const contentStr = msg.content.toString();
+        if (hasVolatileNumericToolOutput(contentStr)) {
+          console.warn(`[Agent: ReAct] Preserving volatile numeric tool output via truncation (no LLM summarize)`);
+          msg.content =
+            contentStr.substring(0, 12000) +
+            '\n\n...[OUTPUT TRUNCATED — use web_fetch with offset to read more. Do not invent missing numbers.]...';
+          continue;
+        }
+        const modelId = this.activeModelId;
+        console.warn(`[Agent: ReAct] [Model: ${modelId}] Summarizing massive tool output: ${contentStr.substring(0, 50)}…`);
+        try {
+          const fastModel = await modelRouter.getModel('summarize');
+          const summary = await Promise.race([
+            (fastModel as any).invoke([
+              new SystemMessage("You are an expert at summarizing massive tool/command outputs. Summarize the following output accurately to retain all crucial details, keeping it under 2000 characters. Make the summary fast and concise."),
+              new HumanMessage({ content: contentStr.substring(0, 40000) }),
+            ]),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Summarization Timeout')), 60000)),
+          ]);
+          msg.content = `[Tool Output Summarized for Context Efficiency]:\n${(summary as any).content.toString()}`;
+        } catch (e) {
+          console.warn(`[Agent: ReAct] Summarizer failed or timed out, falling back to truncation:`, e);
+          msg.content = contentStr.substring(0, 12000) + '\n\n...[OUTPUT TRUNCATED FOR CONTEXT EFFICIENCY]...';
         }
       }
 
@@ -480,15 +571,19 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
 
 
-    this.graph = workflow.compile();
+    const compiled = workflow.compile();
+    if (!llmOverride) {
+      this.graph = compiled;
+    }
+    return compiled;
   }
 
   // ── System prompt / memory ─────────────────────────────────────────────────
 
-  private getSystemPrompt(): string {
+  private getSystemPrompt(userQuery?: string, skillAllowlist?: string[]): string {
     return (
       this.getBaseSystemPrompt() +
-      this.skillRegistry.buildRoutingPrompt() +
+      this.skillRegistry.buildRoutingPrompt(userQuery, skillAllowlist) +
       this.skillRegistry.getLearnedSkillsContext()
     );
   }
@@ -498,31 +593,30 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     return configManager.getConfig().memory?.enabled ?? true;
   }
 
-  private async buildSystemPromptWithMemory(input: string | any): Promise<string> {
-    const base = this.getSystemPrompt();
+  private async buildSystemPromptWithMemory(
+    input: string | any,
+    skillAllowlist?: string[],
+  ): Promise<string> {
+    const queryText = extractUserQueryText(input);
+    const query = queryText.toLowerCase() || 'general user context';
+    const base = this.getSystemPrompt(queryText, skillAllowlist);
+    const needsLive = requiresLiveLookup(queryText);
+    if (needsLive) {
+      const domain = getLiveLookupDomain(queryText);
+      return base + this.buildLiveDataRequiredBlock(domain) + this.buildTemporalMemoryGuard();
+    }
     if (!this.isMemoryEnabled()) return base;
-
-    const query = typeof input === 'string' ? input.trim().toLowerCase() : 'general user context';
     const isTimeSensitive = this.isTimeSensitiveQuery(query);
-
-    // ── Memory Relevance Optimization ──────────────────────────────────────
-    // Don't pollute context with past memories for extremely short fillers
-    if (query.split(' ').length < 2 && !query.includes('?')) {
+    if (isCasualMessage(queryText)) {
       return base;
     }
-
-
     const cacheKey = `mem:${query}`;
-
-
-    // ── Memory Cache Check ───────────────────────────────────────────────────
     const cached = await cache.get(cacheKey);
     if (cached) {
       console.log('[ReAct Agent] Injecting cached memories into context.');
       const memoryBlock = cached ? `\n\n<memory>\n${cached}\n</memory>` : '';
       return base + memoryBlock + (isTimeSensitive ? this.buildTemporalMemoryGuard() : '');
     }
-
     try {
       const memories = await this.mcpManager.searchMemory(query);
       await cache.set(cacheKey, memories || '', ReactAgent.MEMORY_CACHE_TTL);
@@ -530,11 +624,9 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         console.log('[ReAct Agent] Injecting fresh memories into context.');
         return base + `\n\n<memory>\n${memories}\n</memory>` + (isTimeSensitive ? this.buildTemporalMemoryGuard() : '');
       }
-    } catch { /* memory unavailable, store empty result to avoid retry spam */
+    } catch {
       await cache.set(cacheKey, '', ReactAgent.MEMORY_CACHE_TTL);
     }
-
-
     return base;
   }
 
@@ -544,6 +636,13 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     await historyManager.deleteChat(chatId);
     await cache.clear();
     console.log(`[ReAct Agent] Chat ${chatId} history and caches cleared.`);
+  }
+
+  async clearAllHistory(): Promise<number> {
+    const deleted = await historyManager.clearAllChats();
+    await cache.clear();
+    console.log(`[ReAct Agent] Cleared ${deleted} conversation file(s) and response caches.`);
+    return deleted;
   }
 
   async getHistoryLength(chatId: string = 'default'): Promise<number> {
@@ -565,64 +664,52 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     const thread = await historyManager.loadChat(chatId);
     thread.push(new HumanMessage({ content: humanContent }));
     thread.push(new AIMessage({ content: aiResponse }));
+    historyManager.syncMessageMeta(chatId);
 
     const maxMessages = ReactAgent.MAX_HISTORY_TURNS * 2;
     if (thread.length > maxMessages) {
-      const removed = thread.splice(0, thread.length - maxMessages);
-      const removedText = removed.map(m => `${m.getType().toUpperCase()}: ${m.content}`).join('\\n');
-
-      // Find and extract existing rolling summary
-      const existingSummaryIndex = thread.findIndex(m => m.getType() === 'system' && m.content.toString().startsWith('[Conversation Summary]:'));
-      const existingSummaryText = existingSummaryIndex >= 0 ? thread[existingSummaryIndex].content : '';
-      if (existingSummaryIndex >= 0) thread.splice(existingSummaryIndex, 1);
-
-      // Fire-and-forget background summarizer
-      modelRouter.getModel('summarize').then(fastModel => {
-        console.log(`[ReAct Agent] Background summarization running on ${removed.length} dropped history messages...`);
-        return fastModel.invoke([
-          new SystemMessage("Summarize the following conversation history briefly. Merge it with any previous summary to ensure critical long-term context is retained. Be concise."),
-          new HumanMessage({ content: `Previous Summary: ${existingSummaryText}\\n\\nOlder Messages to summarize:\\n${removedText}` })
-        ]);
-      }).then(res => {
-        const newSummaryMsg = new SystemMessage({ content: `[Conversation Summary]:\\n${res.content}` });
-        const currentThread = historyManager.getThread(chatId);
-        // Prepend summary to keep it in context
-        currentThread.unshift(newSummaryMsg);
-        historyManager.saveChat(chatId);
-        console.log(`[ReAct Agent] History summarization complete.`);
-      }).catch(err => console.warn('[History Summarizer] Failed to summarize dropped context:', err));
-
-      historyManager.setThread(chatId, thread);
+      const overflowCount = thread.length - maxMessages;
+      const indicesToSummarize: number[] = [];
+      const batchLines: string[] = [];
+      for (let i = 0; i < thread.length && indicesToSummarize.length < overflowCount; i++) {
+        if (historyManager.isMessageSummarized(chatId, i)) continue;
+        const msg = thread[i];
+        if (msg.getType() === 'system') continue;
+        indicesToSummarize.push(i);
+        batchLines.push(`${msg.getType().toUpperCase()}: ${msg.content}`);
+      }
+      if (indicesToSummarize.length > 0) {
+        historyManager.markIndicesSummarized(chatId, indicesToSummarize);
+        const previousSummaries = historyManager.getCombinedSummariesText(chatId);
+        const batchText = batchLines.join('\n');
+        modelRouter.getModel('summarize').then((fastModel) => {
+          console.log(`[ReAct Agent] Background summarization for ${indicesToSummarize.length} message(s) (kept in JSON, isSummarized=true)...`);
+          return fastModel.invoke([
+            new SystemMessage(
+              'Summarize conversation history briefly. Merge with any previous summaries so critical long-term context is retained. Be concise.',
+            ),
+            new HumanMessage({
+              content: previousSummaries
+                ? `Previous summaries:\n${previousSummaries}\n\nNew messages to fold in:\n${batchText}`
+                : `Messages to summarize:\n${batchText}`,
+            }),
+          ]);
+        }).then((res) => {
+          const summaryBody = res.content.toString().trim();
+          historyManager.appendSummary(chatId, summaryBody, indicesToSummarize.length);
+          historyManager.saveChat(chatId);
+          console.log(`[ReAct Agent] History summarization stored (summaries key, ${indicesToSummarize.length} messages marked).`);
+        }).catch((err) => console.warn('[History Summarizer] Failed to summarize context:', err));
+      }
     }
 
     await historyManager.saveChat(chatId, typeof humanInput === 'string' ? humanInput : undefined);
   }
 
-  private selectContextMessages(thread: BaseMessage[], input: string | any): BaseMessage[] {
+  private async selectContextMessages(chatId: string, input: string | any): Promise<BaseMessage[]> {
     const inputSize = typeof input === 'string' ? input.length : 300;
     const budget = Math.max(6000, ReactAgent.MAX_CONTEXT_CHARS - inputSize);
-    const selected: BaseMessage[] = [];
-    let used = 0;
-
-    const summaryMessages = thread.filter(
-      (m) => m.getType() === 'system' && m.content.toString().startsWith('[Conversation Summary]:'),
-    );
-    for (const s of summaryMessages.slice(-1)) {
-      selected.push(s);
-      used += s.content.toString().length;
-    }
-
-    for (let i = thread.length - 1; i >= 0; i--) {
-      const msg = thread[i];
-      const isSummary = msg.getType() === 'system' && msg.content.toString().startsWith('[Conversation Summary]:');
-      if (isSummary) continue;
-      const content = msg.content?.toString?.() ?? '';
-      if ((used + content.length) > budget) break;
-      selected.unshift(msg);
-      used += content.length;
-    }
-
-    return selected;
+    return historyManager.buildLlmContextMessages(chatId, budget);
   }
 
 
@@ -634,8 +721,31 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     return this.mcpManager;
   }
 
+  /** Rebuild MCP + native tools after optional MCP servers connect at startup. */
+  async reloadToolkit(): Promise<void> {
+    const mcpTools = await this.mcpManager.loadTools();
+    const { loadNativeTools } = await import('../loaders/tool-loader');
+    const enableInternet = configManager.getConfig().agent?.enableInternet ?? true;
+    const nativeTools = await loadNativeTools(enableInternet);
+    const tools = [...mcpTools, ...nativeTools];
+    this.lastTools = tools;
+    if (this.llm) {
+      this.compileGraph(tools);
+    }
+    console.log(`[ReAct Agent] Toolkit refreshed (${tools.length} tools).`);
+  }
+
   getSkillRegistry(): SkillRegistry {
     return this.skillRegistry;
+  }
+
+  async reloadCreatorWorkspaceSkills(): Promise<number> {
+    const count = await this.skillRegistry.reloadCreatorWorkspaceSkills();
+    if (this.llm && this.lastTools.length > 0) {
+      this.compileGraph(this.lastTools);
+    }
+    console.log(`[ReAct Agent] Reloaded ${count} creator workspace skill(s).`);
+    return count;
   }
 
 
@@ -649,8 +759,8 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
     try {
       const systemPrompt = await this.buildSystemPromptWithMemory(input);
-      const thread = await historyManager.loadChat(chatId);
-      const contextMessages = this.selectContextMessages(thread, input);
+      await historyManager.loadChat(chatId);
+      const contextMessages = await this.selectContextMessages(chatId, input);
       const result = await this.graph.invoke({
         messages: [
           new SystemMessage(systemPrompt),
@@ -691,7 +801,16 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
   // ── Streaming process ──────────────────────────────────────────────────────
 
-  async *processStream(input: string | any, chatId: string = 'default', signal?: AbortSignal): AsyncGenerator<StreamEvent> {
+  async *processStream(
+    input: string | any,
+    chatId: string = 'default',
+    signal?: AbortSignal,
+    options?: AgentRunOptions,
+  ): AsyncGenerator<StreamEvent> {
+    if (options) {
+      yield* this.processOrchestrationStream(input, chatId, signal, options);
+      return;
+    }
     const agentId = `${chatId}-${Date.now()}`;
     const startTime = Date.now();
     const inputStr = typeof input === 'string' ? input : '[audio/multimodal input]';
@@ -703,10 +822,14 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       modelId: this.activeModelId,
     });
 
+    const queryText = extractUserQueryText(input);
+    const needsLive = requiresLiveLookup(queryText);
+    const liveDomain = getLiveLookupDomain(queryText);
+
     const rawKey = typeof input === 'string' ? input.trim().toLowerCase() : '[audio]';
     const numTurns = await historyManager.getHistoryLength(chatId);
     const cacheKey = `resp:${rawKey}|hist:${numTurns}|chat:${chatId}`;
-    const cachedResponse = await cache.get(cacheKey);
+    const cachedResponse = needsLive ? null : await cache.get(cacheKey);
 
     if (cachedResponse) {
       console.log(`[ReAct Agent] Cache hit for: "${rawKey}"`);
@@ -772,8 +895,12 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
     const maxRetries = cfg.retryOnFail ? (cfg.maxRetries ?? 3) : 0;
     const attemptHistory: Array<{ attempt: number; response: string }> = [];
+    let pendingLiveRetryPrefix = '';
+    let liveToolRetryDone = false;
+    let sanityRetryDone = false;
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const liveExtraSlots = needsLive ? 2 : 0;
+    for (let attempt = 0; attempt <= maxRetries + liveExtraSlots; attempt++) {
       // Kick off memory search in parallel with the first yield
       const systemPromptPromise = this.buildSystemPromptWithMemory(input);
 
@@ -809,12 +936,14 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         }
 
         // Inject extra retry context on second+ attempt
-        const retryPrefix = attempt > 0
-          ? `\n\n[SELF-IMPROVEMENT] Previous attempt failed. Approach this differently. Attempt ${attempt + 1}.`
-          : '';
+        const retryPrefix =
+          (attempt > 0
+            ? `\n\n[SELF-IMPROVEMENT] Previous attempt failed. Approach this differently. Attempt ${attempt + 1}.`
+            : '') + pendingLiveRetryPrefix;
+        pendingLiveRetryPrefix = '';
 
-        const threadMsgs = await historyManager.loadChat(chatId);
-        const contextMessages = this.selectContextMessages(threadMsgs, input);
+        await historyManager.loadChat(chatId);
+        const contextMessages = await this.selectContextMessages(chatId, input);
         const inputMessages = {
           messages: [
             new SystemMessage(systemPrompt + retryPrefix),
@@ -901,6 +1030,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
               toolArgs: event.data?.input,
             });
 
+            toolTrace.push({ tool: toolName, args: event.data?.input });
             if (event.name === 'route_to_skill') {
               const toolInput = event.data?.input;
               const skill = this.skillRegistry.getSkill(toolInput?.skillId);
@@ -909,8 +1039,6 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
                 agentEvents.emit('skill:routing', { chatId, agentId, skillId: skill.id, skillName: skill.name });
                 yield { type: 'thinking', data: `Delegating to Sub-Agent: ${skill.name}…` };
               }
-            } else {
-              toolTrace.push({ tool: toolName, args: event.data?.input });
             }
 
             if (fullText) fullText = '';
@@ -928,9 +1056,38 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
         }
 
-        // NO LONGER NEED parseSkillRoute HERE AS WE INTERCEPT IT ABOVE
+        if (needsLive) {
+          const adequate = toolTraceHasAdequateLiveData(toolTrace, liveDomain);
+          const toolsListed = toolTrace.map((t) => t.tool).join(',') || 'none';
+          console.log(
+            `[ReAct Agent] live_lookup domain=${liveDomain} tools=[${toolsListed}] adequate=${adequate} cache_skipped=${needsLive}`,
+          );
+          agentEvents.emit('system:log', {
+            chatId,
+            agentId,
+            level: adequate ? 'info' : 'warn',
+            message: `live_lookup domain=${liveDomain} tools=[${toolsListed}] adequate=${adequate}`,
+          });
+          if (!adequate && !liveToolRetryDone) {
+            liveToolRetryDone = true;
+            pendingLiveRetryPrefix =
+              '\n\n[LIVE DATA REQUIRED] Use web_search then web_fetch (or trading market tools for stocks). list_memories/search_memory are NOT live sources. Do not guess numbers.';
+            yield { type: 'thinking', data: 'Fetching fresh live data…' };
+            continue;
+          }
+          if (
+            liveDomain === 'sports' &&
+            failsCricketSanityCheck(fullText) &&
+            !sanityRetryDone
+          ) {
+            sanityRetryDone = true;
+            pendingLiveRetryPrefix =
+              '\n\n[LIVE DATA SANITY] Prior answer had impossible cricket numbers (e.g. overs > 20 in T20). Re-fetch with web_fetch and only state facts from the page.';
+            yield { type: 'thinking', data: 'Re-checking live score data…' };
+            continue;
+          }
+        }
 
-        // Check if we should retry
         const failureAssessment = learningEngine.assessFailure(fullText);
         if (attempt < maxRetries && failureAssessment.shouldRetry) {
           const modelId = this.activeModelId;
@@ -949,31 +1106,8 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           continue;
         }
 
-        // Success path — commit history and auto-store
         console.log(`[ReAct Agent] Stream complete: "${fullText.substring(0, 80)}…"`);
-        
         agentEvents.emit('model:inference_end', { chatId, agentId, modelId: this.activeModelId });
-        
-        if (fullText) {
-          await this.appendToHistory(chatId, input, fullText);
-          const rawKey = typeof input === 'string' ? input.trim().toLowerCase() : '[audio]';
-          const nt = await historyManager.getHistoryLength(chatId);
-          const cacheKey = `resp:${rawKey}|hist:${nt}|chat:${chatId}`;
-          await cache.set(cacheKey, fullText, ReactAgent.RESPONSE_CACHE_TTL);
-        }
-
-        if (cfg.autoMemoryStore && fullText) {
-          learningEngine.autoExtractAndStore(input, fullText, this.mcpManager).catch(() => { });
-          agentEvents.emit('memory:stored', { chatId, agentId, message: 'Auto-extracted memory from conversation' });
-        }
-
-        if (cfg.autoMacroCreate && toolTrace.length > 0) {
-          const inputStr = typeof input === 'string' ? input : '[audio input]';
-          learningEngine.extractMacroFromSuccess(inputStr, toolTrace).catch((e: any) => {
-            console.error('[React Agent] Macro extraction failed:', e);
-          });
-        }
-
         agentEvents.emit('agent:completed', {
           chatId,
           agentId,
@@ -981,8 +1115,31 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           output: fullText.substring(0, 200),
           toolCallCount: toolTrace.length,
         });
-
         yield { type: 'text_done', data: fullText };
+        if (fullText) {
+          const rawKey = typeof input === 'string' ? input.trim().toLowerCase() : '[audio]';
+          void (async () => {
+            await this.appendToHistory(chatId, input, fullText);
+            const nt = await historyManager.getHistoryLength(chatId);
+            if (!needsLive) {
+              const cacheKey = `resp:${rawKey}|hist:${nt}|chat:${chatId}`;
+              await cache.set(cacheKey, fullText, ReactAgent.RESPONSE_CACHE_TTL);
+            }
+            if (cfg.autoMemoryStore) {
+              const inputStr = typeof input === 'string' ? input : '[audio/multimodal input]';
+              if (!shouldSkipAutoMemoryExtraction(chatId, inputStr, fullText)) {
+                learningEngine.autoExtractAndStore(inputStr, fullText, this.mcpManager, chatId).catch(() => { });
+                agentEvents.emit('memory:stored', { chatId, agentId, message: 'Auto-extracted memory from conversation' });
+              }
+            }
+            if (cfg.autoMacroCreate && toolTrace.length > 0) {
+              const inputStr = typeof input === 'string' ? input : '[audio input]';
+              learningEngine.extractMacroFromSuccess(inputStr, toolTrace).catch((e: any) => {
+                console.error('[React Agent] Macro extraction failed:', e);
+              });
+            }
+          })().catch((err) => console.warn('[ReAct Agent] Post-reply housekeeping failed:', err));
+        }
         return;
       } catch (error: any) {
         agentEvents.emit('agent:error', {
@@ -1006,9 +1163,185 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     yield { type: 'text_done', data: 'I tried multiple approaches but could not complete your request. I have noted this for future learning.' };
   }
 
+  private async resolveRunModel(
+    modelId: string,
+  ): Promise<{ llm: BaseChatModel; resolvedModelId: string }> {
+    const id = modelId || DEFAULT_ORG_MODEL_ID;
+    if (id === DEFAULT_ORG_MODEL_ID) {
+      const master = modelRegistry.getMaster();
+      const llm = await modelRouter.getMasterModel();
+      return { llm, resolvedModelId: master?.id ?? DEFAULT_ORG_MODEL_ID };
+    }
+    const llm = await modelRouter.getById(id);
+    if (!llm) {
+      throw new Error(`Model not found: ${id}`);
+    }
+    return { llm, resolvedModelId: id };
+  }
+
+  private async *processOrchestrationStream(
+    input: string | any,
+    chatId: string,
+    signal: AbortSignal | undefined,
+    options: AgentRunOptions,
+  ): AsyncGenerator<StreamEvent> {
+    const agentId = `${chatId}-${Date.now()}`;
+    const startTime = Date.now();
+    const modelId = options.modelId ?? DEFAULT_ORG_MODEL_ID;
+    const skillAllowlist =
+      options.skillIds && options.skillIds.length > 0 ? options.skillIds : undefined;
+    let resolvedModelId = modelId;
+    const runCtx: AgentRunContext | undefined = options.orgTaskId
+      ? {
+          orgTaskId: options.orgTaskId,
+          orgRootTaskId: options.orgRootTaskId ?? options.orgTaskId,
+          orgAgentId: options.orgAgentId,
+        }
+      : undefined;
+    try {
+      const resolved = await this.resolveRunModel(modelId);
+      resolvedModelId = resolved.resolvedModelId;
+      const orgTools =
+        options.orgAgentId
+          ? await (
+              await import('../orchestration/orchestration-tools')
+            ).buildOrchestrationTools({
+              agentId: options.orgAgentId,
+              taskId: options.orgTaskId,
+            })
+          : [];
+      const runTools = options.orgTaskId ? orgTools : [...this.lastTools, ...orgTools];
+      const runGraph = this.compileGraph(runTools, resolved.llm, skillAllowlist);
+      if (!runGraph) {
+        yield { type: 'error', data: 'Agent graph not ready for orchestration run.' };
+        return;
+      }
+      const inputStr = typeof input === 'string' ? input : '[orchestration input]';
+      agentEvents.emit('agent:started', {
+        chatId,
+        agentId,
+        input: inputStr.substring(0, 200),
+        modelId: resolvedModelId,
+      });
+      yield { type: 'thinking', data: 'Processing orchestration task…' };
+      let systemPrompt = await this.buildSystemPromptWithMemory(input, skillAllowlist);
+      if (options.orgSystemAppend?.trim()) {
+        systemPrompt += options.orgSystemAppend;
+      }
+      if (signal?.aborted) return;
+      await historyManager.loadChat(chatId);
+      const inputMessages = {
+        messages: [
+          new SystemMessage(systemPrompt),
+          new HumanMessage({ content: input }),
+        ],
+      };
+      let fullText = '';
+      agentEvents.emit('model:inference_start', { chatId, agentId, modelId: resolvedModelId });
+      const stream = runGraph.streamEvents(inputMessages, {
+        version: 'v2',
+        signal,
+        recursionLimit: 100,
+      });
+      const als = getAgentRunStorage();
+      async function* iterateStream(): AsyncGenerator<any> {
+        for await (const event of stream) {
+          yield event;
+        }
+      }
+      const streamIterator = iterateStream();
+      let streamStep = runCtx
+        ? await als.run(runCtx, () => streamIterator.next())
+        : await streamIterator.next();
+      while (!streamStep.done) {
+        const event = streamStep.value;
+        if (signal?.aborted) return;
+        if (event.event === 'on_chat_model_stream') {
+          const chunk = event.data?.chunk;
+          const hasToolCallChunks = chunk?.tool_call_chunks?.length > 0;
+          if (chunk?.content && !hasToolCallChunks) {
+            const token = chunk.content.toString();
+            if (token) {
+              fullText += token;
+              yield { type: 'token', data: token };
+            }
+          }
+        } else if (event.event === 'on_tool_start' && options.orgTaskId) {
+          const toolName = event.name || 'unknown';
+          yield { type: 'tool_call', data: toolName };
+          console.log(`[Orchestration] Tool: ${toolName}`);
+        } else if (event.event === 'on_tool_end' && runCtx) {
+          const toolName = event.name || 'unknown';
+          if (toolName === 'route_to_skill') continue;
+          const toolOutput = (event.data?.output ?? '').toString().trim();
+          if (!toolOutput) continue;
+          persistTaskResponse({
+            task: toTaskArtifactScope(runCtx),
+            responderId: toolName,
+            responderType: 'tool',
+            content: toolOutput,
+            agentId: runCtx.orgAgentId,
+            success: true,
+          });
+        } else if (event.event === 'on_chain_end' && event.name === 'agent') {
+          const messages = event.data?.output?.messages as Array<{ content?: unknown }> | undefined;
+          if (messages?.length) {
+            for (let i = messages.length - 1; i >= 0; i--) {
+              const content = messages[i]?.content;
+              const text =
+                typeof content === 'string'
+                  ? content
+                  : Array.isArray(content)
+                    ? content
+                        .map((block: { text?: string }) => block?.text ?? '')
+                        .join('')
+                    : '';
+              if (text.trim()) {
+                fullText = text;
+                break;
+              }
+            }
+          }
+        }
+        streamStep = runCtx
+          ? await als.run(runCtx, () => streamIterator.next())
+          : await streamIterator.next();
+      }
+      agentEvents.emit('model:inference_end', { chatId, agentId, modelId: resolvedModelId });
+      agentEvents.emit('agent:completed', {
+        chatId,
+        agentId,
+        duration: Date.now() - startTime,
+        output: fullText.substring(0, 200),
+      });
+      if (runCtx && options.orgAgentId && fullText.trim()) {
+        persistTaskResponse({
+          task: toTaskArtifactScope(runCtx),
+          responderId: options.orgAgentId,
+          responderType: 'agent',
+          content: fullText,
+          agentId: options.orgAgentId,
+          success: true,
+        });
+      }
+      yield { type: 'text_done', data: fullText || 'No output produced.' };
+    } catch (error: any) {
+      agentEvents.emit('agent:error', { chatId, agentId, error: error.message });
+      yield { type: 'error', data: this.handleError(error) };
+    }
+  }
+
   // ── Error handling ─────────────────────────────────────────────────────────
 
   private handleError(error: any): string {
+    const isAbort =
+      error?.name === 'AbortError' ||
+      error?.message === 'Abort' ||
+      (typeof error?.message === 'string' && /aborted|abort/i.test(error.message));
+    if (isAbort) {
+      console.warn('[ReAct Agent] Processing interrupted (model handoff or cancelled stream).');
+      return 'Interrupted by model handoff; the orchestrator will retry on the next heartbeat.';
+    }
     console.error('[ReAct Agent] Processing failed:', error);
 
     // Check for recursion limits caused by massive loops

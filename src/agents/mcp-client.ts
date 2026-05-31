@@ -4,6 +4,8 @@ import { DynamicStructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as path from "path";
 
+import { filterMemoriesForContext, isValidLongTermMemory } from './memory-policy';
+
 export class MCPClientManager {
   private clients: Map<string, Client> = new Map();
   private tools: DynamicStructuredTool[] = [];
@@ -94,6 +96,7 @@ export class MCPClientManager {
 
   async loadTools(): Promise<DynamicStructuredTool[]> {
     this.tools = [];
+    const loadedNames: string[] = [];
 
     for (const [serverId, client] of this.clients.entries()) {
       try {
@@ -131,11 +134,17 @@ export class MCPClientManager {
           });
 
           this.tools.push(lcTool);
-          console.log(`[MCP Client] Loaded tool: ${lcTool.name}`);
+          loadedNames.push(lcTool.name);
         }
       } catch (err) {
         console.error(`[MCP Client] Failed to load tools from ${serverId}:`, err);
       }
+    }
+
+    if (loadedNames.length > 0) {
+      console.log(
+        `[MCP Client] Loaded ${loadedNames.length} tool(s) from ${this.clients.size} server(s): ${loadedNames.join(', ')}`,
+      );
     }
 
     return this.tools;
@@ -211,11 +220,11 @@ export class MCPClientManager {
       if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
         const jsonPart = text.substring(firstBracket, lastBracket + 1);
         try {
-          return JSON.parse(jsonPart);
+          return filterMemoriesForContext(JSON.parse(jsonPart));
         } catch (_) {}
       }
       
-      return JSON.parse(text);
+      return filterMemoriesForContext(JSON.parse(text));
     } catch {
       return [];
     }
@@ -223,6 +232,9 @@ export class MCPClientManager {
 
   /** Store a new memory. */
   async addMemory(content: string, tags: string[] = []): Promise<string> {
+    if (!isValidLongTermMemory(content, tags)) {
+      return 'Skipped: content looks like chat history, not a durable user fact.';
+    }
     return this.callMemoryTool('store_memory', { content, tags });
   }
 

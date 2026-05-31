@@ -34,24 +34,21 @@ export async function loadNativeTools(
 
       try {
         const module = await import(path.join(toolsDir, file));
-        
+        const aggregateTools = extractAggregateTools(module);
+        if (aggregateTools) {
+          for (const item of aggregateTools) {
+            addToolSafely(item, tools, loadedToolNames, file);
+          }
+          continue;
+        }
         for (const key of Object.keys(module)) {
           const exported = module[key];
-          
-          if (Array.isArray(exported)) {
-            // E.g. allWindowsTools = [tool1, tool2]
-            for (const item of exported) {
-              if (isValidTool(item)) {
-                addToolSafely(item, tools, loadedToolNames, file);
-              }
-            }
-          } else if (isValidTool(exported)) {
-            // Check specific config flags
-            if (key === 'webSearchTool' || key === 'webFetchTool') {
-              if (!enableInternet) continue;
-            }
-            addToolSafely(exported, tools, loadedToolNames, file);
+          if (Array.isArray(exported)) continue;
+          if (!isValidTool(exported)) continue;
+          if (key === 'webSearchTool' || key === 'webFetchTool') {
+            if (!enableInternet) continue;
           }
+          addToolSafely(exported, tools, loadedToolNames, file);
         }
       } catch (err: any) {
         console.warn(`[ToolLoader] Failed to parse tools from ${file}:`, err.message);
@@ -62,6 +59,18 @@ export async function loadNativeTools(
   }
 
   return tools;
+}
+
+/** Prefer a single `all*Tools` export to avoid duplicate registration from named exports. */
+function extractAggregateTools(module: Record<string, unknown>): DynamicStructuredTool[] | null {
+  for (const key of Object.keys(module)) {
+    if (!/^all\w+Tools$/i.test(key)) continue;
+    const exported = module[key];
+    if (!Array.isArray(exported)) continue;
+    const bucket = exported.filter(isValidTool);
+    if (bucket.length > 0) return bucket;
+  }
+  return null;
 }
 
 /** Check if an object structurally looks like a LangChain DynamicStructuredTool */

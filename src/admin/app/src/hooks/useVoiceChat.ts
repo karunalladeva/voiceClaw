@@ -155,6 +155,9 @@ export function useVoiceChat() {
       await streamAudioChat(blob, CHAT_ID, controller.signal, (event) => {
         if (event.type === 'thinking') {
           setStatusText(event.data || 'Thinking…')
+        } else if (event.type === 'audio_start') {
+          setVoiceState('speaking', 'Speaking…')
+          audioPlayerRef.current.reset()
         } else if (event.type === 'audio') {
           setVoiceState('speaking', 'Speaking…')
           audioPlayerRef.current.enqueue(event.data)

@@ -8,6 +8,11 @@ import type {
   MemoryStatus,
   LearnedSkill,
   WorkspaceCategories,
+  ChannelConfig,
+  PendingPairing,
+  ApprovedPairings,
+  Pipeline,
+  PipelineHistoryEntry,
 } from '@/types'
 
 export function useConfig() {
@@ -252,6 +257,295 @@ export function useWorkspace() {
   }, [fetchWorkspace])
 
   return { categories, loading, error, fetchWorkspace, deleteFile }
+}
+
+export function useChannels() {
+  const [channels, setChannels] = useState<ChannelConfig[]>([])
+  const [supported, setSupported] = useState<string[]>([])
+  const [pendingPairings, setPendingPairings] = useState<PendingPairing[]>([])
+  const [approvedPairings, setApprovedPairings] = useState<ApprovedPairings>({})
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const fetchChannels = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [channelsRes, pendingRes, approvedRes] = await Promise.all([
+        fetch('/channels'),
+        fetch('/channels/pairings/pending'),
+        fetch('/channels/pairings/approved'),
+      ])
+      const channelsData = await channelsRes.json()
+      const pendingData = await pendingRes.json()
+      const approvedData = await approvedRes.json()
+      setChannels(channelsData.channels || [])
+      setSupported(channelsData.supported || [])
+      setPendingPairings(pendingData.pairings || [])
+      setApprovedPairings(approvedData.approved || {})
+    } catch {
+      setError('Failed to load channels')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const isConnected = useCallback(
+    (type: string) => channels.some((c) => c.type === type && c.enabled),
+    [channels]
+  )
+
+  const getChannel = useCallback(
+    (type: string) => channels.find((c) => c.type === type),
+    [channels]
+  )
+
+  const connectChannel = useCallback(
+    async (type: string, name: string, settings: Record<string, string> = {}) => {
+      const res = await fetch('/channels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, name, settings, enabled: true }),
+      })
+      if (!res.ok) throw new Error('Failed to connect channel')
+      await fetchChannels()
+    },
+    [fetchChannels]
+  )
+
+  const saveChannel = useCallback(
+    async (type: string, name: string, settings: Record<string, string>) => {
+      const existing = channels.find((c) => c.type === type)
+      const res = await fetch('/channels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type,
+          name,
+          settings,
+          enabled: existing?.enabled ?? false,
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Failed to save channel')
+      }
+      await fetchChannels()
+    },
+    [channels, fetchChannels]
+  )
+
+  const toggleChannel = useCallback(
+    async (type: string) => {
+      const res = await fetch(`/channels/${encodeURIComponent(type)}/toggle`, { method: 'PUT' })
+      if (!res.ok) throw new Error('Failed to toggle channel')
+      await fetchChannels()
+    },
+    [fetchChannels]
+  )
+
+  const approvePairing = useCallback(
+    async (code: string) => {
+      const res = await fetch('/channels/pairings/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error('Failed to approve pairing')
+      await fetchChannels()
+    },
+    [fetchChannels]
+  )
+
+  const rejectPairing = useCallback(
+    async (code: string) => {
+      const res = await fetch('/channels/pairings/reject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error('Failed to reject pairing')
+      await fetchChannels()
+    },
+    [fetchChannels]
+  )
+
+  const revokePairing = useCallback(
+    async (channelType: string, senderId: string) => {
+      const res = await fetch('/channels/pairings/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelType, senderId }),
+      })
+      if (!res.ok) throw new Error('Failed to revoke pairing')
+      await fetchChannels()
+    },
+    [fetchChannels]
+  )
+
+  const sendTestMessage = useCallback(
+    async (channelType: string, recipientId: string, message: string) => {
+      const res = await fetch('/channels/test-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelType, recipientId, message }),
+      })
+      const data = await res.json().catch(() => ({}))
+      const detail = String(data.result ?? data.error ?? (res.ok ? 'OK' : `HTTP ${res.status}`))
+      return { success: res.ok && data.success === true, detail }
+    },
+    []
+  )
+
+  const fetchListenerActive = useCallback(async (channelType: string) => {
+    try {
+      const res = await fetch('/channels/status')
+      const data = await res.json()
+      const row = (data.channels as { type: string; active: boolean }[] | undefined)?.find(
+        (c) => c.type === channelType
+      )
+      return row?.active === true
+    } catch {
+      return false
+    }
+  }, [])
+
+  const startChannelListener = useCallback(async (type: string) => {
+    const res = await fetch(`/channels/${encodeURIComponent(type)}/start`, { method: 'POST' })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || `Failed to start ${type}`)
+    }
+  }, [])
+
+  const getWhatsAppStatus = useCallback(async () => {
+    const res = await fetch('/channels/whatsapp/status')
+    if (!res.ok) {
+      return { qr: null, connected: false, listening: false, phase: 'idle', error: null }
+    }
+    return res.json() as Promise<{
+      qr: string | null
+      connected: boolean
+      listening?: boolean
+      phase?: string
+      error?: string | null
+    }>
+  }, [])
+
+  const resetWhatsApp = useCallback(async () => {
+    const res = await fetch('/channels/whatsapp/reset', { method: 'POST' })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error('Failed to reset WhatsApp session')
+    await fetchChannels()
+  }, [fetchChannels])
+
+  useEffect(() => {
+    fetchChannels()
+  }, [fetchChannels])
+
+  return {
+    channels,
+    supported,
+    pendingPairings,
+    approvedPairings,
+    loading,
+    error,
+    fetchChannels,
+    isConnected,
+    getChannel,
+    connectChannel,
+    saveChannel,
+    toggleChannel,
+    approvePairing,
+    rejectPairing,
+    revokePairing,
+    sendTestMessage,
+    fetchListenerActive,
+    startChannelListener,
+    getWhatsAppStatus,
+    resetWhatsApp,
+  }
+}
+
+export function usePipelines() {
+  const [pipelines, setPipelines] = useState<Pipeline[]>([])
+  const [history, setHistory] = useState<PipelineHistoryEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [runningId, setRunningId] = useState<string | null>(null)
+
+  const fetchPipelines = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [pipesRes, historyRes] = await Promise.all([
+        fetch('/pipelines'),
+        fetch('/pipelines/history'),
+      ])
+      const pipesData = await pipesRes.json()
+      const historyData = await historyRes.json()
+      setPipelines(pipesData.pipelines || [])
+      setHistory(historyData.history || [])
+    } catch {
+      setError('Failed to load pipelines')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const deletePipeline = useCallback(
+    async (id: string) => {
+      const res = await fetch(`/pipelines/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error('Failed to delete pipeline')
+      await fetchPipelines()
+    },
+    [fetchPipelines]
+  )
+
+  const togglePipeline = useCallback(
+    async (id: string) => {
+      const res = await fetch(`/pipelines/${encodeURIComponent(id)}/toggle`, { method: 'PUT' })
+      if (!res.ok) throw new Error('Failed to toggle pipeline')
+      await fetchPipelines()
+    },
+    [fetchPipelines]
+  )
+
+  const runPipeline = useCallback(
+    async (id: string) => {
+      setRunningId(id)
+      try {
+        const res = await fetch(`/pipelines/${encodeURIComponent(id)}/run`, { method: 'POST' })
+        const data = await res.json()
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Pipeline run failed')
+        }
+        await fetchPipelines()
+        return true
+      } finally {
+        setRunningId(null)
+      }
+    },
+    [fetchPipelines]
+  )
+
+  useEffect(() => {
+    fetchPipelines()
+  }, [fetchPipelines])
+
+  return {
+    pipelines,
+    history,
+    loading,
+    error,
+    runningId,
+    fetchPipelines,
+    deletePipeline,
+    togglePipeline,
+    runPipeline,
+  }
 }
 
 export function useModels() {

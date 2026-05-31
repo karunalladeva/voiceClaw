@@ -3,6 +3,8 @@ export { orchestrationStore, generateId } from './store';
 export { companyManager } from './company-manager';
 export { agentRegistry, type CreateAgentInput } from './agent-registry';
 export { taskManager, type CreateTaskInput, type CreateGoalInput } from './task-manager';
+export { taskWorkflow, TaskWorkflowError } from './task-workflow';
+export { normalizeTask, normalizeTasks } from './task-normalizer';
 export { budgetTracker } from './budget-tracker';
 export { heartbeatScheduler, type HeartbeatResult } from './heartbeat-scheduler';
 export { governanceEngine } from './governance';

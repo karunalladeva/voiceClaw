@@ -5,6 +5,8 @@ const DEFAULT_SETTINGS: CompanySettings = {
   requireApprovalForHires: true,
   requireApprovalForBudgetIncrease: true,
   requireApprovalForHighPriorityTasks: false,
+  requireUserApprovalForCriticalTasks: false,
+  maxReworkAttempts: 3,
   defaultAgentBudgetUSD: 50,
   maxTotalBudgetUSD: 1000,
 };

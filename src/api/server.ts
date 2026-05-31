@@ -23,10 +23,22 @@ import { setupAdminWebSocket, setupAdminRoutes } from '../admin/admin-server';
 import { agentEvents } from '../admin/agent-events';
 import { setupOrchestrationRoutes } from '../orchestration/routes';
 import { setupCreatorRoutes } from '../creator/routes';
-import { orchestrationStore, heartbeatScheduler, agentRegistry, routineScheduler } from '../orchestration';
-import { capSpeechPlain, selectPlainTextForTts } from '../utils/speech-for-tts';
+import { setupComfyUIRoutes } from '../comfyui/routes';
+import { setupLlamaCppRoutes } from '../llamacpp/routes';
+import { comfyUIService } from '../services/comfyui-service';
+import {
+  orchestrationStore,
+  heartbeatScheduler,
+  agentRegistry,
+  routineScheduler,
+  taskManager,
+} from '../orchestration';
+import { logAgentRun } from '../orchestration/agent-run-logger';
+import type { AgentRunMode } from '../orchestration/types';
+import { capSpeechPlain, selectPlainTextForTts, splitIntoTtsChunks } from '../utils/speech-for-tts';
 import { inferenceActivity } from '../utils/inference-activity';
-
+import { isInferenceInterruptError } from '../utils/inference-interrupt';
+import { modelLoadCoordinator } from '../models/model-load-coordinator';
 
 vramMonitor.startMonitoring();
 
@@ -68,8 +80,9 @@ function initSSE(res: express.Response) {
  * The temp file is written once and immediately deleted after reading.
  */
 async function synthToBuffer(text: string): Promise<Buffer> {
+  const voice = configManager.getConfig().tts.defaultVoice;
   const audio = await Promise.race([
-    TTSModule.synthesize(text),
+    TTSModule.synthesize(text, voice),
     new Promise((_, reject) => setTimeout(() => reject(new Error('TTS Engine Timeout')), 15000))
   ]) as any;
   const tempFilePath = path.join(os.tmpdir(), `tts-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
@@ -77,6 +90,28 @@ async function synthToBuffer(text: string): Promise<Buffer> {
   const buffer = await fs.readFile(tempFilePath);
   await fs.unlink(tempFilePath).catch(() => { });
   return buffer;
+}
+
+/** Stream TTS in sentence chunks so the first audio clip starts sooner. */
+async function emitTtsForAnswer(
+  res: express.Response,
+  rawAnswer: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const ttsText = buildFinalTtsText(rawAnswer);
+  if (!ttsText.trim() || signal.aborted) return;
+  const chunks = splitIntoTtsChunks(ttsText);
+  sendSSE(res, { type: 'audio_start', data: String(chunks.length) });
+  const ttsStart = Date.now();
+  for (let i = 0; i < chunks.length; i++) {
+    if (signal.aborted) return;
+    const audioBuffer = await synthToBuffer(chunks[i]);
+    if (signal.aborted) return;
+    sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
+    if (i === 0) {
+      console.log(`[API] First TTS chunk ready in ${Date.now() - ttsStart}ms (${chunks[i].length} chars).`);
+    }
+  }
 }
 
 async function handleStreamingChat(
@@ -128,7 +163,6 @@ async function handleStreamingChat(
 
   try {
     for await (const event of agent.processStream(input, chatId, controller.signal)) {
-      clearInterval(keepalive); // Stop keepalive once real events start
       if (controller.signal.aborted) break;
 
       sendSSE(res, event);
@@ -137,14 +171,7 @@ async function handleStreamingChat(
         fullText = event.data;
         if (!controller.signal.aborted && configManager.getConfig().speech.finalOnly) {
           try {
-            const ttsText = buildFinalTtsText(fullText);
-            if (ttsText.trim().length > 0) {
-              sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
-              const audioBuffer = await synthToBuffer(ttsText);
-              if (audioBuffer && !controller.signal.aborted) {
-                sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-              }
-            }
+            await emitTtsForAnswer(res, fullText, controller.signal);
           } catch (e) {
             console.error('[API] Final TTS failed:', e);
           }
@@ -160,6 +187,7 @@ async function handleStreamingChat(
       console.error('[API] Stream error:', err.message);
     }
   } finally {
+    clearInterval(keepalive);
     releaseInference();
   }
 
@@ -250,14 +278,7 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
           fullText = event.data;
           if (!controller.signal.aborted && configManager.getConfig().speech.finalOnly) {
             try {
-              const ttsText = buildFinalTtsText(fullText);
-              if (ttsText.trim().length > 0) {
-                sendSSE(res, { type: 'thinking', data: 'Generating audio...' });
-                const audioBuffer = await synthToBuffer(ttsText);
-                if (audioBuffer && !controller.signal.aborted) {
-                  sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
-                }
-              }
+              await emitTtsForAnswer(res, fullText, controller.signal);
             } catch (e) {
               console.error('[API] Final TTS failed:', e);
             }
@@ -391,11 +412,21 @@ app.get('/onboard', async (req, res) => {
       status.details.push('Could not connect to Ollama. Is it running?');
     }
 
+    const comfyuiStatus = await comfyUIService.healthCheck();
+    const comfyui = {
+      enabled: comfyuiStatus.enabled,
+      reachable: comfyuiStatus.reachable,
+      details: comfyuiStatus.details ?? (comfyuiStatus.reachable ? 'ComfyUI server reachable.' : 'ComfyUI not reachable.'),
+    };
+    if (comfyui.enabled) {
+      status.details.push(comfyui.details);
+    }
+
     const isReady = status.workspace && status.ollama && status.llama3Model;
 
     res.json({
       ready: isReady,
-      status
+      status: { ...status, comfyui },
     });
 
   } catch (error: any) {
@@ -481,6 +512,50 @@ app.post('/skills/:id/disable', (req, res) => {
 });
 
 // ── Workspace Files API ──────────────────────────────────────────────────────
+const WORKSPACE_INLINE_MIME: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+};
+
+app.get('/workspace/download/*filePath', async (req, res) => {
+  const workspacePath = path.join(process.cwd(), 'workspace');
+  const rawPath = (req.params as { filePath?: string | string[] }).filePath;
+  const relativePath = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath ?? '');
+  if (!relativePath) {
+    res.status(400).json({ error: 'File path is required' });
+    return;
+  }
+  const decodedPath = decodeURIComponent(relativePath);
+  const filePath = path.resolve(workspacePath, decodedPath);
+  if (!filePath.startsWith(workspacePath + path.sep)) {
+    res.status(403).json({ error: 'Access denied' });
+    return;
+  }
+  try {
+    await fs.access(filePath);
+    const forceDownload = req.query.download === '1' || req.query.download === 'true';
+    const ext = path.extname(filePath).toLowerCase();
+    const mime = WORKSPACE_INLINE_MIME[ext];
+    if (!forceDownload && mime) {
+      res.type(mime);
+      res.setHeader('Content-Disposition', `inline; filename="${path.basename(filePath)}"`);
+      res.sendFile(filePath);
+      return;
+    }
+    res.download(filePath);
+  } catch {
+    res.status(404).json({ error: 'File not found' });
+  }
+});
+
 app.get('/workspace/files', async (req, res) => {
   const workspacePath = path.join(process.cwd(), 'workspace');
   try {
@@ -537,12 +612,16 @@ app.get('/chats', async (req, res) => {
 
 app.get('/chats/:id', async (req, res) => {
   try {
-    const thread = await historyManager.loadChat(req.params.id);
-    const messages = thread.map(m => ({
-      role: m.getType() === 'human' ? 'user' : m.getType() === 'system' ? 'system' : 'agent',
-      content: m.content.toString()
-    }));
-    res.json({ messages });
+    await historyManager.loadChat(req.params.id);
+    const doc = historyManager.exportChatDoc(req.params.id);
+    if (!doc) {
+      res.json({ messages: [], summaries: [] });
+      return;
+    }
+    res.json({
+      messages: doc.messages,
+      summaries: doc.summaries ?? [],
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -557,14 +636,57 @@ app.delete('/chats/:id', async (req, res) => {
   }
 });
 
-app.post('/chat/reset', async (req, res) => {
-  await agent.clearHistory();
+async function clearVisionCacheDir(): Promise<void> {
   try {
     const cacheDir = path.join(process.cwd(), 'workspace', 'cache');
-    await fs.rm(cacheDir, { recursive: true, force: true }).catch(() => { });
-    await fs.mkdir(cacheDir, { recursive: true }).catch(() => { });
-  } catch (e) { }
-  res.json({ success: true, message: 'Conversation history and vision cache cleared.' });
+    await fs.rm(cacheDir, { recursive: true, force: true }).catch(() => {});
+    await fs.mkdir(cacheDir, { recursive: true }).catch(() => {});
+  } catch {
+    // non-critical
+  }
+}
+
+app.post('/chats/clear', async (req, res) => {
+  try {
+    const body = req.body ?? {};
+    const clearAll = body.all === true || body.scope === 'all';
+    const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : '';
+    if (clearAll) {
+      const deleted = await agent.clearAllHistory();
+      await clearVisionCacheDir();
+      agentEvents.log('info', `[API] Cleared all chat history (${deleted} file(s)).`);
+      res.json({
+        success: true,
+        deleted,
+        message: `Cleared ${deleted} saved conversation(s), summaries, and caches.`,
+      });
+      return;
+    }
+    const targetId = chatId || 'default';
+    await agent.clearHistory(targetId);
+    await clearVisionCacheDir();
+    agentEvents.log('info', `[API] Cleared chat history: ${targetId}`);
+    res.json({ success: true, chatId: targetId, message: `Conversation "${targetId}" cleared.` });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/chat/reset', async (req, res) => {
+  try {
+    const clearAll = req.body?.all === true;
+    if (clearAll) {
+      const deleted = await agent.clearAllHistory();
+      await clearVisionCacheDir();
+      res.json({ success: true, deleted, message: `Cleared ${deleted} conversation(s).` });
+      return;
+    }
+    await agent.clearHistory(req.body?.chatId || 'default');
+    await clearVisionCacheDir();
+    res.json({ success: true, message: 'Conversation history and vision cache cleared.' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.get('/chat/history', (req, res) => {
@@ -719,13 +841,26 @@ app.get('/channels', async (_req, res) => {
 
 app.post('/channels', async (req, res) => {
   try {
-    const { type, name, settings } = req.body;
+    const { type, name, settings, enabled } = req.body;
     if (!type || !name) return res.status(400).json({ error: 'type and name required' });
     const channels = await loadChannels();
     const existing = channels.findIndex(c => c.type === type);
-    const config: ChannelConfig = { type, name, settings: settings || {}, enabled: true };
+    const prev = existing >= 0 ? channels[existing] : null;
+    const config: ChannelConfig = {
+      type,
+      name,
+      settings: settings ?? prev?.settings ?? {},
+      enabled: typeof enabled === 'boolean' ? enabled : (prev?.enabled ?? true),
+    };
     if (existing >= 0) { channels[existing] = config; } else { channels.push(config); }
     await saveChannels(channels);
+    if (config.enabled) {
+      await channelInputManager.ensureChannelRunning(type).catch((e: Error) => {
+        console.error(`[API] Failed to start channel ${type}:`, e.message);
+      });
+    } else {
+      await channelInputManager.stopChannel(type).catch(() => undefined);
+    }
     res.json({ success: true, channel: config });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -738,6 +873,13 @@ app.put('/channels/:type/toggle', async (req, res) => {
   if (!ch) return res.status(404).json({ error: 'Channel not found' });
   ch.enabled = !ch.enabled;
   await saveChannels(channels);
+  if (ch.enabled) {
+    await channelInputManager.ensureChannelRunning(ch.type).catch((e: Error) => {
+      console.error(`[API] Failed to start channel ${ch.type}:`, e.message);
+    });
+  } else {
+    await channelInputManager.stopChannel(ch.type).catch(() => undefined);
+  }
   res.json({ success: true, channel: ch });
 });
 
@@ -754,8 +896,14 @@ app.get('/channels/status', (req, res) => {
 
 app.post('/channels/:type/start', async (req, res) => {
   try {
-    await channelInputManager.startChannel(req.params.type);
-    res.json({ success: true });
+    const type = req.params.type;
+    const restart = req.query.restart === '1' || req.query.restart === 'true';
+    if (restart) {
+      await channelInputManager.restartChannel(type);
+    } else {
+      await channelInputManager.ensureChannelRunning(type);
+    }
+    res.json({ success: true, listening: channelInputManager.isListening(type) });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -773,10 +921,21 @@ app.post('/channels/:type/stop', async (req, res) => {
 app.post('/channels/test-message', async (req, res) => {
   try {
     const { channelType, recipientId, message } = req.body;
-    if (!channelType || !recipientId || !message) {
-      return res.status(400).json({ error: 'channelType, recipientId, and message required' });
+    if (!channelType || !message) {
+      return res.status(400).json({ error: 'channelType and message required' });
     }
-    const result = await deliverToChannel(channelType, message, { to_number: recipientId, channel_id: recipientId, chat_id: recipientId });
+    const override: Record<string, string> = {};
+    if (recipientId) {
+      override.to_number = recipientId;
+      override.channel_id = recipientId;
+      override.chat_id = recipientId;
+      override.to_email = recipientId;
+    }
+    const result = await deliverToChannel(
+      channelType,
+      message,
+      Object.keys(override).length > 0 ? override : undefined
+    );
     res.json({ success: result.startsWith('✅'), result });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -824,7 +983,13 @@ app.get('/channels/pairings/approved', (req, res) => {
 app.get('/channels/whatsapp/status', (req, res) => {
   const qr = (global as any).__whatsappQR;
   const connected = (global as any).__whatsappConnected || false;
-  res.json({ qr: qr || null, connected });
+  res.json({
+    qr: qr || null,
+    connected,
+    listening: channelInputManager.isListening('whatsapp'),
+    phase: (global as any).__whatsappPhase || 'idle',
+    error: (global as any).__whatsappError || null,
+  });
 });
 
 app.post('/channels/whatsapp/reset', async (req, res) => {
@@ -845,8 +1010,10 @@ app.post('/channels/whatsapp/reset', async (req, res) => {
     
     (global as any).__whatsappQR = null;
     (global as any).__whatsappConnected = false;
-    
-    await channelInputManager.startChannel('whatsapp');
+    (global as any).__whatsappError = null;
+    (global as any).__whatsappPhase = 'starting';
+
+    await channelInputManager.restartChannel('whatsapp');
     res.json({ success: true });
   } catch(e: any) {
     res.status(500).json({ error: e.message });
@@ -1074,8 +1241,13 @@ export const startServer = async (port: number = 3000) => {
 
   // Initialize local tools first
   await agent.initialize([fsServerPath, memoryServerPath, marketServerPath, chromaServerPath]);
+  const masterAtStartup = modelRegistry.getMaster();
+  if (masterAtStartup) {
+    modelLoadCoordinator.markResidentFromStartup(masterAtStartup);
+  }
 
   const mcp = agent.getMcpManager();
+  let optionalMcpServersAdded = false;
 
   // 1. [GitHub]
   if (process.env.GITHUB_PERSONAL_ACCESS_TOKEN) {
@@ -1085,6 +1257,7 @@ export const startServer = async (port: number = 3000) => {
       args: ['-y', '@modelcontextprotocol/server-github'],
       env: { GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_PERSONAL_ACCESS_TOKEN }
     });
+    optionalMcpServersAdded = true;
   }
 
   // 2. [Gmail]
@@ -1099,6 +1272,7 @@ export const startServer = async (port: number = 3000) => {
         GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN
       }
     });
+    optionalMcpServersAdded = true;
   }
 
   // 3. [Google Cloud / Products]
@@ -1112,10 +1286,12 @@ export const startServer = async (port: number = 3000) => {
         GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET
       }
     });
+    optionalMcpServersAdded = true;
   }
 
-  // Re-load tools to include newly connected servers
-  await mcp.loadTools();
+  if (optionalMcpServersAdded) {
+    await agent.reloadToolkit();
+  }
 
   // ── Start the channel input manager ────────────────────────────────────────
   channelInputManager.setAgent(agent);
@@ -1134,23 +1310,123 @@ export const startServer = async (port: number = 3000) => {
   await orchestrationStore.initialize();
   setupOrchestrationRoutes(app);
   setupCreatorRoutes(app);
-  
-  // Set up heartbeat handler to use the main agent
-  heartbeatScheduler.setHandler(async (orgAgent, task, context) => {
-    const prompt = task
-      ? `${context}\n\nPlease work on the assigned task and provide your output.`
-      : `${context}\n\nCheck for any work that needs to be done and report status.`;
-    
-    let output = '';
+  await comfyUIService.initialize();
+  setupComfyUIRoutes(app);
+  setupLlamaCppRoutes(app);
+
+  const syncComfyUISkillEnabled = (): void => {
+    const registry = agent.getSkillRegistry();
+    const enabled = configManager.getConfig().comfyui.enabled;
+    if (enabled) registry.enableSkill('comfyui-creator');
+    else registry.disableSkill('comfyui-creator');
+  };
+  configManager.on('configChanged', syncComfyUISkillEnabled);
+  syncComfyUISkillEnabled();
+
+  const { registerCreatorSkillReload } = await import('../creator/creator-skill-bridge');
+  registerCreatorSkillReload(() => agent.reloadCreatorWorkspaceSkills());
+
+  heartbeatScheduler.setHandler(async (orgAgent, task, context, mode) => {
+    const { agentRegistry } = await import('../orchestration/agent-registry');
+    const {
+      formatTeamDelegationHint,
+      buildOrgOrchestrationSystemAppend,
+    } = await import('../orchestration/orchestration-delegation');
+    const directReports = await agentRegistry.getDirectReports(orgAgent.id);
+    const delegationHint = formatTeamDelegationHint(directReports);
+    const orgSystemAppend = buildOrgOrchestrationSystemAppend(orgAgent, task, directReports);
+    let prompt: string;
+    if (mode === 'review' && task) {
+      prompt =
+        `${context}\n\nYou are reviewing a team member's submitted work. ` +
+        `Respond with a JSON object in a fenced code block (\`\`\`json ... \`\`\`) using this schema:\n` +
+        `{"decision":"approve_escalate|approve_release|rework|reassign|escalate_user|request_clarification",` +
+        `"notes":"...","nextAssigneeId":"optional-agent-id",` +
+        `"spawnTask":{"title":"","description":"","assigneeId":"","blockedBy":[]}}\n` +
+        `Use approve_escalate if you are not at the top of the chain. ` +
+        `Use approve_release only if you are the final approver.`;
+    } else if (task) {
+      const pendingQuestions =
+        directReports.length > 0
+          ? await taskManager.listSubtasksAwaitingParentAnswer(task.id)
+          : [];
+      const answerDutyHint =
+        pendingQuestions.length > 0
+          ? `\n\nURGENT: ${pendingQuestions.length} subtask question(s) need answers. Use list_pending_subtask_questions and reply_to_subtask_question for each. Do not complete the parent task until answered.\n`
+          : '';
+      prompt =
+        `${context}${delegationHint}${answerDutyHint}\n\n` +
+        `Work on the assigned task. If requirements are unclear, call ask_parent_manager once, then wait for the answer (do not call it again). ` +
+        `If this requires your team to execute next steps, ` +
+        `you MUST call create_subtask for each direct report before finishing (do not only describe tasks in prose).`;
+    } else {
+      prompt = `${context}\n\nCheck for any work that needs to be done and report status.`;
+    }
+    const modelId = orgAgent.modelId ?? 'master';
+    const runMode: AgentRunMode = task ? mode : 'idle';
+    const startedAt = Date.now();
+    const rootTaskId = task?.rootTaskId ?? task?.id;
+    if (rootTaskId && task) {
+      const { hasPipelineModeLabel } = await import('../orchestration/orchestration-labels');
+      const root =
+        task.rootTaskId && task.rootTaskId !== task.id
+          ? await taskManager.getTaskById(rootTaskId)
+          : task;
+      if (root && hasPipelineModeLabel(root.labels)) {
+        modelLoadCoordinator.pinPipeline(rootTaskId, modelId);
+      }
+    }
+    const releaseModel = await modelLoadCoordinator.acquire(modelId);
     const releaseInference = inferenceActivity.begin();
+    let output = '';
+    let success = true;
+    let runError: string | undefined;
     try {
-      for await (const event of agent.processStream(prompt, `heartbeat-${orgAgent.id}`)) {
+      for await (const event of agent.processStream(prompt, `heartbeat-${orgAgent.id}`, undefined, {
+        modelId,
+        skillIds: orgAgent.skills?.length ? orgAgent.skills : undefined,
+        orgAgentId: orgAgent.id,
+        orgTaskId: task?.id,
+        orgRootTaskId: task?.rootTaskId ?? task?.id,
+        orgSystemAppend,
+      })) {
         if (event.type === 'text_done') {
           output = event.data;
         }
+        if (event.type === 'error') {
+          throw new Error(event.data);
+        }
       }
+    } catch (err: unknown) {
+      success = false;
+      runError = err instanceof Error ? err.message : String(err);
+      if (isInferenceInterruptError(err)) {
+        console.warn(
+          `[Orchestration] Heartbeat LLM interrupted (${orgAgent.name}): model handoff — will retry`,
+        );
+        return output;
+      }
+      console.error(`[Orchestration] Heartbeat LLM error (${orgAgent.name}):`, runError);
+      throw err;
     } finally {
       releaseInference();
+      await releaseModel();
+      try {
+        await logAgentRun({
+          agent: orgAgent,
+          task,
+          mode: runMode,
+          modelId,
+          prompt,
+          answer: output,
+          success,
+          error: runError,
+          durationMs: Date.now() - startedAt,
+        });
+      } catch (logErr: unknown) {
+        const msg = logErr instanceof Error ? logErr.message : String(logErr);
+        console.warn(`[Orchestration] Failed to log agent run: ${msg}`);
+      }
     }
     return output;
   });
@@ -1165,6 +1441,9 @@ export const startServer = async (port: number = 3000) => {
   setInterval(() => agentRegistry.resetMonthlyBudgets(), 24 * 60 * 60 * 1000);
   
   console.log('[API] Orchestration system initialized');
+
+  console.log('[API] Warming up TTS engine (avoids cold-start delay after replies)...');
+  await TTSModule.warmUp();
 
   // ── Create HTTP Server and attach WebSocket ─────────────────────────────────
   const server = http.createServer(app);

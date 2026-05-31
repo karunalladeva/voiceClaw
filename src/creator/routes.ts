@@ -13,6 +13,7 @@ import {
 } from './workspace-creator';
 import { CreatorPolicyError, CreatorValidationError } from './creator-llm';
 import { notifyOrchestrationUpdate } from '../admin/admin-server';
+import { refreshCreatorWorkspaceSkills } from './creator-skill-bridge';
 
 const router = Router();
 
@@ -21,6 +22,7 @@ router.use((req, res, next) => {
     if (req.method === 'GET') return;
     if (res.statusCode >= 400) return;
     notifyOrchestrationUpdate('creator');
+    void refreshCreatorWorkspaceSkills();
   });
   next();
 });

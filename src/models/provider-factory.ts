@@ -36,6 +36,20 @@ export async function createProvider(config: ModelConfig): Promise<BaseChatModel
       }) as unknown as BaseChatModel;
     }
 
+    case 'llamacpp': {
+      const { ChatOpenAI } = await import('@langchain/openai');
+      const { getLlamacppOpenAiUrl } = await import('./llamacpp-client');
+      const openAiUrl = getLlamacppOpenAiUrl(config);
+      return new ChatOpenAI({
+        modelName: model,
+        apiKey: auth?.apiKey || auth?.bearer || 'llamacpp',
+        configuration: {
+          baseURL: openAiUrl,
+          defaultHeaders: auth?.customHeaders,
+        },
+      }) as unknown as BaseChatModel;
+    }
+
     // ── Cloud providers ──────────────────────────────────────────────────────
 
     case 'openai': {

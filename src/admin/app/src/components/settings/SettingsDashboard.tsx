@@ -1,16 +1,23 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
-import { GeneralSettingsForm, type SettingsTab } from './GeneralSettingsForm'
+import { GeneralSettingsForm } from './GeneralSettingsForm'
 import { ModelsPanel } from './ModelsPanel'
 import { MemoryPanel } from './MemoryPanel'
 import { SkillsPanel } from './SkillsPanel'
 import { WorkspacePanel } from './WorkspacePanel'
+import { ChannelsPanel } from './ChannelsPanel'
+import { ComfyUIPanel } from './ComfyUIPanel'
+import { LlamaCppPanel } from './LlamaCppPanel'
+import type { SettingsTab } from './settings-tabs'
 
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'models', label: 'Models' },
   { id: 'memory', label: 'Memory' },
   { id: 'skills', label: 'Skills' },
+  { id: 'channels', label: 'Channels' },
+  { id: 'comfyui', label: 'ComfyUI' },
+  { id: 'llamacpp', label: 'llama.cpp' },
   { id: 'workspace', label: 'Workspace' },
 ]
 
@@ -38,9 +45,12 @@ export function SettingsDashboard() {
       </div>
 
       {activeTab === 'general' && <GeneralSettingsForm onNavigate={setActiveTab} />}
-      {activeTab === 'models' && <ModelsPanel />}
+      {activeTab === 'models' && <ModelsPanel onNavigate={setActiveTab} />}
       {activeTab === 'memory' && <MemoryPanel />}
       {activeTab === 'skills' && <SkillsPanel />}
+      {activeTab === 'channels' && <ChannelsPanel />}
+      {activeTab === 'comfyui' && <ComfyUIPanel />}
+      {activeTab === 'llamacpp' && <LlamaCppPanel />}
       {activeTab === 'workspace' && <WorkspacePanel />}
     </div>
   )

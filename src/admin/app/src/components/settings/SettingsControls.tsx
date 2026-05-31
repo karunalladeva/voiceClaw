@@ -162,6 +162,32 @@ export function SettingsNavButton({ label, onClick }: { label: string; onClick: 
   )
 }
 
+export function SettingsDangerButton({
+  label,
+  onClick,
+  disabled,
+  loading,
+}: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  loading?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || loading}
+      className={cn(
+        'px-3 py-1.5 text-sm font-medium rounded-md border border-destructive/40',
+        'text-destructive hover:bg-destructive/10 disabled:opacity-50 transition-colors',
+      )}
+    >
+      {loading ? 'Working…' : label}
+    </button>
+  )
+}
+
 export function SettingsToast({
   message,
   variant = 'success',

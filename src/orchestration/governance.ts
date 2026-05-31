@@ -2,6 +2,7 @@ import { orchestrationStore, generateId } from './store';
 import { agentRegistry } from './agent-registry';
 import { taskManager } from './task-manager';
 import type { ApprovalRequest, ApprovalStatus, ActivityEvent, OrgAgent, Task } from './types';
+import { normalizeOrgAgent } from './agent-normalizer';
 
 export interface BoardUser {
   id: string;
@@ -88,9 +89,9 @@ class GovernanceEngine {
       case 'hire': {
         const agentData = approval.data.agent as OrgAgent;
         if (agentData) {
-          const agents = await agentRegistry.list();
-          agentData.status = 'idle';
-          agents.push(agentData);
+          const agents = await orchestrationStore.load('agents');
+          const normalized = normalizeOrgAgent({ ...agentData, status: 'idle' });
+          agents.push(normalized);
           await orchestrationStore.save('agents', agents);
           console.log(`[Orchestration] Agent activated after approval: ${agentData.name}`);
         }
@@ -131,7 +132,48 @@ class GovernanceEngine {
         console.log(`[Orchestration] Strategy approved: ${approval.title}`);
         break;
       }
+
+      case 'clarification':
+      case 'work_escalation': {
+        const { taskId, response } = approval.data as { taskId: string; response?: string };
+        if (taskId && response) {
+          await taskManager.resumeAfterUserClarification(
+            taskId,
+            approval.reviewerId || 'admin',
+            response,
+          );
+        } else if (taskId) {
+          const tasks = await orchestrationStore.load('tasks');
+          const task = tasks.find(t => t.id === taskId);
+          if (task && approval.type === 'work_escalation') {
+            task.status = task.reviewerId ? 'review' : 'todo';
+            task.updatedAt = Date.now();
+            await orchestrationStore.save('tasks', tasks);
+          }
+        }
+        break;
+      }
     }
+  }
+
+  async respondToClarification(
+    approvalId: string,
+    reviewerId: string,
+    response: string,
+  ): Promise<ApprovalRequest | null> {
+    const approvals = await orchestrationStore.load('approvals');
+    const approval = approvals.find(a => a.id === approvalId);
+    if (!approval || approval.status !== 'pending' || approval.type !== 'clarification') {
+      return null;
+    }
+    approval.data = { ...approval.data, response };
+    approval.status = 'approved';
+    approval.reviewerId = reviewerId;
+    approval.reviewedAt = Date.now();
+    approval.reviewNotes = response;
+    await orchestrationStore.save('approvals', approvals);
+    await this.executeApproval(approval);
+    return approval;
   }
 
   async requestBudgetIncrease(

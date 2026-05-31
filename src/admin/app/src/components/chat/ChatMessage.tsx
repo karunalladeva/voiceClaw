@@ -1,6 +1,8 @@
 import { Bot, Info, RefreshCw, User } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ChatMarkdown } from '@/components/chat/ChatMarkdown'
+import { ChatMediaAttachments } from '@/components/chat/ChatMediaAttachments'
+import { attachmentsNotInMarkdown, extractMediaAttachments } from '@/lib/mediaAttachments'
 import type { ChatMessage as ChatMessageType } from '@/hooks/useChat'
 
 interface ChatMessageProps {
@@ -18,6 +20,11 @@ export function ChatMessage({
 }: ChatMessageProps) {
   const isUser = message.sender === 'User'
   const isSystem = message.sender === 'System'
+  const isArchived = message.isSummarized === true
+  const isSummaryBlock = message.isSummaryBlock === true
+  const mediaAttachments = !isUser
+    ? attachmentsNotInMarkdown(message.text, extractMediaAttachments(message.text))
+    : []
 
   return (
     <div
@@ -25,7 +32,9 @@ export function ChatMessage({
         'px-6 py-5 border-b border-border/60 animate-fade-in',
         isUser && 'bg-background',
         isSystem && 'bg-warning/5',
-        !isUser && !isSystem && 'bg-card/50'
+        !isUser && !isSystem && 'bg-card/50',
+        isArchived && 'opacity-60',
+        isSummaryBlock && 'border-l-2 border-l-warning/50'
       )}
     >
       <div className="flex gap-4 max-w-4xl mx-auto">
@@ -48,7 +57,12 @@ export function ChatMessage({
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2 mb-1">
-            <span className="text-sm font-semibold">{message.sender}</span>
+            <span className="text-sm font-semibold">
+              {isSummaryBlock ? 'Conversation summary' : message.sender}
+              {isArchived && !isSummaryBlock && (
+                <span className="ml-2 text-xs font-normal text-muted-foreground">(archived)</span>
+              )}
+            </span>
             {isLast && message.sender === 'Agent' && !isProcessing && onRetry && (
               <button
                 type="button"
@@ -65,10 +79,13 @@ export function ChatMessage({
               {message.text}
             </p>
           ) : (
-            <ChatMarkdown
-              content={message.text || (isProcessing && isLast ? '…' : '')}
-              className={cn(isSystem && 'text-warning')}
-            />
+            <>
+              <ChatMarkdown
+                content={message.text || (isProcessing && isLast ? '…' : '')}
+                className={cn(isSystem && 'text-warning')}
+              />
+              <ChatMediaAttachments attachments={mediaAttachments} />
+            </>
           )}
         </div>
       </div>

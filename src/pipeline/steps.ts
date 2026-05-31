@@ -40,6 +40,38 @@ function stripHtml(value: string): string {
     .trim();
 }
 
+function extractStockSymbol(query: string, explicitSymbol?: string): string | null {
+  if (explicitSymbol && explicitSymbol !== 'MULTI') return explicitSymbol.toUpperCase();
+  const parenMatch = query.match(/\(([A-Z]{1,5})\)/);
+  if (parenMatch) return parenMatch[1];
+  const tickerMatch = query.match(/\b([A-Z]{2,5})\b(?:\s+stock|\s+ticker|\s+shares)?/i);
+  if (tickerMatch) return tickerMatch[1].toUpperCase();
+  return null;
+}
+
+async function fetchMarketResearchFallback(query: string, symbol?: string): Promise<string | null> {
+  const ticker = extractStockSymbol(query, symbol);
+  if (!ticker) return null;
+  try {
+    const { yahooOhlcvTool, yahooNewsTool } = await import('../tools/market-data');
+    const [ohlcv, news] = await Promise.all([
+      yahooOhlcvTool.invoke({ symbol: ticker, period: '1mo', interval: '1d', limit: 30 }),
+      yahooNewsTool.invoke({ symbol: ticker, limit: 8 }),
+    ]);
+    return [
+      `## Market data for ${ticker} (Yahoo Finance)`,
+      '',
+      '### Price / OHLCV',
+      typeof ohlcv === 'string' ? ohlcv : JSON.stringify(ohlcv, null, 2),
+      '',
+      '### Recent news',
+      typeof news === 'string' ? news : JSON.stringify(news, null, 2),
+    ].join('\n');
+  } catch {
+    return null;
+  }
+}
+
 async function searchDuckDuckGoFallback(query: string, maxResults: number): Promise<SearchSnippet[]> {
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   const response = await fetch(url, {
@@ -134,6 +166,14 @@ registerStep('research', async (config, context): Promise<StepResult> => {
   }
 
   if (snippets.length === 0) {
+    const marketFallback = await fetchMarketResearchFallback(query, config.symbol);
+    if (marketFallback) {
+      return {
+        success: true,
+        output: `${marketFallback}\n\n(via Yahoo Finance — web search had no results)`,
+        data: { source: 'yahoo_finance' },
+      };
+    }
     const reason = googleError ? `Google error: ${googleError}` : 'No results from any provider';
     return { success: false, output: `No research results found for query: "${query}". ${reason}` };
   }
@@ -184,15 +224,43 @@ registerStep('browse', async (config, context): Promise<StepResult> => {
 // ── summarize: LLM summarization of context ───────────────────────────────────
 
 registerStep('summarize', async (config, context): Promise<StepResult> => {
-  if (!context) {
+  const prompt = config.prompt || 'Summarize the following content concisely:';
+  const hasUsableContext =
+    Boolean(context) &&
+    !context.startsWith('[ERROR]') &&
+    !context.includes('No research results found') &&
+    context.trim().length > 20;
+
+  if (!hasUsableContext) {
+    const symbol = config.symbol as string | undefined;
+    const fallbackPrompt =
+      (config.fallback_prompt as string | undefined) ||
+      (symbol
+        ? `Analyze ${symbol} stock using available market tools (OHLCV, news). Provide levels, trend, catalysts, and a concise trading summary.`
+        : null);
+    if (fallbackPrompt) {
+      try {
+        const { ReactAgent } = await import('../agents/react-agent');
+        const agent = new ReactAgent();
+        await agent.initialize([]);
+        const chatId = buildPipelineScopedChatId(config, 'summarize-fallback');
+        let result = '';
+        for await (const event of agent.processStream(fallbackPrompt, chatId, new AbortController().signal)) {
+          if (event.type === 'text_done') result = event.data;
+        }
+        if (result) {
+          return { success: true, output: result, data: { usedFallback: true } };
+        }
+      } catch (e: any) {
+        return { success: false, output: `Summarize fallback failed: ${e.message}` };
+      }
+    }
     return {
-      success: true,
-      output: 'Skipped summarize step (no input from previous step).',
-      data: { skipped: true },
+      success: false,
+      output: 'Nothing to summarize (no input from previous step).',
     };
   }
 
-  const prompt = config.prompt || 'Summarize the following content concisely:';
   try {
     const { ReactAgent } = await import('../agents/react-agent');
     const agent = new ReactAgent();

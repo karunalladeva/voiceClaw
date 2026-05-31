@@ -19,6 +19,8 @@ import {
 } from '@/hooks/useOrchestration';
 import { useOrchestrationLive } from '@/hooks/useOrchestrationLive';
 import type { Company } from '@/types/orchestration';
+import { MarkdownField } from './MarkdownField';
+import { CompanySettingsPanel } from './CompanyPipelineSettings';
 
 type Tab = 'overview' | 'tasks' | 'routines' | 'creator' | 'org' | 'budget' | 'activity' | 'trading';
 
@@ -30,10 +32,16 @@ export function OrchestrationDashboard() {
   const [newCompanyMission, setNewCompanyMission] = useState('');
   const liveRevision = useOrchestrationLive();
 
-  const { companies, createCompany } = useCompanies(liveRevision);
+  const { companies, createCompany, updateCompanySettings } = useCompanies(liveRevision);
   const { agents, createAgent, updateAgent, triggerHeartbeat } = useOrgAgents(selectedCompany?.id, liveRevision);
-  const { tasks, createTask } = useTasks(selectedCompany?.id, liveRevision);
-  const { approvals, approve, reject } = useApprovals(selectedCompany?.id, liveRevision);
+  const { tasks, createTask, updateTask, reviewTask, fetchWorkProducts, fetchComments, fetchSubtasks, delegateTeam, refreshTaskContext, refreshRootContext, requestClarification, addTaskComment, refresh: refreshTasks } = useTasks(
+    selectedCompany?.id,
+    liveRevision,
+  );
+  const { approvals, approve, reject, respondClarification } = useApprovals(
+    selectedCompany?.id,
+    liveRevision,
+  );
   const { activity } = useActivity(selectedCompany?.id, liveRevision);
   const { spending, requestBudget } = useBudget(selectedCompany?.id || '', liveRevision);
   const { routines, createRoutine, toggleRoutine, deleteRoutine } = useRoutines(selectedCompany?.id, liveRevision);
@@ -107,15 +115,14 @@ export function OrchestrationDashboard() {
                 className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-green-500 focus:border-green-500 transition-all"
               />
             </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-gray-400">Company Mission</label>
-              <textarea
-                placeholder="To build the best AI agents..."
-                value={newCompanyMission}
-                onChange={e => setNewCompanyMission(e.target.value)}
-                className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-green-500 focus:border-green-500 transition-all h-24 resize-none"
-              />
-            </div>
+            <MarkdownField
+              label="Company Mission"
+              value={newCompanyMission}
+              onChange={setNewCompanyMission}
+              placeholder={'## Mission\nBuild the best AI agents for…'}
+              minRows={5}
+              accent="green"
+            />
             <div className="flex gap-3 pt-2">
               <button
                 onClick={handleCreateCompany}
@@ -167,14 +174,49 @@ export function OrchestrationDashboard() {
                 <BudgetDashboard agents={agents} spending={spending} />
               </div>
               <div className="space-y-4">
-                <ApprovalsPanel approvals={approvals} onApprove={approve} onReject={reject} />
+                <CompanySettingsPanel
+                  company={selectedCompany}
+                  onUpdate={async (companyId, settings) => {
+                    await updateCompanySettings(companyId, settings);
+                    setSelectedCompany((prev) =>
+                      prev && prev.id === companyId
+                        ? { ...prev, settings: { ...prev.settings, ...settings } }
+                        : prev,
+                    );
+                  }}
+                />
+                <ApprovalsPanel
+                  approvals={approvals}
+                  onApprove={approve}
+                  onReject={reject}
+                  onClarificationResponse={respondClarification}
+                />
                 <ActivityLog activity={activity.slice(0, 10)} />
               </div>
             </div>
           )}
 
           {activeTab === 'tasks' && (
-            <TaskBoard tasks={tasks} agents={agents} companyId={selectedCompany.id} onCreateTask={createTask} onRunNow={triggerHeartbeat} />
+            <TaskBoard
+              tasks={tasks}
+              agents={agents}
+              companyId={selectedCompany.id}
+              onCreateTask={createTask}
+              onUpdateTask={updateTask}
+              onRunNow={triggerHeartbeat}
+              onReview={async (taskId, payload) => {
+                await reviewTask(taskId, payload);
+              }}
+              fetchWorkProducts={fetchWorkProducts}
+              fetchComments={fetchComments}
+              fetchSubtasks={fetchSubtasks}
+              delegateTeam={delegateTeam}
+              refreshTaskContext={refreshTaskContext}
+              refreshRootContext={refreshRootContext}
+              requestClarification={requestClarification}
+              addTaskComment={addTaskComment}
+              onTasksRefresh={() => void refreshTasks()}
+            />
           )}
 
           {activeTab === 'routines' && (
@@ -190,7 +232,14 @@ export function OrchestrationDashboard() {
           )}
 
           {activeTab === 'org' && (
-            <OrgChart agents={agents} companyId={selectedCompany.id} onCreateAgent={createAgent} onEditAgent={updateAgent} onWakeAgent={triggerHeartbeat} />
+            <OrgChart
+              agents={agents}
+              companyId={selectedCompany.id}
+              onCreateAgent={createAgent}
+              onEditAgent={updateAgent}
+              onWakeAgent={triggerHeartbeat}
+              liveRevision={liveRevision}
+            />
           )}
 
           {activeTab === 'budget' && (

@@ -61,6 +61,7 @@ export interface Model {
   name?: string
   model: string
   provider: string
+  baseUrl?: string
   enabled: boolean
   isMaster?: boolean
   role?: string
@@ -102,6 +103,30 @@ export interface AppConfig {
     vadEnabled: boolean
     wakeWordEnabled: boolean
     autoListen: boolean
+  }
+  comfyui?: {
+    enabled: boolean
+    baseUrl: string
+    requestTimeoutMs: number
+    outputDir: string
+    maxConcurrentJobs: number
+    unloadLocalModelOnGenerate?: boolean
+  }
+  llamacpp?: {
+    enabled: boolean
+    baseUrl: string
+    host: string
+    port: number
+    serverBinary: string
+    modelsDir: string
+    modelsMax: number
+    modelsPreset: string
+    noModelsAutoload: boolean
+    ctxSize: number
+    nGpuLayers: number
+    threads: number
+    manageProcess: boolean
+    apiKey: string
   }
   assistantName: string
 }
@@ -154,3 +179,51 @@ export type WebSocketMessage =
   | { type: 'stats'; stats: Stats; activeAgents: Agent[] }
   | { type: 'event'; event: AgentEvent }
   | { type: 'error'; message: string }
+
+export interface ChannelConfig {
+  type: string
+  name: string
+  settings: Record<string, string>
+  enabled: boolean
+}
+
+export interface PendingPairing {
+  code: string
+  channelType: string
+  senderId: string
+  senderName: string
+}
+
+export type ApprovedPairings = Record<string, string[]>
+
+export interface PipelineStep {
+  type: string
+  config?: Record<string, unknown>
+}
+
+export interface Pipeline {
+  id: string
+  name: string
+  trigger: 'scheduled' | 'manual' | 'on_event'
+  schedule?: string
+  steps: PipelineStep[]
+  enabled: boolean
+  runOnStartup?: boolean
+  createdAt: number
+  lastRun?: number
+  nextRun?: number
+}
+
+export interface PipelineStepResult {
+  type: string
+  success: boolean
+  output: string
+}
+
+export interface PipelineHistoryEntry {
+  pipelineId: string
+  pipelineName: string
+  ranAt: number
+  success: boolean
+  stepResults: PipelineStepResult[]
+}

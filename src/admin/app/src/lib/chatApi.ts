@@ -7,9 +7,17 @@ export interface ChatSummary {
   title?: string
 }
 
+export interface ChatSummaryRecord {
+  id: string
+  content: string
+  createdAt: number
+  summarizedMessageCount: number
+}
+
 export interface ChatHistoryMessage {
   role: string
   content: string
+  isSummarized?: boolean
 }
 
 export async function fetchChats(): Promise<ChatSummary[]> {
@@ -23,14 +31,23 @@ export async function fetchChats(): Promise<ChatSummary[]> {
   }
 }
 
-export async function loadChatMessages(id: string): Promise<ChatHistoryMessage[]> {
+export async function loadChatMessages(id: string): Promise<{
+  messages: ChatHistoryMessage[]
+  summaries: ChatSummaryRecord[]
+}> {
   try {
     const res = await fetch(`/chats/${id}`)
-    if (!res.ok) return []
-    const data = (await res.json()) as { messages?: ChatHistoryMessage[] }
-    return data.messages ?? []
+    if (!res.ok) return { messages: [], summaries: [] }
+    const data = (await res.json()) as {
+      messages?: ChatHistoryMessage[]
+      summaries?: ChatSummaryRecord[]
+    }
+    return {
+      messages: data.messages ?? [],
+      summaries: data.summaries ?? [],
+    }
   } catch {
-    return []
+    return { messages: [], summaries: [] }
   }
 }
 
@@ -39,6 +56,27 @@ export async function deleteChat(id: string): Promise<void> {
     await fetch(`/chats/${id}`, { method: 'DELETE' })
   } catch {
     // ignore
+  }
+}
+
+export async function clearAllChatHistory(): Promise<{ deleted: number; message: string }> {
+  const res = await fetch('/chats/clear', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ all: true }),
+  })
+  const data = (await res.json().catch(() => ({}))) as {
+    success?: boolean
+    deleted?: number
+    message?: string
+    error?: string
+  }
+  if (!res.ok || !data.success) {
+    throw new Error(data.error || data.message || `Clear failed (${res.status})`)
+  }
+  return {
+    deleted: data.deleted ?? 0,
+    message: data.message || 'History cleared.',
   }
 }
 

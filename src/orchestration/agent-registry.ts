@@ -1,5 +1,7 @@
 import { orchestrationStore, generateId } from './store';
 import { companyManager } from './company-manager';
+import { normalizeOrgAgent, normalizeOrgAgents, DEFAULT_ORG_MODEL_ID } from './agent-normalizer';
+import { taskWorkflow, TaskWorkflowError } from './task-workflow';
 import type {
   OrgAgent,
   AgentRole,
@@ -31,9 +33,25 @@ const DEFAULT_BUDGET: AgentBudget = {
   resetDay: 1,
 };
 
+/** Default 15s between scheduled heartbeats (override with ORG_HEARTBEAT_INTERVAL_MS). */
+export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
+
+export function getOrgHeartbeatIntervalMs(agentIntervalMs?: number): number {
+  const fromEnv = process.env.ORG_HEARTBEAT_INTERVAL_MS;
+  if (fromEnv) {
+    const parsed = Number.parseInt(fromEnv, 10);
+    if (Number.isFinite(parsed) && parsed >= 15_000) {
+      return parsed;
+    }
+  }
+  return agentIntervalMs && agentIntervalMs >= 15_000
+    ? agentIntervalMs
+    : DEFAULT_HEARTBEAT_INTERVAL_MS;
+}
+
 const DEFAULT_HEARTBEAT: HeartbeatConfig = {
   enabled: true,
-  intervalMs: 300000,
+  intervalMs: DEFAULT_HEARTBEAT_INTERVAL_MS,
 };
 
 const ROLE_PERMISSIONS: Partial<Record<AgentRole, Partial<AgentPermissions>>> = {
@@ -76,22 +94,32 @@ export interface CreateAgentInput {
   budget?: Partial<AgentBudget>;
   heartbeat?: Partial<HeartbeatConfig>;
   adapter: AgentAdapter;
+  modelId?: string;
   skills?: string[];
 }
 
 class AgentRegistry {
   async list(): Promise<OrgAgent[]> {
-    return orchestrationStore.load('agents');
+    const agents = await orchestrationStore.load('agents');
+    return normalizeOrgAgents(agents);
   }
 
   async getById(id: string): Promise<OrgAgent | undefined> {
-    const agents = await this.list();
-    return agents.find(a => a.id === id);
+    const agents = await orchestrationStore.load('agents');
+    const agent = agents.find(a => a.id === id);
+    return agent ? normalizeOrgAgent(agent) : undefined;
   }
 
   async getByCompany(companyId: string): Promise<OrgAgent[]> {
     const agents = await this.list();
     return agents.filter(a => a.companyId === companyId);
+  }
+
+  async getDirectReports(managerId: string): Promise<OrgAgent[]> {
+    const agents = await this.list();
+    return agents.filter(
+      (a) => a.reportsTo === managerId && a.status !== 'terminated' && a.status !== 'pending_approval',
+    );
   }
 
   async getOrgChart(companyId: string): Promise<{ roots: OrgAgent[]; children: Map<string, OrgAgent[]> }> {
@@ -115,6 +143,14 @@ class AgentRegistry {
   async create(input: CreateAgentInput): Promise<OrgAgent | ApprovalRequest> {
     const company = await companyManager.getById(input.companyId);
     if (!company) throw new Error(`Company not found: ${input.companyId}`);
+    if (input.reportsTo) {
+      try {
+        await taskWorkflow.validateReportsToAcyclic(input.companyId, input.reportsTo);
+      } catch (e) {
+        if (e instanceof TaskWorkflowError) throw new Error(e.message);
+        throw e;
+      }
+    }
 
     const rolePerms = ROLE_PERMISSIONS[input.role] || {};
     const agent: OrgAgent = {
@@ -131,7 +167,8 @@ class AgentRegistry {
       budget: { ...DEFAULT_BUDGET, monthlyLimitUSD: company.settings.defaultAgentBudgetUSD, ...input.budget },
       heartbeat: { ...DEFAULT_HEARTBEAT, ...input.heartbeat },
       adapter: input.adapter,
-      skills: input.skills || [],
+      modelId: input.modelId ?? DEFAULT_ORG_MODEL_ID,
+      skills: input.skills ?? [],
       createdAt: Date.now(),
     };
 
@@ -155,7 +192,7 @@ class AgentRegistry {
     });
 
     console.log(`[Orchestration] Agent created: ${agent.name} (${agent.role})`);
-    return agent;
+    return normalizeOrgAgent(agent);
   }
 
   private async createApproval(agent: OrgAgent): Promise<ApprovalRequest> {
@@ -181,14 +218,35 @@ class AgentRegistry {
   }
 
   async update(id: string, updates: Partial<OrgAgent>): Promise<OrgAgent | null> {
-    const agents = await this.list();
+    const agents = await orchestrationStore.load('agents');
     const index = agents.findIndex(a => a.id === id);
     if (index === -1) return null;
 
-    const agent = agents[index];
+    const agent = normalizeOrgAgent(agents[index]);
     const oldData = { name: agent.name, role: agent.role, title: agent.title, reportsTo: agent.reportsTo };
-    
-    const updatedAgent = { ...agent, ...updates };
+    if (updates.reportsTo !== undefined) {
+      try {
+        await taskWorkflow.validateReportsToAcyclic(
+          agent.companyId,
+          updates.reportsTo || undefined,
+          id,
+        );
+      } catch (e) {
+        if (e instanceof TaskWorkflowError) throw new Error(e.message);
+        throw e;
+      }
+    }
+    const merged: OrgAgent = { ...agent, ...updates };
+    if (updates.permissions) {
+      merged.permissions = { ...agent.permissions, ...updates.permissions };
+    }
+    if (updates.budget) {
+      merged.budget = { ...agent.budget, ...updates.budget };
+    }
+    if (updates.heartbeat) {
+      merged.heartbeat = { ...agent.heartbeat, ...updates.heartbeat };
+    }
+    const updatedAgent = normalizeOrgAgent(merged);
     agents[index] = updatedAgent;
 
     await orchestrationStore.save('agents', agents);

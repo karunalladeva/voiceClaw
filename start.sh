@@ -27,9 +27,13 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v flutter >/dev/null 2>&1; then
-  echo "[start.sh] Error: flutter is not installed or not in PATH."
-  exit 1
+START_FLUTTER="${START_FLUTTER:-0}"
+
+if [[ "$START_FLUTTER" == "1" ]]; then
+  if ! command -v flutter >/dev/null 2>&1; then
+    echo "[start.sh] Error: flutter is not installed or not in PATH."
+    exit 1
+  fi
 fi
 
 echo "[start.sh] Starting backend..."
@@ -39,21 +43,30 @@ echo "[start.sh] Starting backend..."
 ) &
 BACKEND_PID=$!
 
-# echo "[start.sh] Ensuring Flutter dependencies..."
-# (
-#   cd "$CLIENT_DIR"
-#   flutter pub get
-# )
-
-# echo "[start.sh] Starting Windows Flutter app..."
-# (
-#   cd "$CLIENT_DIR"
-#   flutter run -d windows
-# ) &
-APP_PID=$!
+APP_PID=""
+if [[ "$START_FLUTTER" == "1" ]]; then
+  echo "[start.sh] Ensuring Flutter dependencies..."
+  (
+    cd "$CLIENT_DIR"
+    flutter pub get
+  )
+  echo "[start.sh] Starting Flutter app..."
+  (
+    cd "$CLIENT_DIR"
+    flutter run -d windows
+  ) &
+  APP_PID=$!
+fi
 
 echo "[start.sh] Backend PID: $BACKEND_PID"
-echo "[start.sh] App PID: $APP_PID"
-echo "[start.sh] Press Ctrl+C to stop both."
+if [[ -n "$APP_PID" ]]; then
+  echo "[start.sh] App PID: $APP_PID"
+fi
+echo "[start.sh] Admin UI: http://localhost:3000/admin"
+echo "[start.sh] Press Ctrl+C to stop."
 
-wait "$APP_PID"
+if [[ -n "$APP_PID" ]]; then
+  wait "$APP_PID"
+else
+  wait "$BACKEND_PID"
+fi

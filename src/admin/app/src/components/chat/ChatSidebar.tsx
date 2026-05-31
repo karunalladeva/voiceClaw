@@ -1,4 +1,4 @@
-import { MessageSquarePlus, Trash2 } from 'lucide-react'
+import { MessageSquarePlus, Trash2, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChatSummary } from '@/lib/chatApi'
 
@@ -8,6 +8,7 @@ interface ChatSidebarProps {
   onNewChat: () => void
   onSelectChat: (id: string) => void
   onDeleteChat: (id: string) => void
+  onOpenPipelines?: () => void
 }
 
 export function ChatSidebar({
@@ -16,6 +17,7 @@ export function ChatSidebar({
   onNewChat,
   onSelectChat,
   onDeleteChat,
+  onOpenPipelines,
 }: ChatSidebarProps) {
   return (
     <aside className="w-64 shrink-0 border-r border-border bg-card/30 flex flex-col h-full">
@@ -75,6 +77,19 @@ export function ChatSidebar({
           </ul>
         )}
       </div>
+
+      {onOpenPipelines && (
+        <div className="border-t border-border p-2">
+          <button
+            type="button"
+            onClick={onOpenPipelines}
+            className="w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm text-foreground/80 hover:bg-secondary/60 transition-colors"
+          >
+            <Sparkles className="w-4 h-4 text-primary shrink-0" />
+            Pipelines &amp; Jobs
+          </button>
+        </div>
+      )}
     </aside>
   )
 }
