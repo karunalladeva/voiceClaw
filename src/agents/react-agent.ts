@@ -9,7 +9,11 @@ import * as path from 'path';
 // @ts-ignore
 import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { MCPClientManager } from './mcp-client';
-import { AgentFactory } from './agent-factory';
+import {
+  AgentFactory,
+  extractToolOutputFromEvent,
+  SKILL_RUN_INCOMPLETE_MARKER,
+} from './agent-factory';
 import { SkillRegistry } from '../skills/registry';
 import { configManager } from '../config/index';
 import { modelRegistry } from '../models/model-registry';
@@ -35,6 +39,7 @@ import type { AgentRunOptions } from './agent-run-options';
 import { DEFAULT_ORG_MODEL_ID } from '../orchestration/agent-normalizer';
 import { getAgentRunContext, getAgentRunStorage, toTaskArtifactScope, type AgentRunContext } from './agent-run-context';
 import { persistTaskResponse } from '../orchestration/task-response-store';
+import { isInferenceInterruptError } from '../utils/inference-interrupt';
 
 export type { AgentRunOptions } from './agent-run-options';
 
@@ -417,9 +422,16 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
               skillName: skill.name,
             });
 
+            let skillFailed = false;
             for await (const skillEvent of this.agentFactory.runStream(skill, query)) {
-              if (skillEvent.type === 'text_done' || skillEvent.type === 'error') {
+              if (skillEvent.type === 'text_done') {
                 finalOutput = skillEvent.data;
+                if (finalOutput.includes(SKILL_RUN_INCOMPLETE_MARKER)) {
+                  skillFailed = true;
+                }
+              } else if (skillEvent.type === 'error') {
+                skillFailed = true;
+                if (!finalOutput.trim()) finalOutput = skillEvent.data;
               }
             }
 
@@ -438,7 +450,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
                 responderType: 'skill',
                 content: finalOutput,
                 agentId: runCtx.orgAgentId,
-                success: true,
+                success: !skillFailed,
               });
             }
           } catch (e: any) {
@@ -528,6 +540,14 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       for (const msg of output.messages) {
         if (!msg.content || msg.content.length <= 12000) continue;
         const contentStr = msg.content.toString();
+        if (contentStr.includes('[Sub-Agent Result from')) {
+          if (contentStr.length > 12000) {
+            msg.content =
+              contentStr.substring(0, 12000) +
+              '\n\n...[Sub-agent handoff truncated — delegation JSON should appear above]...';
+          }
+          continue;
+        }
         if (hasVolatileNumericToolOutput(contentStr)) {
           console.warn(`[Agent: ReAct] Preserving volatile numeric tool output via truncation (no LLM summarize)`);
           msg.content =
@@ -1198,6 +1218,9 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           orgAgentId: options.orgAgentId,
         }
       : undefined;
+    let fullText = '';
+    let orchestrationComplete = false;
+    let skillRouteActive = false;
     try {
       const resolved = await this.resolveRunModel(modelId);
       resolvedModelId = resolved.resolvedModelId;
@@ -1236,7 +1259,6 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           new HumanMessage({ content: input }),
         ],
       };
-      let fullText = '';
       agentEvents.emit('model:inference_start', { chatId, agentId, modelId: resolvedModelId });
       const stream = runGraph.streamEvents(inputMessages, {
         version: 'v2',
@@ -1245,11 +1267,28 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       });
       const als = getAgentRunStorage();
       async function* iterateStream(): AsyncGenerator<any> {
-        for await (const event of stream) {
-          yield event;
+        try {
+          for await (const event of stream) {
+            yield event;
+          }
+        } catch (streamInnerErr: unknown) {
+          if (!orchestrationComplete) throw streamInnerErr;
         }
       }
       const streamIterator = iterateStream();
+      const closeOrchestrationStream = async (): Promise<void> => {
+        try {
+          if (runCtx) {
+            await als.run(runCtx, () => streamIterator.return(undefined));
+          } else {
+            await streamIterator.return(undefined);
+          }
+        } catch (closeErr: unknown) {
+          if (!isInferenceInterruptError(closeErr)) {
+            console.warn('[Orchestration] stream close:', closeErr);
+          }
+        }
+      };
       let streamStep = runCtx
         ? await als.run(runCtx, () => streamIterator.next())
         : await streamIterator.next();
@@ -1268,22 +1307,101 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           }
         } else if (event.event === 'on_tool_start' && options.orgTaskId) {
           const toolName = event.name || 'unknown';
+          if (toolName === 'web_search' || toolName === 'web_fetch') {
+            streamStep = runCtx
+              ? await als.run(runCtx, () => streamIterator.next())
+              : await streamIterator.next();
+            continue;
+          }
+          if (toolName === 'route_to_skill') {
+            skillRouteActive = true;
+          }
           yield { type: 'tool_call', data: toolName };
+          agentEvents.emit('tool:started', { chatId, agentId, toolName });
           console.log(`[Orchestration] Tool: ${toolName}`);
-        } else if (event.event === 'on_tool_end' && runCtx) {
+        } else if (event.event === 'on_tool_end' && options.orgTaskId) {
           const toolName = event.name || 'unknown';
-          if (toolName === 'route_to_skill') continue;
-          const toolOutput = (event.data?.output ?? '').toString().trim();
-          if (!toolOutput) continue;
-          persistTaskResponse({
-            task: toTaskArtifactScope(runCtx),
-            responderId: toolName,
-            responderType: 'tool',
-            content: toolOutput,
-            agentId: runCtx.orgAgentId,
-            success: true,
-          });
-        } else if (event.event === 'on_chain_end' && event.name === 'agent') {
+          const toolOutput = extractToolOutputFromEvent(event.data).trim();
+          if (toolName === 'route_to_skill') {
+            // Nested skill web_search/web_fetch bubble as on_tool_end with parent name route_to_skill.
+            // Only finish when the tool actually returned its handoff envelope.
+            const isSkillHandoff = toolOutput.includes('[Sub-Agent Result from');
+            if (!isSkillHandoff) {
+              if (skillRouteActive && toolOutput) {
+                console.log(
+                  `[Orchestration] Ignoring bubbled tool output during route_to_skill (${toolOutput.length} chars)`,
+                );
+              }
+              streamStep = runCtx
+                ? await als.run(runCtx, () => streamIterator.next())
+                : await streamIterator.next();
+              continue;
+            }
+            skillRouteActive = false;
+            const incomplete = toolOutput.includes(SKILL_RUN_INCOMPLETE_MARKER);
+            const failed =
+              !incomplete &&
+              (toolOutput.includes('No text output produced') ||
+                toolOutput.startsWith('Skill crashed:'));
+            if (!failed) {
+              fullText = toolOutput;
+              orchestrationComplete = true;
+              if (incomplete) {
+                agentEvents.emit('system:log', {
+                  chatId,
+                  agentId,
+                  level: 'warn',
+                  message: 'Skill returned partial handoff — task should stay in progress for retry',
+                });
+              }
+              if (runCtx) {
+                persistTaskResponse({
+                  task: toTaskArtifactScope(runCtx),
+                  responderId: options.orgAgentId ?? 'orchestrator',
+                  responderType: 'agent',
+                  content: toolOutput,
+                  agentId: runCtx.orgAgentId,
+                  success: true,
+                });
+              }
+              agentEvents.emit('tool:completed', {
+                chatId,
+                agentId,
+                toolName,
+                toolResult: toolOutput.substring(0, 200),
+              });
+              agentEvents.emit('system:log', {
+                chatId,
+                agentId,
+                level: 'info',
+                message: `Skill handoff ready (${toolOutput.length} chars) — delegating without parent re-inference`,
+              });
+              console.log(
+                `[Orchestration] route_to_skill handoff (${toolOutput.length} chars) — ending run`,
+              );
+            }
+          } else if (
+            toolName !== 'web_search' &&
+            toolName !== 'web_fetch' &&
+            toolOutput &&
+            runCtx
+          ) {
+            persistTaskResponse({
+              task: toTaskArtifactScope(runCtx),
+              responderId: toolName,
+              responderType: 'tool',
+              content: toolOutput,
+              agentId: runCtx.orgAgentId,
+              success: true,
+            });
+            agentEvents.emit('tool:completed', {
+              chatId,
+              agentId,
+              toolName,
+              toolResult: toolOutput.substring(0, 200),
+            });
+          }
+        } else if (event.event === 'on_chain_end' && event.name === 'agent' && !skillRouteActive) {
           const messages = event.data?.output?.messages as Array<{ content?: unknown }> | undefined;
           if (messages?.length) {
             for (let i = messages.length - 1; i >= 0; i--) {
@@ -1303,9 +1421,18 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
             }
           }
         }
-        streamStep = runCtx
-          ? await als.run(runCtx, () => streamIterator.next())
-          : await streamIterator.next();
+        if (orchestrationComplete) {
+          await closeOrchestrationStream();
+          break;
+        }
+        try {
+          streamStep = runCtx
+            ? await als.run(runCtx, () => streamIterator.next())
+            : await streamIterator.next();
+        } catch (streamErr: unknown) {
+          if (orchestrationComplete || isInferenceInterruptError(streamErr)) break;
+          throw streamErr;
+        }
       }
       agentEvents.emit('model:inference_end', { chatId, agentId, modelId: resolvedModelId });
       agentEvents.emit('agent:completed', {
@@ -1326,6 +1453,27 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       }
       yield { type: 'text_done', data: fullText || 'No output produced.' };
     } catch (error: any) {
+      if (orchestrationComplete && fullText.trim()) {
+        agentEvents.emit('model:inference_end', { chatId, agentId, modelId: resolvedModelId });
+        agentEvents.emit('agent:completed', {
+          chatId,
+          agentId,
+          duration: Date.now() - startTime,
+          output: fullText.substring(0, 200),
+        });
+        if (runCtx && options.orgAgentId) {
+          persistTaskResponse({
+            task: toTaskArtifactScope(runCtx),
+            responderId: options.orgAgentId,
+            responderType: 'agent',
+            content: fullText,
+            agentId: options.orgAgentId,
+            success: true,
+          });
+        }
+        yield { type: 'text_done', data: fullText };
+        return;
+      }
       agentEvents.emit('agent:error', { chatId, agentId, error: error.message });
       yield { type: 'error', data: this.handleError(error) };
     }

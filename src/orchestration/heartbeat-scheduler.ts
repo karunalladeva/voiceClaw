@@ -289,7 +289,12 @@ class HeartbeatScheduler extends EventEmitter {
           title: `Heartbeat output: ${workTask.title}`,
           content: output,
         };
-        if (detectAwaitingUserInput(output, workTask)) {
+        if (output.includes('[SKILL_RUN_INCOMPLETE]')) {
+          console.warn(
+            `[Orchestration] ${agent.name} skill run incomplete on "${workTask.title}" — saving partial work, keeping task in progress`,
+          );
+          await taskWorkflow.saveWorkProduct(workTask.id, agentId, workProduct);
+        } else if (detectAwaitingUserInput(output, workTask)) {
           const question = extractUserClarificationQuestion(output, workTask);
           console.log(
             `[Orchestration] ${agent.name} awaiting user input on "${workTask.title}" — routing to clarification`,
@@ -301,33 +306,40 @@ class HeartbeatScheduler extends EventEmitter {
             workProduct,
           );
         } else {
-        const reports = await agentRegistry.getDirectReports(agent.id);
-        if (reports.length > 0) {
-          const { tasks: spawned, spawnedNewly } = await ensureTeamDelegation(
-            agent,
-            workTask,
-            output,
-          );
-          if (spawned.length === 0) {
-            console.warn(
-              `[Orchestration] ${agent.name} completed "${workTask.title}" without creating subtasks`,
-            );
-            await taskManager.complete(workTask.id, agentId, workProduct);
-          } else {
-            console.log(
-              `[Orchestration] ${agent.name} delegated ${spawned.length} subtask(s) to team`,
-            );
-            await taskWorkflow.saveWorkProduct(workTask.id, agentId, {
-              type: 'artifact',
-              title: `Delegation plan: ${workTask.title}`,
-              content: output,
-            });
-            if (spawnedNewly) {
-              await markParentAwaitingSubtasks(workTask, spawned, agentId, false);
-            }
+        const currentTask = await taskManager.getTaskById(workTask.id);
+        const isStillCheckedOut = currentTask?.status === 'in_progress' && currentTask?.checkedOutBy === agentId;
+        if (!isStillCheckedOut) {
+          console.log(`[Orchestration] Task "${workTask.title}" was released during heartbeat (status: ${currentTask?.status}) — skipping completion`);
+          if (workProduct.content) {
+            await taskWorkflow.saveWorkProduct(workTask.id, agentId, workProduct);
           }
         } else {
-          await taskManager.complete(workTask.id, agentId, workProduct);
+          const reports = await agentRegistry.getDirectReports(agent.id);
+          if (reports.length > 0) {
+            const { tasks: spawned } = await ensureTeamDelegation(
+              agent,
+              workTask,
+              output,
+            );
+            if (spawned.length === 0) {
+              console.warn(
+                `[Orchestration] ${agent.name} completed "${workTask.title}" without creating subtasks`,
+              );
+              await taskManager.complete(workTask.id, agentId, workProduct);
+            } else {
+              console.log(
+                `[Orchestration] ${agent.name} delegated ${spawned.length} subtask(s) to team`,
+              );
+              await taskWorkflow.saveWorkProduct(workTask.id, agentId, {
+                type: 'artifact',
+                title: `Delegation plan: ${workTask.title}`,
+                content: output,
+              });
+              await markParentAwaitingSubtasks(workTask, spawned, agentId, false);
+            }
+          } else {
+            await taskManager.complete(workTask.id, agentId, workProduct);
+          }
         }
         }
       }
