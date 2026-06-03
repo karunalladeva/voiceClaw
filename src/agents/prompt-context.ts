@@ -1,3 +1,5 @@
+import { extractStockSymbols } from '../utils/stock-tickers';
+
 /** Extract plain text from string or multimodal user input. */
 export function extractUserQueryText(input: string | unknown): string {
   if (typeof input === 'string') return input.trim();
@@ -75,7 +77,8 @@ export function hasVolatileNumericToolOutput(content: string): boolean {
   return false;
 }
 
-const MARKET_TOOLS = /\b(yfinance|market_snapshot|get_quote|stock_price|trading-)\b/i;
+const MARKET_TOOLS =
+  /\b(yahoo_ohlcv|yahoo_news|yfinance|market_snapshot|get_quote|stock_price|ccxt_|trading-)\b/i;
 const MEMORY_ONLY_TOOLS = /\b(list_memories|search_memory|store_memory)\b/i;
 
 export function isMemoryOnlyToolName(toolName: string): boolean {
@@ -85,6 +88,7 @@ export function isMemoryOnlyToolName(toolName: string): boolean {
 export function toolTraceHasAdequateLiveData(
   toolTrace: Array<{ tool: string; args?: Record<string, unknown> }>,
   domain: LiveLookupDomain,
+  userQuery?: string,
 ): boolean {
   if (toolTrace.length === 0) return false;
   const names = toolTrace.map((t) => t.tool);
@@ -95,13 +99,42 @@ export function toolTraceHasAdequateLiveData(
   );
   if (domain === 'markets') {
     const usedMarket = names.some((n) => MARKET_TOOLS.test(n));
-    if (usedMarket) return true;
-    return usedWebSearch && usedWebFetch;
+    if (!usedMarket) return usedWebSearch && usedWebFetch;
+
+    const requested = extractStockSymbols(userQuery?.trim() || '');
+    if (requested.length <= 1) return true;
+
+    const fetched = new Set<string>();
+    for (const t of toolTrace) {
+      if (!/^yahoo_/i.test(t.tool)) continue;
+      const sym = t.args?.symbol;
+      if (typeof sym === 'string' && sym.trim()) {
+        fetched.add(sym.trim().toUpperCase());
+      }
+    }
+    const minRequired = Math.min(requested.length, 3);
+    const covered = requested.filter((s) => fetched.has(s)).length;
+    return covered >= minRequired || fetched.size >= minRequired;
   }
   if (domain === 'sports' || domain === 'weather' || domain === 'news' || domain === 'general') {
     return (usedWebSearch && usedWebFetch) || usedWebResearcher;
   }
   return usedWebSearch || usedWebFetch || usedWebResearcher;
+}
+
+const EMBEDDED_MARKET_MARKER = '## Market data for ';
+
+export function inputHasEmbeddedMarketData(text: string): boolean {
+  return text.includes(EMBEDDED_MARKET_MARKER);
+}
+
+/** User message is synthesizing over pipeline/Yahoo blocks already in context. */
+export function isSynthesisOverProvidedData(text: string): boolean {
+  const t = text.trim();
+  if (!inputHasEmbeddedMarketData(t)) return false;
+  return /\b(summarize|summary|synthesis|analyze each|recommendations?|key metrics|per symbol|each of the|for each)\b/i.test(
+    t,
+  );
 }
 
 /** T20 cricket reply with impossible overs remaining. */

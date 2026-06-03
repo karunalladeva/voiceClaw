@@ -1,5 +1,5 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { HumanMessage, AIMessage, SystemMessage, BaseMessage } from '@langchain/core/messages';
+import { HumanMessage, AIMessage, SystemMessage, BaseMessage, ToolMessage } from '@langchain/core/messages';
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { StateGraph, MessagesAnnotation } from '@langchain/langgraph';
 import { z } from 'zod';
@@ -9,11 +9,18 @@ import * as path from 'path';
 // @ts-ignore
 import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { MCPClientManager } from './mcp-client';
+import { AgentFactory, extractToolOutputFromEvent, SKILL_RUN_INCOMPLETE_MARKER } from './agent-factory';
 import {
-  AgentFactory,
-  extractToolOutputFromEvent,
-  SKILL_RUN_INCOMPLETE_MARKER,
-} from './agent-factory';
+  capOrchestratorHandoff,
+  ORCHESTRATOR_HANDOFF_MAX_CHARS,
+  parseIncompleteSkillId,
+} from './skill-handoff';
+import { invokeWithToolXmlFallback } from '../utils/ollama-tool-call';
+import {
+  buildBlockedSkillRouteResult,
+  registerBlockedSkill,
+  resolveBlockedSkillIdsForRun,
+} from './skill-route-guard';
 import { SkillRegistry } from '../skills/registry';
 import { configManager } from '../config/index';
 import { modelRegistry } from '../models/model-registry';
@@ -28,6 +35,7 @@ import { historyManager } from './agent-history';
 import {
   extractUserQueryText,
   isCasualMessage,
+  isSynthesisOverProvidedData,
   requiresLiveLookup,
   getLiveLookupDomain,
   hasVolatileNumericToolOutput,
@@ -35,11 +43,20 @@ import {
   failsCricketSanityCheck,
   type LiveLookupDomain,
 } from './prompt-context';
+import {
+  capUserInputForInference,
+  debugLogPromptMessages,
+  logPromptSizes,
+  marketSymbolStatsFromHumanInput,
+  sumMessagesChars,
+} from '../utils/prompt-budget';
+import type { SkillRoutingMode } from '../skills/registry';
 import type { AgentRunOptions } from './agent-run-options';
 import { DEFAULT_ORG_MODEL_ID } from '../orchestration/agent-normalizer';
 import { getAgentRunContext, getAgentRunStorage, toTaskArtifactScope, type AgentRunContext } from './agent-run-context';
 import { persistTaskResponse } from '../orchestration/task-response-store';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
+import { truncateToolOutput } from '../utils/tool-output-truncate';
 
 export type { AgentRunOptions } from './agent-run-options';
 
@@ -392,6 +409,15 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           const skill = this.skillRegistry.getSkill(skillId);
           if (!skill || !skill.enabled) return `Skill ${skillId} not found or disabled.`;
 
+          const blocked = await resolveBlockedSkillIdsForRun();
+          if (blocked.has(skillId)) {
+            const taskId = getAgentRunContext()?.orgTaskId ?? 'n/a';
+            console.warn(
+              `[route_to_skill] Hard block: "${skillId}" already incomplete on task ${taskId}`,
+            );
+            return buildBlockedSkillRouteResult(skill.name, skillId);
+          }
+
           const subAgentId = `skill-${skill.id}-${Date.now()}`;
           const parentAgentId = (config as any)?.agentId || 'main';
           const chatId = (config as any)?.chatId || 'default';
@@ -435,6 +461,13 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
               }
             }
 
+            if (
+              skillFailed ||
+              finalOutput.includes(SKILL_RUN_INCOMPLETE_MARKER)
+            ) {
+              registerBlockedSkill(parseIncompleteSkillId(finalOutput) ?? skill.id);
+            }
+
             agentEvents.emit('skill:completed', {
               agentId: subAgentId,
               chatId,
@@ -475,7 +508,10 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
             if (releaseSkillSlot) releaseSkillSlot();
           }
 
-          return `[Sub-Agent Result from ${skill.name}]:\n${finalOutput || 'No text output produced.'}`;
+          const handoffBody = capOrchestratorHandoff(
+            finalOutput || 'No text output produced.',
+          );
+          return `[Sub-Agent Result from ${skill.name}]:\n${handoffBody}`;
         }
       })
     ];
@@ -528,7 +564,11 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         return msg;
       }).reverse();
 
-      const response = await llmWithTools.invoke(optimizedMessages);
+      const response = await invokeWithToolXmlFallback(
+        llmWithTools,
+        llm,
+        optimizedMessages,
+      );
       return { messages: [response] };
     };
 
@@ -541,18 +581,27 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         if (!msg.content || msg.content.length <= 12000) continue;
         const contentStr = msg.content.toString();
         if (contentStr.includes('[Sub-Agent Result from')) {
-          if (contentStr.length > 12000) {
-            msg.content =
-              contentStr.substring(0, 12000) +
-              '\n\n...[Sub-agent handoff truncated — delegation JSON should appear above]...';
+          if (contentStr.length > ORCHESTRATOR_HANDOFF_MAX_CHARS) {
+            msg.content = capOrchestratorHandoff(contentStr);
           }
+          continue;
+        }
+        if (msg instanceof ToolMessage && msg.name === 'web_fetch') {
+          console.warn(`[Agent: ReAct] Truncating web_fetch markdown (no LLM summarize)`);
+          msg.content = truncateToolOutput(
+            contentStr,
+            12000,
+          ).replace(
+            '[TRUNCATED for context window]',
+            '[TRUNCATED — use web_fetch with part=1,2,… or focus= subtopic. Do not invent missing facts.]',
+          );
           continue;
         }
         if (hasVolatileNumericToolOutput(contentStr)) {
           console.warn(`[Agent: ReAct] Preserving volatile numeric tool output via truncation (no LLM summarize)`);
           msg.content =
             contentStr.substring(0, 12000) +
-            '\n\n...[OUTPUT TRUNCATED — use web_fetch with offset to read more. Do not invent missing numbers.]...';
+            '\n\n...[OUTPUT TRUNCATED — use web_fetch with part=1+ or focus to read more. Do not invent missing numbers.]...';
           continue;
         }
         const modelId = this.activeModelId;
@@ -578,6 +627,14 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
     const shouldContinue = (state: typeof MessagesAnnotation.State) => {
       const lastMessage = state.messages[state.messages.length - 1] as any;
+      if (
+        lastMessage instanceof ToolMessage &&
+        lastMessage.name === 'route_to_skill' &&
+        String(lastMessage.content ?? '').includes('[Sub-Agent Result from') &&
+        getAgentRunContext()?.orgTaskId
+      ) {
+        return '__end__';
+      }
       if (lastMessage.tool_calls?.length) return 'tools';
       return '__end__';
     };
@@ -600,10 +657,13 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
   // ── System prompt / memory ─────────────────────────────────────────────────
 
-  private getSystemPrompt(userQuery?: string, skillAllowlist?: string[]): string {
+  private getSystemPrompt(userQuery?: string, skillAllowlist?: string[], routingMode?: SkillRoutingMode): string {
+    const mode: SkillRoutingMode =
+      routingMode ??
+      (isSynthesisOverProvidedData(userQuery || '') ? 'synthesis' : 'auto');
     return (
       this.getBaseSystemPrompt() +
-      this.skillRegistry.buildRoutingPrompt(userQuery, skillAllowlist) +
+      this.skillRegistry.buildRoutingPrompt(userQuery, skillAllowlist, mode) +
       this.skillRegistry.getLearnedSkillsContext()
     );
   }
@@ -619,8 +679,13 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
   ): Promise<string> {
     const queryText = extractUserQueryText(input);
     const query = queryText.toLowerCase() || 'general user context';
-    const base = this.getSystemPrompt(queryText, skillAllowlist);
-    const needsLive = requiresLiveLookup(queryText);
+    const synthesis = isSynthesisOverProvidedData(queryText);
+    const base = this.getSystemPrompt(
+      queryText,
+      skillAllowlist,
+      synthesis ? 'synthesis' : 'auto',
+    );
+    const needsLive = requiresLiveLookup(queryText) && !synthesis;
     if (needsLive) {
       const domain = getLiveLookupDomain(queryText);
       return base + this.buildLiveDataRequiredBlock(domain) + this.buildTemporalMemoryGuard();
@@ -726,10 +791,57 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     await historyManager.saveChat(chatId, typeof humanInput === 'string' ? humanInput : undefined);
   }
 
-  private async selectContextMessages(chatId: string, input: string | any): Promise<BaseMessage[]> {
-    const inputSize = typeof input === 'string' ? input.length : 300;
-    const budget = Math.max(6000, ReactAgent.MAX_CONTEXT_CHARS - inputSize);
+  private async selectContextMessages(
+    chatId: string,
+    reservedChars: number,
+  ): Promise<BaseMessage[]> {
+    const maxTotal = configManager.getConfig().agent.maxPromptChars ?? 30_000;
+    const budget = Math.max(2000, maxTotal - reservedChars);
     return historyManager.buildLlmContextMessages(chatId, budget);
+  }
+
+  /** Apply total prompt budget: shrink human input if system + history + human exceed cap. */
+  private applyPromptBudget(
+    systemPrompt: string,
+    input: string | any,
+    contextMessages: BaseMessage[],
+  ): { systemPrompt: string; input: string | any; contextMessages: BaseMessage[] } {
+    const maxTotal = configManager.getConfig().agent.maxPromptChars ?? 30_000;
+    let sys = systemPrompt;
+    let human = input;
+    let ctx = contextMessages;
+
+    const humanLen = typeof human === 'string' ? human.length : 300;
+    let historyLen = sumMessagesChars(ctx);
+    let total = sys.length + humanLen + historyLen;
+
+    if (total <= maxTotal) {
+      return { systemPrompt: sys, input: human, contextMessages: ctx };
+    }
+
+    if (isSynthesisOverProvidedData(extractUserQueryText(human)) && sys.length > 8000) {
+      const queryText = extractUserQueryText(human);
+      sys =
+        this.getSystemPrompt(queryText, undefined, 'synthesis') +
+        this.skillRegistry.getLearnedSkillsContext();
+      total = sys.length + humanLen + historyLen;
+    }
+
+    if (total > maxTotal && historyLen > 2000) {
+      const trimHistory = Math.max(2000, historyLen - (total - maxTotal));
+      ctx = ctx.slice(-Math.max(2, Math.floor((trimHistory / historyLen) * ctx.length)));
+      historyLen = sumMessagesChars(ctx);
+      total = sys.length + humanLen + historyLen;
+    }
+
+    if (total > maxTotal && typeof human === 'string') {
+      const queryText = extractUserQueryText(human);
+      const room = Math.max(2000, maxTotal - sys.length - historyLen);
+      human = capUserInputForInference(human, room, queryText);
+      total = sys.length + human.length + historyLen;
+    }
+
+    return { systemPrompt: sys, input: human, contextMessages: ctx };
   }
 
 
@@ -778,14 +890,31 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
 
     try {
-      const systemPrompt = await this.buildSystemPromptWithMemory(input);
+      let systemPrompt = await this.buildSystemPromptWithMemory(input);
       await historyManager.loadChat(chatId);
-      const contextMessages = await this.selectContextMessages(chatId, input);
+      const inputLen = typeof input === 'string' ? input.length : 300;
+      let contextMessages = await this.selectContextMessages(chatId, systemPrompt.length + inputLen);
+      const budgeted = this.applyPromptBudget(systemPrompt, input, contextMessages);
+      systemPrompt = budgeted.systemPrompt;
+      const cappedInput = budgeted.input;
+      contextMessages = budgeted.contextMessages;
+      const humanChars = typeof cappedInput === 'string' ? cappedInput.length : inputLen;
+      const symStats =
+        typeof cappedInput === 'string'
+          ? marketSymbolStatsFromHumanInput(cappedInput)
+          : { inHuman: 0, requested: 0 };
+      logPromptSizes({
+        systemChars: systemPrompt.length,
+        humanChars,
+        historyChars: sumMessagesChars(contextMessages),
+        symbolsInHuman: symStats.inHuman || undefined,
+        symbolsRequested: symStats.requested || undefined,
+      });
       const result = await this.graph.invoke({
         messages: [
           new SystemMessage(systemPrompt),
           ...contextMessages,
-          new HumanMessage({ content: input }),
+          new HumanMessage({ content: cappedInput }),
         ],
       }, { recursionLimit: 100 });
 
@@ -843,7 +972,8 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     });
 
     const queryText = extractUserQueryText(input);
-    const needsLive = requiresLiveLookup(queryText);
+    const synthesisInput = isSynthesisOverProvidedData(queryText);
+    const needsLive = requiresLiveLookup(queryText) && !synthesisInput;
     const liveDomain = getLiveLookupDomain(queryText);
 
     const rawKey = typeof input === 'string' ? input.trim().toLowerCase() : '[audio]';
@@ -917,6 +1047,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     const attemptHistory: Array<{ attempt: number; response: string }> = [];
     let pendingLiveRetryPrefix = '';
     let liveToolRetryDone = false;
+    let synthesisRetryDone = false;
     let sanityRetryDone = false;
 
     const liveExtraSlots = needsLive ? 2 : 0;
@@ -963,10 +1094,39 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         pendingLiveRetryPrefix = '';
 
         await historyManager.loadChat(chatId);
-        const contextMessages = await this.selectContextMessages(chatId, input);
+        const humanLenEst =
+          typeof processedInput === 'string' ? processedInput.length : 300;
+        let contextMessages = await this.selectContextMessages(
+          chatId,
+          systemPrompt.length + retryPrefix.length + humanLenEst,
+        );
+        const budgeted = this.applyPromptBudget(
+          systemPrompt + retryPrefix,
+          processedInput,
+          contextMessages,
+        );
+        let sysForRun = budgeted.systemPrompt;
+        processedInput = budgeted.input;
+        contextMessages = budgeted.contextMessages;
+
+        const humanChars =
+          typeof processedInput === 'string' ? processedInput.length : humanLenEst;
+        const historyChars = sumMessagesChars(contextMessages);
+        const symStats =
+          typeof processedInput === 'string'
+            ? marketSymbolStatsFromHumanInput(processedInput)
+            : { inHuman: 0, requested: 0 };
+        logPromptSizes({
+          systemChars: sysForRun.length,
+          humanChars,
+          historyChars,
+          symbolsInHuman: symStats.inHuman || undefined,
+          symbolsRequested: symStats.requested || undefined,
+        });
+
         const inputMessages = {
           messages: [
-            new SystemMessage(systemPrompt + retryPrefix),
+            new SystemMessage(sysForRun),
             ...contextMessages,
             new HumanMessage({ content: processedInput }),
           ],
@@ -977,7 +1137,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         let thinkingBuffer = '';
         const toolTrace: Array<{ tool: string; args: any }> = [];
 
-        console.log('Input messages:', inputMessages);
+        debugLogPromptMessages('Input messages', inputMessages.messages);
         let toolWasCalled = false;
         const stream = this.graph.streamEvents(inputMessages, { version: 'v2', signal, recursionLimit: 100 });
 
@@ -1077,7 +1237,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         }
 
         if (needsLive) {
-          const adequate = toolTraceHasAdequateLiveData(toolTrace, liveDomain);
+          const adequate = toolTraceHasAdequateLiveData(toolTrace, liveDomain, queryText);
           const toolsListed = toolTrace.map((t) => t.tool).join(',') || 'none';
           console.log(
             `[ReAct Agent] live_lookup domain=${liveDomain} tools=[${toolsListed}] adequate=${adequate} cache_skipped=${needsLive}`,
@@ -1090,9 +1250,27 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           });
           if (!adequate && !liveToolRetryDone) {
             liveToolRetryDone = true;
+            const { extractStockSymbols } = await import('../utils/stock-tickers');
+            const symbols = extractStockSymbols(queryText);
+            const symHint =
+              symbols.length > 1
+                ? ` For each requested symbol call yahoo_ohlcv and yahoo_news (need at least ${Math.min(symbols.length, 3)} symbols with data): ${symbols.slice(0, 12).join(', ')}.`
+                : '';
             pendingLiveRetryPrefix =
-              '\n\n[LIVE DATA REQUIRED] Use web_search then web_fetch (or trading market tools for stocks). list_memories/search_memory are NOT live sources. Do not guess numbers.';
+              `\n\n[LIVE DATA REQUIRED] Use yahoo_ohlcv and yahoo_news for stocks (or web_search then web_fetch if no market tools). list_memories/search_memory are NOT live sources. Do not guess numbers.${symHint}`;
             yield { type: 'thinking', data: 'Fetching fresh live data…' };
+            continue;
+          }
+          if (
+            !fullText.trim() &&
+            toolWasCalled &&
+            adequate &&
+            !synthesisRetryDone
+          ) {
+            synthesisRetryDone = true;
+            pendingLiveRetryPrefix =
+              '\n\n[TOOLS COMPLETE] Live data is in the tool messages above. Write the full analysis now in plain text for every requested symbol. Do not call tools again unless a symbol has no OHLCV/news data.';
+            yield { type: 'thinking', data: 'Writing analysis from live tool data…' };
             continue;
           }
           if (
@@ -1109,7 +1287,12 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         }
 
         const failureAssessment = learningEngine.assessFailure(fullText);
-        if (attempt < maxRetries && failureAssessment.shouldRetry) {
+        const skipEmptyFailureRetry =
+          !fullText.trim() &&
+          toolWasCalled &&
+          needsLive &&
+          toolTraceHasAdequateLiveData(toolTrace, liveDomain, queryText);
+        if (attempt < maxRetries && failureAssessment.shouldRetry && !skipEmptyFailureRetry) {
           const modelId = this.activeModelId;
           console.log(`[Agent: ReAct] [Model: ${modelId}] Response indicates failure (${failureAssessment.failureType}). Attempting to recover… (attempt ${attempt + 1}/${maxRetries})`);
           attemptHistory.push({ attempt: attempt + 1, response: fullText });
@@ -1499,6 +1682,9 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
     if (error.code === 'ECONNREFUSED' || error.message?.includes('fetch failed')) {
       return 'I cannot connect to my brain. Please check that the model server is running.';
+    }
+    if (typeof error.message === 'string' && /XML syntax error/i.test(error.message)) {
+      return 'The model emitted a malformed tool call (Ollama XML parse error). The heartbeat will retry; if this persists, try a different model or shorten prior tool output.';
     }
     if (
       error.message?.includes('Unsupported content type') ||

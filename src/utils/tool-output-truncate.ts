@@ -13,14 +13,23 @@ function normalizeToolContent(content: unknown): string {
   return content.toString();
 }
 
+function truncateAtLineBoundary(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const slice = text.slice(0, maxChars);
+  const lastBreak = slice.lastIndexOf('\n');
+  if (lastBreak > maxChars * 0.5) {
+    return slice.slice(0, lastBreak).trimEnd() + TRUNCATION_SUFFIX;
+  }
+  return slice.trimEnd() + TRUNCATION_SUFFIX;
+}
+
 /** Truncate a single tool result string for LLM context limits. */
 export function truncateToolOutput(
   content: unknown,
   maxChars: number = DEFAULT_TOOL_OUTPUT_MAX_CHARS,
 ): string {
   const text = normalizeToolContent(content);
-  if (text.length <= maxChars) return text;
-  return text.substring(0, maxChars) + TRUNCATION_SUFFIX;
+  return truncateAtLineBoundary(text, maxChars);
 }
 
 /** Mutates tool messages in place after ToolNode execution. */

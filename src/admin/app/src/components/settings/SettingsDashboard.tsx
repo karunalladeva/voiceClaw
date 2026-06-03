@@ -8,6 +8,7 @@ import { WorkspacePanel } from './WorkspacePanel'
 import { ChannelsPanel } from './ChannelsPanel'
 import { ComfyUIPanel } from './ComfyUIPanel'
 import { LlamaCppPanel } from './LlamaCppPanel'
+import { SearXngPanel } from './SearXngPanel'
 import type { SettingsTab } from './settings-tabs'
 
 const TABS: { id: SettingsTab; label: string }[] = [
@@ -16,6 +17,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'memory', label: 'Memory' },
   { id: 'skills', label: 'Skills' },
   { id: 'channels', label: 'Channels' },
+  { id: 'searxng', label: 'SearXNG' },
   { id: 'comfyui', label: 'ComfyUI' },
   { id: 'llamacpp', label: 'llama.cpp' },
   { id: 'workspace', label: 'Workspace' },
@@ -49,6 +51,7 @@ export function SettingsDashboard() {
       {activeTab === 'memory' && <MemoryPanel />}
       {activeTab === 'skills' && <SkillsPanel />}
       {activeTab === 'channels' && <ChannelsPanel />}
+      {activeTab === 'searxng' && <SearXngPanel />}
       {activeTab === 'comfyui' && <ComfyUIPanel />}
       {activeTab === 'llamacpp' && <LlamaCppPanel />}
       {activeTab === 'workspace' && <WorkspacePanel />}

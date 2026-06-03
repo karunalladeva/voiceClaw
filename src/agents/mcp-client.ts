@@ -5,6 +5,7 @@ import { z } from "zod";
 import * as path from "path";
 
 import { filterMemoriesForContext, isValidLongTermMemory } from './memory-policy';
+import { isPipeClosedError } from '../utils/pipe-errors';
 
 export class MCPClientManager {
   private clients: Map<string, Client> = new Map();
@@ -254,5 +255,21 @@ export class MCPClientManager {
       connectedServers: this.clients.size,
       loadedTools: this.tools.length,
     };
+  }
+
+  /** Close all MCP child processes (call on gateway shutdown). */
+  async disconnectAll(): Promise<void> {
+    for (const [serverId, client] of this.clients.entries()) {
+      try {
+        await client.close();
+      } catch (err: unknown) {
+        if (!isPipeClosedError(err)) {
+          console.warn(`[MCP Client] Error closing ${serverId}:`, err);
+        }
+      }
+    }
+    this.clients.clear();
+    this.tools = [];
+    this.memoryServerId = undefined;
   }
 }

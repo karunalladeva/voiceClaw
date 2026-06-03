@@ -1,4 +1,10 @@
 import { DynamicStructuredTool } from '@langchain/core/tools';
+import type { StructuredOutputConfig } from './structured-output-types';
+
+export type SkillToolLimits = {
+  maxWebSearch?: number;
+  maxWebFetch?: number;
+};
 
 export interface SkillDefinition {
   id: string;
@@ -18,6 +24,10 @@ export interface SkillDefinition {
   model?: string;
   /** Optional temperature override */
   temperature?: number;
+  /** Optional fenced JSON contract (from skill-manifest.json only). */
+  structuredOutput?: StructuredOutputConfig;
+  /** Optional per-skill web tool caps (from skill-manifest.json only). */
+  toolLimits?: SkillToolLimits;
 }
 
 export abstract class BaseSkill {

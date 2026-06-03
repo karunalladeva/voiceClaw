@@ -7,6 +7,12 @@
 import { registerStep, StepResult } from './pipeline-engine';
 import { deliverToChannel } from './channels';
 import { historyManager } from '../agents/agent-history';
+import { configManager } from '../config';
+import {
+  packPipelineMarketContext,
+  saveFullPipelineResearchContext,
+} from '../utils/market-context-pack';
+import { extractStockSymbols } from '../utils/stock-tickers';
 
 interface SearchSnippet {
   title: string;
@@ -40,33 +46,30 @@ function stripHtml(value: string): string {
     .trim();
 }
 
-function extractStockSymbol(query: string, explicitSymbol?: string): string | null {
-  if (explicitSymbol && explicitSymbol !== 'MULTI') return explicitSymbol.toUpperCase();
-  const parenMatch = query.match(/\(([A-Z]{1,5})\)/);
-  if (parenMatch) return parenMatch[1];
-  const tickerMatch = query.match(/\b([A-Z]{2,5})\b(?:\s+stock|\s+ticker|\s+shares)?/i);
-  if (tickerMatch) return tickerMatch[1].toUpperCase();
-  return null;
-}
-
 async function fetchMarketResearchFallback(query: string, symbol?: string): Promise<string | null> {
-  const ticker = extractStockSymbol(query, symbol);
-  if (!ticker) return null;
+  const tickers = extractStockSymbols(query, symbol);
+  if (tickers.length === 0) return null;
   try {
     const { yahooOhlcvTool, yahooNewsTool } = await import('../tools/market-data');
-    const [ohlcv, news] = await Promise.all([
-      yahooOhlcvTool.invoke({ symbol: ticker, period: '1mo', interval: '1d', limit: 30 }),
-      yahooNewsTool.invoke({ symbol: ticker, limit: 8 }),
-    ]);
-    return [
-      `## Market data for ${ticker} (Yahoo Finance)`,
-      '',
-      '### Price / OHLCV',
-      typeof ohlcv === 'string' ? ohlcv : JSON.stringify(ohlcv, null, 2),
-      '',
-      '### Recent news',
-      typeof news === 'string' ? news : JSON.stringify(news, null, 2),
-    ].join('\n');
+    const sections: string[] = [];
+    for (const ticker of tickers.slice(0, 12)) {
+      const [ohlcv, news] = await Promise.all([
+        yahooOhlcvTool.invoke({ symbol: ticker, period: '1mo', interval: '1d', limit: 30 }),
+        yahooNewsTool.invoke({ symbol: ticker, limit: 8 }),
+      ]);
+      sections.push(
+        [
+          `## Market data for ${ticker} (Yahoo Finance)`,
+          '',
+          '### Price / OHLCV',
+          typeof ohlcv === 'string' ? ohlcv : JSON.stringify(ohlcv, null, 2),
+          '',
+          '### Recent news',
+          typeof news === 'string' ? news : JSON.stringify(news, null, 2),
+        ].join('\n'),
+      );
+    }
+    return sections.join('\n\n---\n\n');
   } catch {
     return null;
   }
@@ -262,6 +265,24 @@ registerStep('summarize', async (config, context): Promise<StepResult> => {
   }
 
   try {
+    const maxContext = configManager.getConfig().pipeline.contextMaxChars;
+    const packResult = packPipelineMarketContext(context, prompt, maxContext);
+    const { packed, sectionCount, droppedSections } = packResult;
+    if (
+      droppedSections > 0 ||
+      packResult.symbolsMissingFromResearch.length > 0 ||
+      packResult.symbolsRequested.length > packResult.symbolsIncluded.length
+    ) {
+      const artifactPath = await saveFullPipelineResearchContext(config, context);
+      console.log(
+        `[Pipeline] Summarize context: requested=[${packResult.symbolsRequested.join(',')}] ` +
+          `included=[${packResult.symbolsIncluded.join(',')}] ` +
+          `missing_research=[${packResult.symbolsMissingFromResearch.join(',')}] ` +
+          `dropped_sections=${droppedSections} packed_chars=${packed.length}` +
+          (artifactPath ? ` full_context=${artifactPath}` : ''),
+      );
+    }
+
     const { ReactAgent } = await import('../agents/react-agent');
     const agent = new ReactAgent();
     await agent.initialize([]);
@@ -269,13 +290,17 @@ registerStep('summarize', async (config, context): Promise<StepResult> => {
 
     let result = '';
     for await (const event of agent.processStream(
-      `${prompt}\n\n${context.substring(0, 8000)}`,
+      `${prompt}\n\n${packed}`,
       chatId,
       new AbortController().signal
     )) {
       if (event.type === 'text_done') result = event.data;
     }
-    return { success: true, output: result || context.substring(0, 500) };
+    return {
+      success: true,
+      output: result || packed.substring(0, 500),
+      data: { sectionsPacked: sectionCount, sectionsDropped: droppedSections },
+    };
   } catch (e: any) {
     return { success: false, output: `Summarize failed: ${e.message}` };
   }

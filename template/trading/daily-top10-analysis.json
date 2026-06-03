@@ -8,7 +8,7 @@
       "type": "research",
       "config": {
         "max_results": 10,
-        "query": "Analyze top stocks: {{symbols}} including market sentiment, trend and key business updates."
+        "query": "Watchlist symbols: {{symbols}} — market sentiment, trend, and key business updates."
       }
     },
     {

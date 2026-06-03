@@ -19,6 +19,12 @@ export interface AppConfig {
     enableInternet: boolean;
     maxParallelSkills: number;
     skillQueueTimeoutMs: number;
+    /** Max total chars (system + history + human) before inference. */
+    maxPromptChars: number;
+  };
+  pipeline: {
+    /** Max chars of research context passed into summarize / synthesis human message. */
+    contextMaxChars: number;
   };
   memory: {
     enabled: boolean;
@@ -72,6 +78,31 @@ export interface AppConfig {
     outputDir: string;
     maxConcurrentJobs: number;
     unloadLocalModelOnGenerate: boolean;
+    /** Pause org heartbeats and wait for other agents before ComfyUI jobs. */
+    pauseOrchestrationDuringGenerate: boolean;
+    /** Max ms to wait for other agents' heartbeats to finish before starting ComfyUI. */
+    orchestrationPauseMaxWaitMs: number;
+  };
+  searxng: {
+    enabled: boolean;
+    baseUrl: string;
+    categories: string;
+    timeRange: string;
+    language: string;
+  };
+  webSearch: {
+    httpFallbackEnabled: boolean;
+    browserFallbackEnabled: boolean;
+  };
+  webFetch: {
+    maxChars: number;
+    chunkRanking: 'bm25' | 'head' | 'embedding';
+    chunkMinChars: number;
+    chunkOverlapChars: number;
+    embedModel: string;
+    embedBaseUrl: string;
+    ignoreTlsErrors: boolean;
+    proxyUrl: string;
   };
   llamacpp: {
     enabled: boolean;
@@ -110,6 +141,10 @@ const DEFAULT_CONFIG: AppConfig = {
     enableInternet: true,
     maxParallelSkills: 2,
     skillQueueTimeoutMs: 30000,
+    maxPromptChars: 30_000,
+  },
+  pipeline: {
+    contextMaxChars: 15_000,
   },
   memory: {
     enabled: true,
@@ -163,6 +198,29 @@ const DEFAULT_CONFIG: AppConfig = {
     outputDir: 'workspace/generated',
     maxConcurrentJobs: 1,
     unloadLocalModelOnGenerate: true,
+    pauseOrchestrationDuringGenerate: true,
+    orchestrationPauseMaxWaitMs: 120_000,
+  },
+  searxng: {
+    enabled: true,
+    baseUrl: 'http://localhost:7979',
+    categories: '',
+    timeRange: '',
+    language: 'en',
+  },
+  webSearch: {
+    httpFallbackEnabled: true,
+    browserFallbackEnabled: true,
+  },
+  webFetch: {
+    maxChars: 12000,
+    chunkRanking: 'bm25',
+    chunkMinChars: 200,
+    chunkOverlapChars: 250,
+    embedModel: 'nomic-embed-text',
+    embedBaseUrl: 'http://localhost:11434',
+    ignoreTlsErrors: false,
+    proxyUrl: '',
   },
   llamacpp: {
     enabled: false,
@@ -216,7 +274,12 @@ class ConfigManager extends EventEmitter {
           speech: { ...DEFAULT_CONFIG.speech, ...(parsed.speech || {}) },
           marketData: { ...DEFAULT_CONFIG.marketData, ...(parsed.marketData || {}) },
           comfyui: { ...DEFAULT_CONFIG.comfyui, ...(parsed.comfyui || {}) },
+          searxng: { ...DEFAULT_CONFIG.searxng, ...(parsed.searxng || {}) },
+          webSearch: { ...DEFAULT_CONFIG.webSearch, ...(parsed.webSearch || {}) },
+          webFetch: { ...DEFAULT_CONFIG.webFetch, ...(parsed.webFetch || {}) },
           llamacpp: { ...DEFAULT_CONFIG.llamacpp, ...(parsed.llamacpp || {}) },
+          pipeline: { ...DEFAULT_CONFIG.pipeline, ...(parsed.pipeline || {}) },
+          agent: { ...DEFAULT_CONFIG.agent, ...(parsed.agent || {}) },
         };
         this.applyEnvOverrides();
         console.log('[Config] Loaded existing configuration.');
@@ -254,7 +317,12 @@ class ConfigManager extends EventEmitter {
               speech: { ...this.currentConfig.speech, ...(newConfig.speech || {}) },
               marketData: { ...this.currentConfig.marketData, ...(newConfig.marketData || {}) },
               comfyui: { ...this.currentConfig.comfyui, ...(newConfig.comfyui || {}) },
+              searxng: { ...this.currentConfig.searxng, ...(newConfig.searxng || {}) },
+              webSearch: { ...this.currentConfig.webSearch, ...(newConfig.webSearch || {}) },
+              webFetch: { ...this.currentConfig.webFetch, ...(newConfig.webFetch || {}) },
               llamacpp: { ...this.currentConfig.llamacpp, ...(newConfig.llamacpp || {}) },
+              pipeline: { ...this.currentConfig.pipeline, ...(newConfig.pipeline || {}) },
+              agent: { ...this.currentConfig.agent, ...(newConfig.agent || {}) },
             };
             this.applyEnvOverrides();
             this.emit('configChanged', this.currentConfig);
@@ -278,6 +346,11 @@ class ConfigManager extends EventEmitter {
     return process.env.COMFYUI_BASE_URL?.trim() || this.currentConfig.comfyui.baseUrl;
   }
 
+  /** Resolve SearXNG base URL with env override. */
+  getSearxngBaseUrl(): string {
+    return (process.env.SEARXNG_URL?.trim() || this.currentConfig.searxng.baseUrl).replace(/\/$/, '');
+  }
+
   /** Resolve llama.cpp server base URL with env override. */
   getLlamaCppBaseUrl(): string {
     const envUrl = process.env.LLAMACPP_BASE_URL?.trim();
@@ -296,6 +369,75 @@ class ConfigManager extends EventEmitter {
     if (llamaUrl) {
       this.currentConfig.llamacpp = { ...this.currentConfig.llamacpp, baseUrl: llamaUrl };
     }
+    const searxUrl = process.env.SEARXNG_URL?.trim();
+    if (searxUrl) {
+      this.currentConfig.searxng = { ...this.currentConfig.searxng, baseUrl: searxUrl };
+    }
+    const searxEnabled = process.env.SEARXNG_ENABLED?.trim().toLowerCase();
+    if (searxEnabled === 'true' || searxEnabled === 'false') {
+      this.currentConfig.searxng = {
+        ...this.currentConfig.searxng,
+        enabled: searxEnabled === 'true',
+      };
+    }
+    const searxCategories = process.env.SEARXNG_CATEGORIES?.trim();
+    if (searxCategories) {
+      this.currentConfig.searxng = { ...this.currentConfig.searxng, categories: searxCategories };
+    }
+    const searxTimeRange = process.env.SEARXNG_TIME_RANGE?.trim();
+    if (searxTimeRange) {
+      this.currentConfig.searxng = { ...this.currentConfig.searxng, timeRange: searxTimeRange };
+    }
+    const searxLanguage = process.env.SEARXNG_LANGUAGE?.trim();
+    if (searxLanguage) {
+      this.currentConfig.searxng = { ...this.currentConfig.searxng, language: searxLanguage };
+    }
+    const httpFallback = process.env.WEB_SEARCH_HTTP_FALLBACK?.trim().toLowerCase();
+    if (httpFallback === 'true' || httpFallback === 'false') {
+      this.currentConfig.webSearch = {
+        ...this.currentConfig.webSearch,
+        httpFallbackEnabled: httpFallback === 'true',
+      };
+    }
+    const browserFallback = process.env.WEB_SEARCH_BROWSER_FALLBACK?.trim().toLowerCase();
+    if (browserFallback === 'true' || browserFallback === 'false') {
+      this.currentConfig.webSearch = {
+        ...this.currentConfig.webSearch,
+        browserFallbackEnabled: browserFallback === 'true',
+      };
+    }
+    const fetchMax = process.env.WEB_FETCH_MAX_CHARS?.trim();
+    if (fetchMax && !Number.isNaN(Number(fetchMax))) {
+      this.currentConfig.webFetch = {
+        ...this.currentConfig.webFetch,
+        maxChars: Math.max(1000, Number(fetchMax)),
+      };
+    }
+    const fetchProxy = process.env.WEB_FETCH_PROXY_URL?.trim();
+    if (fetchProxy) {
+      this.currentConfig.webFetch = { ...this.currentConfig.webFetch, proxyUrl: fetchProxy };
+    }
+    const fetchTls = process.env.WEB_FETCH_IGNORE_TLS_ERRORS?.trim().toLowerCase();
+    if (fetchTls === 'true' || fetchTls === 'false') {
+      this.currentConfig.webFetch = {
+        ...this.currentConfig.webFetch,
+        ignoreTlsErrors: fetchTls === 'true',
+      };
+    }
+    const maxPrompt = process.env.AGENT_MAX_PROMPT_CHARS?.trim();
+    if (maxPrompt && !Number.isNaN(Number(maxPrompt))) {
+      this.currentConfig.agent = {
+        ...this.currentConfig.agent,
+        maxPromptChars: Math.max(8000, Number(maxPrompt)),
+      };
+    }
+    const pipelineContext = process.env.PIPELINE_CONTEXT_MAX_CHARS?.trim();
+    if (pipelineContext && !Number.isNaN(Number(pipelineContext))) {
+      this.currentConfig.pipeline = {
+        ...this.currentConfig.pipeline,
+        contextMaxChars: Math.max(4000, Number(pipelineContext)),
+      };
+    }
   }
 
   async updateConfig(newSettings: Partial<AppConfig>) {
@@ -306,12 +448,16 @@ class ConfigManager extends EventEmitter {
       stt: { ...this.currentConfig.stt, ...(newSettings.stt || {}) },
       tts: { ...this.currentConfig.tts, ...(newSettings.tts || {}) },
       agent: { ...this.currentConfig.agent, ...(newSettings.agent || {}) },
+      pipeline: { ...this.currentConfig.pipeline, ...(newSettings.pipeline || {}) },
       memory: { ...this.currentConfig.memory, ...(newSettings.memory || {}) },
       learning: { ...this.currentConfig.learning, ...(newSettings.learning || {}) },
       evolution: { ...this.currentConfig.evolution, ...(newSettings.evolution || {}) },
       speech: { ...this.currentConfig.speech, ...(newSettings.speech || {}) },
       marketData: { ...this.currentConfig.marketData, ...(newSettings.marketData || {}) },
       comfyui: { ...this.currentConfig.comfyui, ...(newSettings.comfyui || {}) },
+      searxng: { ...this.currentConfig.searxng, ...(newSettings.searxng || {}) },
+      webSearch: { ...this.currentConfig.webSearch, ...(newSettings.webSearch || {}) },
+      webFetch: { ...this.currentConfig.webFetch, ...(newSettings.webFetch || {}) },
       llamacpp: { ...this.currentConfig.llamacpp, ...(newSettings.llamacpp || {}) },
       approved_senders: newSettings.approved_senders || this.currentConfig.approved_senders,
     };

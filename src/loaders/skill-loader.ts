@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { BaseSkill, SkillDefinition } from '../skills/base-skill';
+import { BaseSkill, SkillDefinition, SkillToolLimits } from '../skills/base-skill';
 import { resolveToolsByIds } from '../skills/tool-resolver';
+import { parseStructuredOutputFromManifest } from './structured-output-parser';
 
 type SkillManifestEntry = {
   id: string;
@@ -16,7 +17,18 @@ type SkillManifestEntry = {
   category?: string;
   tags?: string[];
   dependencies?: string[];
+  structuredOutput?: unknown;
+  toolLimits?: unknown;
 };
+
+function parseToolLimitsFromManifest(raw: unknown): SkillToolLimits | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const o = raw as Record<string, unknown>;
+  const maxWebSearch = typeof o.maxWebSearch === 'number' ? o.maxWebSearch : undefined;
+  const maxWebFetch = typeof o.maxWebFetch === 'number' ? o.maxWebFetch : undefined;
+  if (maxWebSearch == null && maxWebFetch == null) return undefined;
+  return { maxWebSearch, maxWebFetch };
+}
 
 export class SkillLoader {
   static async loadDefaultSkills(skillsDir?: string): Promise<SkillDefinition[]> {
@@ -101,6 +113,8 @@ export class SkillLoader {
             enabled: entry.enabled ?? true,
             model: entry.model,
             temperature: entry.temperature,
+            structuredOutput: parseStructuredOutputFromManifest(entry.structuredOutput),
+            toolLimits: parseToolLimitsFromManifest(entry.toolLimits),
           });
         }
       } catch (err: any) {

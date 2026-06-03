@@ -1,1 +1,10 @@
-export type SettingsTab = 'general' | 'models' | 'memory' | 'skills' | 'workspace' | 'channels' | 'comfyui' | 'llamacpp'
+export type SettingsTab =
+  | 'general'
+  | 'models'
+  | 'memory'
+  | 'skills'
+  | 'workspace'
+  | 'channels'
+  | 'searxng'
+  | 'comfyui'
+  | 'llamacpp'

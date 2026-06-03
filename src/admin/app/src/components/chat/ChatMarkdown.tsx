@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { cn } from '@/lib/utils'
@@ -7,6 +8,40 @@ import { ChatMediaDownloadLink } from '@/components/chat/ChatMediaAttachments'
 interface ChatMarkdownProps {
   content: string
   className?: string
+}
+
+function flattenCellText(children: ReactNode): string {
+  if (children == null) return ''
+  if (typeof children === 'string' || typeof children === 'number') return String(children)
+  if (Array.isArray(children)) return children.map(flattenCellText).join('')
+  if (typeof children === 'object' && 'props' in children) {
+    return flattenCellText((children as { props?: { children?: ReactNode } }).props?.children)
+  }
+  return String(children)
+}
+
+function renderSignalCell(children: ReactNode): ReactNode {
+  const text = flattenCellText(children).trim()
+  const match = text.match(/^(STRONG BUY|WEAK BUY|BUY|HOLD|SELL)\b\s*(.*)$/i)
+  if (!match) return children
+
+  const signal = match[1].toUpperCase()
+  const detail = match[2]?.trim()
+  const signalClass =
+    signal.includes('BUY')
+      ? 'chat-signal-buy'
+      : signal === 'HOLD'
+        ? 'chat-signal-hold'
+        : signal.includes('SELL')
+          ? 'chat-signal-sell'
+          : ''
+
+  return (
+    <>
+      <span className={cn('chat-signal-badge', signalClass)}>{signal}</span>
+      {detail ? <span className="chat-signal-detail">{detail}</span> : null}
+    </>
+  )
 }
 
 export function ChatMarkdown({ content, className }: ChatMarkdownProps) {
@@ -94,6 +129,12 @@ export function ChatMarkdown({ content, className }: ChatMarkdownProps) {
               </code>
             )
           },
+          table: ({ children }) => (
+            <div className="chat-table-wrap" role="region" aria-label="Table — scroll horizontally">
+              <table>{children}</table>
+            </div>
+          ),
+          td: ({ children }) => <td>{renderSignalCell(children)}</td>,
         }}
       >
         {content}

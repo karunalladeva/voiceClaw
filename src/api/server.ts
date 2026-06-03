@@ -9,6 +9,7 @@ import { STTModule } from '../stt/whisper';
 import { TTSSwitcher as TTSModule } from '../tts/index';
 import { ReactAgent, StreamEvent } from '../agents/react-agent';
 import { configManager } from '../config/index';
+import { invalidateSearxngProbeCache, probeSearxngAvailability } from '../tools/searxng-client';
 import { modelRegistry } from '../models/model-registry';
 import { modelRouter } from '../models/model-router';
 import { historyManager } from '../agents/agent-history';
@@ -24,6 +25,7 @@ import { agentEvents } from '../admin/agent-events';
 import { setupOrchestrationRoutes } from '../orchestration/routes';
 import { setupCreatorRoutes } from '../creator/routes';
 import { setupComfyUIRoutes } from '../comfyui/routes';
+import { setupSearxngRoutes } from '../searxng/routes';
 import { setupLlamaCppRoutes } from '../llamacpp/routes';
 import { comfyUIService } from '../services/comfyui-service';
 import {
@@ -1312,6 +1314,7 @@ export const startServer = async (port: number = 3000) => {
   setupCreatorRoutes(app);
   await comfyUIService.initialize();
   setupComfyUIRoutes(app);
+  setupSearxngRoutes(app);
   setupLlamaCppRoutes(app);
 
   const syncComfyUISkillEnabled = (): void => {
@@ -1320,8 +1323,14 @@ export const startServer = async (port: number = 3000) => {
     if (enabled) registry.enableSkill('comfyui-creator');
     else registry.disableSkill('comfyui-creator');
   };
+  const refreshSearxngProbe = (): void => {
+    invalidateSearxngProbeCache();
+    void probeSearxngAvailability(true);
+  };
   configManager.on('configChanged', syncComfyUISkillEnabled);
+  configManager.on('configChanged', refreshSearxngProbe);
   syncComfyUISkillEnabled();
+  refreshSearxngProbe();
 
   const { registerCreatorSkillReload } = await import('../creator/creator-skill-bridge');
   registerCreatorSkillReload(() => agent.reloadCreatorWorkspaceSkills());
@@ -1357,6 +1366,7 @@ export const startServer = async (port: number = 3000) => {
       prompt =
         `${context}${delegationHint}${answerDutyHint}\n\n` +
         `Work on the assigned task. If requirements are unclear, call ask_parent_manager once, then wait for the answer (do not call it again). ` +
+        `If a sub-agent handoff is incomplete or structured output is invalid, do not delegate — use partial tool-trace data, a fallback skill, or ask the user. ` +
         `If this requires your team to execute next steps, ` +
         `you MUST call create_subtask for each direct report before finishing (do not only describe tasks in prose).`;
     } else {
@@ -1456,20 +1466,25 @@ export const startServer = async (port: number = 3000) => {
     agentEvents.log('info', `Server started on port ${port}`);
   });
 
-  process.on('unhandledRejection', (reason: any) => {
-    const msg = reason?.message || String(reason);
+  const { isPipeClosedError } = await import('../utils/pipe-errors');
+
+  process.on('unhandledRejection', (reason: unknown) => {
+    if (isPipeClosedError(reason)) return;
+    const msg = reason instanceof Error ? reason.message : String(reason);
     console.error('[API] Unhandled rejection:', reason);
     agentEvents.log('error', `Unhandled rejection: ${msg}`);
   });
 
-  process.on('uncaughtException', (error: any) => {
+  process.on('uncaughtException', (error: unknown) => {
+    if (isPipeClosedError(error)) return;
     console.error('[API] Uncaught exception:', error);
-    agentEvents.log('error', `Uncaught exception: ${error?.message || String(error)}`);
+    agentEvents.log('error', `Uncaught exception: ${error instanceof Error ? error.message : String(error)}`);
   });
 
   const gracefulShutdown = (signal: string) => {
     console.log(`[API] Received ${signal}. Shutting down gracefully...`);
     agentEvents.log('info', `Received ${signal}; graceful shutdown started.`);
+    void agent.getMcpManager().disconnectAll().catch(() => {});
     server.close(() => {
       console.log('[API] HTTP server closed.');
       process.exit(0);

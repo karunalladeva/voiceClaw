@@ -1,9 +1,15 @@
+import dotenv from 'dotenv';
+import { configManager } from '../src/config/index';
 import { webSearchTool, webFetchTool } from '../src/tools/search';
 
+dotenv.config();
+
 async function main(): Promise<void> {
-  console.log('=== stealth web_search ===\n');
+  await configManager.initialize();
+
+  console.log('=== web_search ===\n');
   const queries = [
-    'site:amazon.com kindle digital minimalism bestseller',
+    'site:github.com voice assistant open source',
     'digital minimalism ebook gumroad',
   ];
   for (const query of queries) {
@@ -13,12 +19,13 @@ async function main(): Promise<void> {
     console.log(`\nlength: ${String(result).length}\n`);
   }
 
-  console.log('=== stealth web_fetch (blocked URL) ===\n');
-  const blocked = await webFetchTool.invoke({
-    url: 'https://www.amazon.com/Brad-Shahans-Digital-Minimalism/dp/160690534X',
-    offset: 0,
+  console.log('=== web_fetch (Impit + Readability) ===\n');
+  const fetchOut = await webFetchTool.invoke({
+    url: 'https://github.com/topics/voice-assistant',
+    part: 0,
   });
-  console.log(String(blocked).slice(0, 300));
+  console.log(String(fetchOut).slice(0, 800));
+  console.log(`\nlength: ${String(fetchOut).length}\n`);
 }
 
 main().catch(console.error);

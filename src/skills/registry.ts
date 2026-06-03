@@ -1,7 +1,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { SkillDefinition, BaseSkill } from './base-skill';
-import { isCasualMessage, isTradingRelatedQuery } from '../agents/prompt-context';
+import {
+  isCasualMessage,
+  isSynthesisOverProvidedData,
+  isTradingRelatedQuery,
+} from '../agents/prompt-context';
+
+export type SkillRoutingMode = 'auto' | 'compact' | 'standard' | 'trading-focused' | 'synthesis';
 
 const TRADING_SKILL_PREFIX = 'trading-';
 const MAX_RANKED_TRADING_SKILLS = 10;
@@ -128,7 +134,11 @@ export class SkillRegistry {
    * Build a routing description for the main agent. Core skills are always listed;
    * trading skills use a compact catalog plus query-matched detail when relevant.
    */
-  buildRoutingPrompt(userQuery?: string, allowedSkillIds?: string[]): string {
+  buildRoutingPrompt(
+    userQuery?: string,
+    allowedSkillIds?: string[],
+    mode: SkillRoutingMode = 'auto',
+  ): string {
     let enabled = this.getEnabledSkills();
     if (allowedSkillIds && allowedSkillIds.length > 0) {
       const allow = new Set(allowedSkillIds);
@@ -139,6 +149,7 @@ export class SkillRegistry {
     const query = (userQuery || '').trim();
     const casual = isCasualMessage(query);
     const tradingQuery = isTradingRelatedQuery(query);
+    const synthesis = mode === 'synthesis' || (mode === 'auto' && isSynthesisOverProvidedData(query));
 
     const core = enabled.filter((s) => !s.id.startsWith(TRADING_SKILL_PREFIX));
     const trading = enabled.filter((s) => s.id.startsWith(TRADING_SKILL_PREFIX));
@@ -146,7 +157,13 @@ export class SkillRegistry {
     const coreLines = core.map((s) => this.formatSkillLine(s));
 
     let tradingSection: string;
-    if (casual && !tradingQuery) {
+    if (synthesis) {
+      tradingSection = `<trading_catalog synthesis="true">
+Market OHLCV and news for this task are already in the user message (## Market data for … blocks).
+Do NOT call yahoo_ohlcv, yahoo_news, or route_to_skill unless a symbol block is missing or the user asks for more symbols.
+Write the analysis from the provided blocks only.
+</trading_catalog>`;
+    } else if (casual && !tradingQuery) {
       tradingSection = `<trading_catalog compact="true">
 Trading specialists use ids starting with "trading-" via route_to_skill.
 For general market questions use voiceclaw-financial-analyst (listed above).
@@ -164,7 +181,10 @@ ${this.tradingCatalogText || '(none)'}
 ${detailedLines.length > 0 ? `\nRelevant trading skills for this message:\n${detailedLines.join('\n')}` : ''}`;
     }
 
-    const routingMode = casual && !tradingQuery ? 'compact' : tradingQuery ? 'trading-focused' : 'standard';
+    let routingMode: string;
+    if (synthesis) routingMode = 'synthesis';
+    else if (mode !== 'auto') routingMode = mode;
+    else routingMode = casual && !tradingQuery ? 'compact' : tradingQuery ? 'trading-focused' : 'standard';
 
     return `
 <skills routing="${routingMode}">

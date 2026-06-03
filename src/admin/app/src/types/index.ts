@@ -111,6 +111,29 @@ export interface AppConfig {
     outputDir: string
     maxConcurrentJobs: number
     unloadLocalModelOnGenerate?: boolean
+    pauseOrchestrationDuringGenerate?: boolean
+    orchestrationPauseMaxWaitMs?: number
+  }
+  searxng?: {
+    enabled: boolean
+    baseUrl: string
+    categories: string
+    timeRange: string
+    language: string
+  }
+  webSearch?: {
+    httpFallbackEnabled: boolean
+    browserFallbackEnabled: boolean
+  }
+  webFetch?: {
+    maxChars: number
+    chunkRanking: 'bm25' | 'head' | 'embedding'
+    chunkMinChars: number
+    chunkOverlapChars: number
+    embedModel: string
+    embedBaseUrl: string
+    ignoreTlsErrors: boolean
+    proxyUrl: string
   }
   llamacpp?: {
     enabled: boolean

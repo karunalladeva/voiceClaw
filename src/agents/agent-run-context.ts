@@ -4,6 +4,18 @@ export interface AgentRunContext {
   orgTaskId: string;
   orgRootTaskId: string;
   orgAgentId?: string;
+  /** Dedupe web_search within one org task run. */
+  webSearchKeys?: Set<string>;
+  /** Dedupe web_fetch by url|part|focus|query within one org task run. */
+  webFetchKeys?: Set<string>;
+  /** Latest user/task message for BM25 fetch ranking. */
+  lastUserQuery?: string;
+  /** Latest web_search query for BM25 fetch ranking. */
+  lastWebSearchQuery?: string;
+  /** Set when skill stream ends early — in-flight tools should no-op. */
+  skillRunCancelled?: boolean;
+  /** Skills that must not be re-routed on this task (incomplete prior run). */
+  blockedSkillIds?: Set<string>;
 }
 
 const storage = new AsyncLocalStorage<AgentRunContext>();

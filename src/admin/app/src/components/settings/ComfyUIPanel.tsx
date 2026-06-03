@@ -26,6 +26,8 @@ type ComfyUIConfigForm = {
   outputDir: string
   maxConcurrentJobs: number
   unloadLocalModelOnGenerate: boolean
+  pauseOrchestrationDuringGenerate: boolean
+  orchestrationPauseMaxWaitMs: number
 }
 
 const DEFAULT_COMFYUI_CONFIG: ComfyUIConfigForm = {
@@ -35,6 +37,8 @@ const DEFAULT_COMFYUI_CONFIG: ComfyUIConfigForm = {
   outputDir: 'workspace/generated',
   maxConcurrentJobs: 1,
   unloadLocalModelOnGenerate: true,
+  pauseOrchestrationDuringGenerate: true,
+  orchestrationPauseMaxWaitMs: 120_000,
 }
 
 type InjectionForm = Record<InjectionKey, InjectionPoint>
@@ -411,6 +415,29 @@ export function ComfyUIPanel() {
           <SettingsSwitch
             checked={comfyConfig.unloadLocalModelOnGenerate}
             onChange={(v) => setComfyConfig((c) => ({ ...c, unloadLocalModelOnGenerate: v }))}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Pause org agents during generation"
+          subtitle="Skips heartbeats and waits for other agents (up to max wait) so ComfyUI does not compete for VRAM."
+        >
+          <SettingsSwitch
+            checked={comfyConfig.pauseOrchestrationDuringGenerate}
+            onChange={(v) => setComfyConfig((c) => ({ ...c, pauseOrchestrationDuringGenerate: v }))}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Agent pause max wait (ms)"
+          subtitle="How long to wait for other agents' heartbeats before starting ComfyUI anyway."
+        >
+          <SettingsTextField
+            value={String(comfyConfig.orchestrationPauseMaxWaitMs)}
+            onChange={(v) => {
+              const n = parseInt(v, 10)
+              if (!Number.isNaN(n)) setComfyConfig((c) => ({ ...c, orchestrationPauseMaxWaitMs: n }))
+            }}
+            placeholder="120000"
+            className="w-32"
           />
         </SettingsRow>
         <div className="px-4 py-3">

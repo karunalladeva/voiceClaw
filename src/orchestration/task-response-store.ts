@@ -51,7 +51,12 @@ export async function saveTaskResponse(params: SaveTaskResponseParams): Promise<
   const stampedRel = `${responderRelDir}/${Date.now()}.md`.replace(/\\/g, '/');
   const stampedAbs = path.join(process.cwd(), ...stampedRel.split('/'));
   await fs.writeFile(stampedAbs, body, 'utf-8');
-  await writeTaskArtifactManifest(params.task);
+  const skipManifest =
+    params.responderType === 'tool' &&
+    (params.responderId === 'read_file' || params.responderId === 'list_files');
+  if (!skipManifest) {
+    await writeTaskArtifactManifest(params.task);
+  }
   return stampedRel;
 }
 

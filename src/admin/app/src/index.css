@@ -174,7 +174,7 @@ body {
   font-size: 15px;
   line-height: 1.6;
   color: var(--color-foreground);
-  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .chat-markdown > *:first-child {
@@ -219,23 +219,114 @@ body {
   color: var(--color-muted-foreground);
 }
 
-.chat-markdown table {
-  width: 100%;
-  border-collapse: collapse;
+/* Scrollable tables — avoid crushing columns in narrow chat pane */
+.chat-table-wrap {
   margin: 0.75em 0;
-  font-size: 0.9em;
-}
-
-.chat-markdown th,
-.chat-markdown td {
+  max-width: 100%;
+  overflow-x: auto;
   border: 1px solid var(--color-border);
-  padding: 0.5em 0.75em;
-  text-align: left;
+  border-radius: 8px;
+  background: var(--color-card);
+  -webkit-overflow-scrolling: touch;
 }
 
-.chat-markdown th {
+.chat-table-wrap table {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.chat-table-wrap th,
+.chat-table-wrap td {
+  border: 1px solid var(--color-border);
+  padding: 0.65rem 0.85rem;
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.chat-table-wrap th {
   background: var(--color-secondary);
   font-weight: 600;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* Symbol column */
+.chat-table-wrap th:first-child,
+.chat-table-wrap td:first-child {
+  min-width: 4.25rem;
+  max-width: 5.5rem;
+  white-space: nowrap;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+/* Price signal */
+.chat-table-wrap th:nth-child(2),
+.chat-table-wrap td:nth-child(2) {
+  min-width: 9rem;
+  max-width: 11rem;
+}
+
+/* Level range */
+.chat-table-wrap th:nth-child(3),
+.chat-table-wrap td:nth-child(3) {
+  min-width: 7rem;
+  max-width: 9rem;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+/* Long text columns */
+.chat-table-wrap th:nth-child(n + 4),
+.chat-table-wrap td:nth-child(n + 4) {
+  min-width: 12rem;
+  max-width: 22rem;
+}
+
+.chat-signal-badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.chat-signal-buy {
+  color: var(--color-success);
+  background: oklch(64.69% 0.21 145.44 / 0.15);
+}
+
+.chat-signal-hold {
+  color: var(--color-warning);
+  background: oklch(70.28% 0.17 70.67 / 0.15);
+}
+
+.chat-signal-sell {
+  color: var(--color-destructive);
+  background: oklch(62.79% 0.26 29.23 / 0.15);
+}
+
+.chat-signal-detail {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--color-muted-foreground);
+  line-height: 1.35;
 }
 
 .chat-inline-code {

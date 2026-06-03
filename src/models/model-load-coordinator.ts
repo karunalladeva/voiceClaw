@@ -2,6 +2,8 @@ import { configManager } from '../config/index';
 
 import { comfyUIClient } from '../services/comfyui-client';
 
+import { getAgentRunContext } from '../agents/agent-run-context';
+
 import { inferenceActivity } from '../utils/inference-activity';
 
 import { DEFAULT_ORG_MODEL_ID } from '../orchestration/agent-normalizer';
@@ -342,7 +344,23 @@ class ModelLoadCoordinator {
 
     if (this.gpuHandoffCount > 1) return;
 
-    await this.waitForGpuHandoffBriefPause();
+    const comfy = configManager.getConfig().comfyui;
+
+    if (comfy.pauseOrchestrationDuringGenerate !== false) {
+      const { heartbeatScheduler } = await import('../orchestration/heartbeat-scheduler');
+      heartbeatScheduler.setGpuWorkPaused(true);
+      const maxWait = Math.max(5000, comfy.orchestrationPauseMaxWaitMs ?? 120_000);
+      const callerAgentId = getAgentRunContext()?.orgAgentId;
+      const othersIdle = await heartbeatScheduler.waitForOtherHeartbeatsIdle(maxWait, callerAgentId);
+      if (!othersIdle) {
+        console.warn(
+          `[ModelLoadCoordinator] Starting ComfyUI with ${heartbeatScheduler.getRunningHeartbeatCount(callerAgentId)} other heartbeat(s) still active`,
+        );
+      }
+    }
+
+    const pauseMaxWait = Math.max(5000, comfy.orchestrationPauseMaxWaitMs ?? 120_000);
+    await this.waitForGpuHandoffBriefPause(pauseMaxWait);
 
     this.suspendedLocalModels = await unloadAllRunningLocalModels(this.residentModelName);
 
@@ -365,6 +383,12 @@ class ModelLoadCoordinator {
   }
 
 
+
+  private async resumeOrchestrationAfterGpuWork(): Promise<void> {
+    if (configManager.getConfig().comfyui.pauseOrchestrationDuringGenerate === false) return;
+    const { heartbeatScheduler } = await import('../orchestration/heartbeat-scheduler');
+    heartbeatScheduler.setGpuWorkPaused(false);
+  }
 
   async restoreAfterGpuWork(): Promise<void> {
 
@@ -415,6 +439,8 @@ class ModelLoadCoordinator {
         this.drainGpuHandoffQueue();
 
         console.log(`[ModelLoadCoordinator] Lighter restore (pipeline pin): ${pinnedModelId}`);
+
+        await this.resumeOrchestrationAfterGpuWork();
 
         return;
 
@@ -538,6 +564,8 @@ class ModelLoadCoordinator {
 
     this.drainGpuHandoffQueue();
 
+    await this.resumeOrchestrationAfterGpuWork();
+
   }
 
 
@@ -570,13 +598,25 @@ class ModelLoadCoordinator {
 
 
 
-  private async waitForGpuHandoffBriefPause(maxWaitMs: number = 3000): Promise<void> {
+  private async waitForGpuHandoffBriefPause(maxWaitMs: number = 30_000): Promise<void> {
 
     const start = Date.now();
 
     while (Date.now() - start < maxWaitMs) {
 
-      if (!this.activeLocalHolder && !inferenceActivity.hasActiveInference()) {
+      const inferenceCount = inferenceActivity.getActiveCount();
+
+      const otherInference = inferenceCount > 1;
+
+      const holderBusy = !!this.activeLocalHolder;
+
+      if (!otherInference && !holderBusy) {
+
+        return;
+
+      }
+
+      if (inferenceCount === 1 && holderBusy) {
 
         return;
 
@@ -586,11 +626,13 @@ class ModelLoadCoordinator {
 
     }
 
-    if (this.activeLocalHolder || inferenceActivity.hasActiveInference()) {
+    const inferenceCount = inferenceActivity.getActiveCount();
+
+    if (inferenceCount > 1 || this.activeLocalHolder) {
 
       console.warn(
 
-        '[ModelLoadCoordinator] Proceeding with GPU handoff while orchestration inference scope is active (ComfyUI tool inside agent heartbeat)',
+        `[ModelLoadCoordinator] Proceeding with ComfyUI GPU handoff after ${maxWaitMs}ms (inference=${inferenceCount}, holder=${this.activeLocalHolder ?? 'none'})`,
 
       );
 

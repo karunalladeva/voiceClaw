@@ -16,6 +16,17 @@ import {
 import { taskWorkflow } from './task-workflow';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
 import {
+  buildSkillResumeGuidance,
+  parseBlockedSkillIdsFromComments,
+  parseIncompleteSkillId,
+  SKILL_INCOMPLETE_COMMENT_PREFIX,
+} from '../agents/skill-handoff';
+import {
+  canDelegateWithPriorIncompleteRuns,
+  formatIncompleteWorkProduct,
+  isSkillHandoffIncomplete,
+} from '../agents/skill-run-guards';
+import {
   getRootArtifactRelDir,
   getTaskArtifactRelDir,
   listSiblingTaskArtifactDirs,
@@ -53,7 +64,44 @@ class HeartbeatScheduler extends EventEmitter {
   private runningHeartbeats = new Set<string>();
   private pendingWakeups = new Map<string, NodeJS.Timeout>();
   private lastSkipLogAt = new Map<string, number>();
+  private gpuWorkPaused = false;
   private static readonly SKIP_LOG_INTERVAL_MS = 60_000;
+
+  setGpuWorkPaused(paused: boolean): void {
+    this.gpuWorkPaused = paused;
+    if (paused) {
+      for (const timer of this.pendingWakeups.values()) {
+        clearTimeout(timer);
+      }
+      this.pendingWakeups.clear();
+      console.log('[Orchestration] Heartbeats paused — ComfyUI owns GPU');
+    } else {
+      console.log('[Orchestration] Heartbeats resumed after ComfyUI');
+    }
+  }
+
+  isGpuWorkPaused(): boolean {
+    return this.gpuWorkPaused;
+  }
+
+  getRunningHeartbeatCount(excludingAgentId?: string): number {
+    if (!excludingAgentId) return this.runningHeartbeats.size;
+    let count = 0;
+    for (const id of this.runningHeartbeats) {
+      if (id !== excludingAgentId) count += 1;
+    }
+    return count;
+  }
+
+  /** Wait until no other agents' heartbeats are running (excludes the caller agent). */
+  async waitForOtherHeartbeatsIdle(maxWaitMs: number, excludingAgentId?: string): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      if (this.getRunningHeartbeatCount(excludingAgentId) === 0) return true;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return this.getRunningHeartbeatCount(excludingAgentId) === 0;
+  }
 
   setHandler(handler: HeartbeatHandler): void {
     this.handler = handler;
@@ -179,6 +227,21 @@ class HeartbeatScheduler extends EventEmitter {
 
   async triggerHeartbeat(agentId: string, options?: TriggerHeartbeatOptions): Promise<HeartbeatResult> {
     const startTime = Date.now();
+    if (this.gpuWorkPaused) {
+      const now = Date.now();
+      const lastLogged = this.lastSkipLogAt.get(agentId) ?? 0;
+      if (now - lastLogged >= HeartbeatScheduler.SKIP_LOG_INTERVAL_MS) {
+        console.log(`[Orchestration] Heartbeat skipped for ${agentId}: ComfyUI GPU work in progress`);
+        this.lastSkipLogAt.set(agentId, now);
+      }
+      return {
+        agentId,
+        success: true,
+        skipped: true,
+        output: 'Skipped: ComfyUI image/video generation in progress (GPU reserved). Will retry on next heartbeat.',
+        durationMs: Date.now() - startTime,
+      };
+    }
     if (this.runningHeartbeats.has(agentId)) {
       return {
         agentId,
@@ -289,9 +352,33 @@ class HeartbeatScheduler extends EventEmitter {
           title: `Heartbeat output: ${workTask.title}`,
           content: output,
         };
-        if (output.includes('[SKILL_RUN_INCOMPLETE]')) {
+        const priorBlockedSkillIds = parseBlockedSkillIdsFromComments(
+          await taskManager.getComments(workTask.id),
+        );
+
+        if (isSkillHandoffIncomplete(output)) {
           console.warn(
             `[Orchestration] ${agent.name} skill run incomplete on "${workTask.title}" — saving partial work, keeping task in progress`,
+          );
+          const incompleteSkillId = parseIncompleteSkillId(output);
+          if (incompleteSkillId) {
+            await taskManager.addComment(
+              workTask.id,
+              agentId,
+              'agent',
+              `${SKILL_INCOMPLETE_COMMENT_PREFIX}${incompleteSkillId}]`,
+            );
+          }
+          await taskWorkflow.saveWorkProduct(workTask.id, agentId, {
+            ...workProduct,
+            content: formatIncompleteWorkProduct(workProduct.content),
+          });
+        } else if (
+          priorBlockedSkillIds.length > 0 &&
+          !canDelegateWithPriorIncompleteRuns(output, workTask)
+        ) {
+          console.warn(
+            `[Orchestration] ${agent.name} blocked from delegating on "${workTask.title}" — prior incomplete skill run not resolved in output`,
           );
           await taskWorkflow.saveWorkProduct(workTask.id, agentId, workProduct);
         } else if (detectAwaitingUserInput(output, workTask)) {
@@ -497,6 +584,11 @@ class HeartbeatScheduler extends EventEmitter {
         parts.push(`\nLatest parent answer:\n${answered.content}`);
       }
       if (mode === 'work') {
+        const blockedSkills = parseBlockedSkillIdsFromComments(taskComments);
+        const resumeGuidance = buildSkillResumeGuidance(blockedSkills);
+        if (resumeGuidance) {
+          parts.push(resumeGuidance);
+        }
         const reports = await agentRegistry.getDirectReports(agent.id);
         if (reports.length > 0 && task.id) {
           const pending = await taskManager.listSubtasksAwaitingParentAnswer(task.id);

@@ -1,6 +1,8 @@
 import dotenv from 'dotenv';
 import { startServer } from './api/server';
 import { configManager } from './config/index';
+import { probeSearxngAvailability, invalidateSearxngProbeCache } from './tools/searxng-client';
+import { resetImpitClient } from './tools/web-page-fetch';
 
 // Load environment variables
 dotenv.config();
@@ -23,6 +25,14 @@ async function bootstrap() {
 
   // Initialize the config manager (loads file, sets up watcher)
   await configManager.initialize();
+
+  configManager.on('configChanged', () => {
+    invalidateSearxngProbeCache();
+    resetImpitClient();
+    void probeSearxngAvailability(true);
+  });
+
+  await probeSearxngAvailability(true);
 
   // Start the server
   await startServer(PORT);

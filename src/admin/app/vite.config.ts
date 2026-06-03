@@ -69,6 +69,9 @@ export default defineConfig({
       '/comfyui': {
         target: 'http://localhost:3000',
       },
+      '/searxng': {
+        target: 'http://localhost:3000',
+      },
       '/llamacpp': {
         target: 'http://localhost:3000',
       },

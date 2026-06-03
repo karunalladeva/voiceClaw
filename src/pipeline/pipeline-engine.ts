@@ -213,6 +213,11 @@ export function registerStep(type: string, executor: StepExecutor) {
 // ── Pipeline Runner ───────────────────────────────────────────────────────────
 
 export async function runPipeline(pipeline: Pipeline): Promise<{ success: boolean; outputs: StepResult[] }> {
+  const { modelLoadCoordinator } = await import('../models/model-load-coordinator');
+  if (modelLoadCoordinator.isGpuHandoffActive()) {
+    console.log(`[Pipeline] Deferred "${pipeline.name}" — ComfyUI generation using GPU`);
+    return { success: false, outputs: [] };
+  }
   console.log(`[Pipeline] ▶ Running "${pipeline.name}" (${pipeline.steps.length} steps)`);
   const outputs: StepResult[] = [];
   let context = '';

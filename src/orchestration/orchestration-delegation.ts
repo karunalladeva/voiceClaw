@@ -390,7 +390,8 @@ export function buildOrgOrchestrationSystemAppend(
   if (reports.length > 0) {
     parts.push(
       `You manage ${reports.length} direct report(s). Delegation tools: list_team_members, create_subtask, list_my_subtasks, list_pending_subtask_questions, reply_to_subtask_question.`,
-      `After route_to_skill returns, read the full [Sub-Agent Result] (including any tool output appendix), then call create_subtask for each direct report who must execute next — do not call route_to_skill again for the same work.`,
+      `After route_to_skill returns, read the [Sub-Agent Result] synthesis first; use the "Orchestrator tool trace" section only if you need raw tool evidence. Then call create_subtask for each direct report — do not call route_to_skill again for the same skill id if VALIDATION RESUME says it is blocked (use partial data from the tool trace, a fallback skill once, or ask the user).`,
+      `Do not create_subtask while the latest skill handoff is incomplete or missing required structured output — resolve with synthesis, fallback, or user clarification first.`,
       `Do not finish without creating subtasks for each report who must contribute.`,
       `Use sequential blockedBy when phases depend on each other (requirements before design).`,
       `Answer subtask questions with reply_to_subtask_question when list_pending_subtask_questions shows any.`,
