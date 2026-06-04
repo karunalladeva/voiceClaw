@@ -9,6 +9,38 @@ import {
 
 export type TaskResponderType = 'skill' | 'agent' | 'tool';
 
+/** High-frequency / low-value tools — skip disk audit + manifest refresh. */
+const SKIP_PERSIST_TOOL_IDS = new Set([
+  'read_file',
+  'list_files',
+  'write_file',
+  'list_team_members',
+  'list_my_subtasks',
+  'create_subtask',
+  'ask_parent_manager',
+  'reply_to_subtask_question',
+  'list_pending_subtask_questions',
+]);
+
+const manifestDebounceMs = 2_000;
+const manifestDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleTaskArtifactManifest(task: TaskArtifactScope): void {
+  const key = `${task.rootTaskId ?? task.id}:${task.id}`;
+  const existing = manifestDebounceTimers.get(key);
+  if (existing) clearTimeout(existing);
+  manifestDebounceTimers.set(
+    key,
+    setTimeout(() => {
+      manifestDebounceTimers.delete(key);
+      void writeTaskArtifactManifest(task).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[Orchestration] Debounced manifest write failed (${key}): ${msg}`);
+      });
+    }, manifestDebounceMs),
+  );
+}
+
 export interface SaveTaskResponseParams {
   task: TaskArtifactScope;
   responderId: string;
@@ -40,6 +72,9 @@ function formatResponseBody(params: SaveTaskResponseParams): string {
 export async function saveTaskResponse(params: SaveTaskResponseParams): Promise<string | null> {
   const trimmed = params.content?.trim();
   if (!trimmed) return null;
+  if (params.responderType === 'tool' && SKIP_PERSIST_TOOL_IDS.has(params.responderId)) {
+    return null;
+  }
   const responderId = sanitizeResponderId(params.responderId);
   await ensureTaskArtifactDir(params.task);
   const taskRelDir = getTaskArtifactRelDir(params.task);
@@ -51,12 +86,7 @@ export async function saveTaskResponse(params: SaveTaskResponseParams): Promise<
   const stampedRel = `${responderRelDir}/${Date.now()}.md`.replace(/\\/g, '/');
   const stampedAbs = path.join(process.cwd(), ...stampedRel.split('/'));
   await fs.writeFile(stampedAbs, body, 'utf-8');
-  const skipManifest =
-    params.responderType === 'tool' &&
-    (params.responderId === 'read_file' || params.responderId === 'list_files');
-  if (!skipManifest) {
-    await writeTaskArtifactManifest(params.task);
-  }
+  scheduleTaskArtifactManifest(params.task);
   return stampedRel;
 }
 

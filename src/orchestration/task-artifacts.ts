@@ -55,12 +55,16 @@ export function resolveTaskArtifactFile(task: TaskArtifactScope, filename: strin
 }
 
 const SKIP_NAMES = new Set(['output.md', 'manifest.json']);
+/** Tool audit folders — skip during walks (not user deliverables). */
+const SKIP_DIR_NAMES = new Set(['read_file', 'list_files', 'write_file']);
+const MAX_ARTIFACT_LIST_PATHS = 500;
 
 export async function listTaskArtifactRelPaths(task: TaskArtifactScope): Promise<string[]> {
   const absDir = getTaskArtifactAbsDir(task);
   const relDir = getTaskArtifactRelDir(task);
   const paths: string[] = [];
-  const walk = async (dir: string, relPrefix: string): Promise<void> => {
+  const walk = async (dir: string, relPrefix: string, depth: number): Promise<void> => {
+    if (paths.length >= MAX_ARTIFACT_LIST_PATHS) return;
     let entries: Array<{ name: string; isDirectory: () => boolean }>;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
@@ -68,17 +72,23 @@ export async function listTaskArtifactRelPaths(task: TaskArtifactScope): Promise
       return;
     }
     for (const entry of entries) {
+      if (paths.length >= MAX_ARTIFACT_LIST_PATHS) return;
       const rel = `${relPrefix}/${entry.name}`.replace(/\\/g, '/');
       if (entry.isDirectory()) {
-        await walk(path.join(dir, entry.name), rel);
+        if (depth === 0 && SKIP_DIR_NAMES.has(entry.name)) continue;
+        await walk(path.join(dir, entry.name), rel, depth + 1);
         continue;
       }
       if (SKIP_NAMES.has(entry.name) && relPrefix === relDir) continue;
       paths.push(rel);
     }
   };
-  await walk(absDir, relDir);
-  return paths.sort();
+  await walk(absDir, relDir, 0);
+  const sorted = paths.sort();
+  if (sorted.length >= MAX_ARTIFACT_LIST_PATHS) {
+    sorted.push(`...[truncated at ${MAX_ARTIFACT_LIST_PATHS} paths]`);
+  }
+  return sorted;
 }
 
 export async function writeTaskArtifactManifest(

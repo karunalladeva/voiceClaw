@@ -16,6 +16,8 @@ const WORKSPACE = path.join(process.cwd(), 'workspace');
 const OUTPUTS_DIR = path.join(WORKSPACE, 'outputs', 'documents');
 /** Avoid loading huge files into the skill LLM context. */
 const MAX_READ_BYTES = 512_000;
+/** Max write size — prevents OOM when saving large chapters. */
+const MAX_WRITE_BYTES = 2_000_000;
 /** Tool-response audit folders (not user deliverables). */
 const TOOL_TRACE_DIRS = new Set(['read_file', 'list_files', 'write_file']);
 
@@ -79,7 +81,7 @@ function resolveReadTarget(filename: string): string {
   return workspacePath;
 }
 
-const readFileTool = tool(
+export const readFileTool = tool(
   async ({ filename }) => {
     try {
       const safePath = resolveReadTarget(filename);
@@ -116,9 +118,13 @@ const readFileTool = tool(
   }
 );
 
-const writeFileTool = tool(
+export const writeFileTool = tool(
   async ({ filename, content }) => {
     try {
+      const byteLen = Buffer.byteLength(content, 'utf-8');
+      if (byteLen > MAX_WRITE_BYTES) {
+        return `Error writing file: content too large (${byteLen} bytes; max ${MAX_WRITE_BYTES}). Split into smaller chapter files.`;
+      }
       const ctx = getAgentRunContext();
       if (ctx?.orgTaskId) {
         await ensureTaskArtifactDir(toTaskArtifactScope(ctx));
@@ -148,7 +154,7 @@ const writeFileTool = tool(
   }
 );
 
-const listFilesTool = tool(
+export const listFilesTool = tool(
   async () => {
     try {
       const ctx = getAgentRunContext();
@@ -190,6 +196,7 @@ export default class FileManagerSkill extends BaseSkill {
       systemPrompt:
         'You are a file management assistant. You can read, write, and list files in the user\'s workspace. ' +
         'When running an orchestration task, always write deliverables into the task artifact folder shown in your task context (workspace/orchestration/artifacts/{rootTaskId}/{taskId}/). ' +
+        'When direct read_file / write_file / list_files tools are available on the parent agent, those are used instead — this skill is for chat-only file requests. ' +
         'When asked to save something, use write_file. When asked what is in the task folder, use list_files (not the workspace root). ' +
         'read_file accepts a basename, a subpath under the task artifact folder, or a full workspace/... path. ' +
         'Keep responses brief as they will be spoken aloud.',

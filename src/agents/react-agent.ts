@@ -1416,7 +1416,14 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
               taskId: options.orgTaskId,
             })
           : [];
-      const runTools = options.orgTaskId ? orgTools : [...this.lastTools, ...orgTools];
+      const fileTools = options.orgTaskId
+        ? (
+            await import('../skills/tool-resolver')
+          ).resolveToolsByIds(['read_file', 'write_file', 'list_files'])
+        : [];
+      const runTools = options.orgTaskId
+        ? [...orgTools, ...fileTools]
+        : [...this.lastTools, ...orgTools, ...fileTools];
       const runGraph = this.compileGraph(runTools, resolved.llm, skillAllowlist);
       if (!runGraph) {
         yield { type: 'error', data: 'Agent graph not ready for orchestration run.' };
