@@ -1,0 +1,86 @@
+# MUST BE AT THE VERY TOP
+use_default_settings: true
+
+search:
+  safe_search: 0
+  autocomplete: "" 
+  formats:
+    - html
+    - json
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "my_secret_key_123456789"
+  limiter: false 
+  image_proxy: true
+
+plugins:
+  searx.plugins.tracker_url_remover.SXNGPlugin:
+    active: true
+
+engines:
+  # --- THE HEAVY HITTERS (High quality, highly scraper-friendly) ---
+  - name: brave
+    engine: brave
+    shortcut: br
+    weight: 3
+    disabled: false
+    
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    weight: 2
+    disabled: false
+    
+  - name: yahoo
+    engine: yahoo
+    shortcut: yh
+    weight: 2
+    disabled: false
+
+  # --- THE RELIABLE BACKUPS (Good redundancy, rarely use CAPTCHAs) ---
+  - name: ecosia
+    engine: ecosia
+    shortcut: ec
+    weight: 1
+    disabled: false
+    
+  - name: mojeek
+    engine: mojeek
+    shortcut: mj
+    weight: 1
+    disabled: false
+    
+  - name: yep
+    engine: yep
+    shortcut: yp
+    weight: 1
+    disabled: false
+
+  # --- INDEPENDENT WEB CRAWLERS (Zero tracking, impossible to get blocked) ---
+  - name: marginalia
+    engine: marginalia
+    shortcut: mg
+    weight: 1
+    disabled: false
+    
+  - name: mwmbl
+    engine: mwmbl
+    shortcut: mw
+    weight: 1
+    disabled: false
+
+  # --- STRICTLY DISABLED (The ones that throw errors/CAPTCHAs from the UAE) ---
+  - name: google
+    engine: google
+    disabled: true
+  - name: duckduckgo
+    engine: duckduckgo
+    disabled: true
+  - name: startpage
+    engine: startpage
+    disabled: true
+  - name: wikidata
+    engine: wikidata
+    disabled: true

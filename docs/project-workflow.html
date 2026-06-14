@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VoiceClaw — Complete Project Workflow</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #161b22;
+      --surface2: #1c2129;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #24a02c;
+      --accent-dim: #1a7a22;
+      --blue: #58a6ff;
+      --orange: #ff7043;
+      --purple: #bc8cff;
+      --sidebar-w: 260px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      display: flex;
+      min-height: 100vh;
+    }
+    nav {
+      position: fixed;
+      top: 0; left: 0;
+      width: var(--sidebar-w);
+      height: 100vh;
+      overflow-y: auto;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 1.25rem 0;
+      z-index: 10;
+    }
+    nav .brand {
+      padding: 0 1.25rem 1rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 0.75rem;
+    }
+    nav .brand h1 { font-size: 1rem; color: var(--accent); }
+    nav .brand p { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
+    nav a {
+      display: block;
+      padding: 0.4rem 1.25rem;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      border-left: 2px solid transparent;
+    }
+    nav a:hover, nav a.active { color: var(--text); background: var(--surface2); border-left-color: var(--accent); }
+    nav .section-label {
+      padding: 0.75rem 1.25rem 0.25rem;
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    main {
+      margin-left: var(--sidebar-w);
+      flex: 1;
+      max-width: 960px;
+      padding: 2rem 2.5rem 4rem;
+    }
+    header.hero {
+      margin-bottom: 2.5rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    header.hero h1 { font-size: 1.75rem; font-weight: 600; }
+    header.hero .subtitle { color: var(--muted); margin-top: 0.5rem; }
+    .stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 1.25rem;
+    }
+    .stat {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem 1rem;
+      font-size: 0.8rem;
+    }
+    .stat strong { color: var(--accent); display: block; font-size: 1.1rem; }
+    section {
+      margin-bottom: 3rem;
+      scroll-margin-top: 1.5rem;
+    }
+    section h2 {
+      font-size: 1.35rem;
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    section h3 { font-size: 1rem; margin: 1.25rem 0 0.5rem; color: var(--blue); }
+    p, li { color: var(--text); font-size: 0.9rem; }
+    p { margin-bottom: 0.75rem; }
+    ul { margin: 0.5rem 0 1rem 1.25rem; }
+    .diagram {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem;
+      margin: 1rem 0;
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      margin: 1rem 0;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+    }
+    th { background: var(--surface2); color: var(--muted); font-weight: 500; }
+    tr:hover td { background: var(--surface2); }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge-green { background: #1a3d1f; color: #3fb950; }
+    .badge-orange { background: #3d2a1a; color: var(--orange); }
+    .badge-blue { background: #1a2d3d; color: var(--blue); }
+    .badge-purple { background: #2d1a3d; color: var(--purple); }
+    .links { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+    .links a {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.45rem 0.9rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--blue);
+      text-decoration: none;
+      font-size: 0.8rem;
+    }
+    .links a:hover { border-color: var(--blue); }
+    .phase-card {
+      display: grid;
+      grid-template-columns: 2rem 1fr;
+      gap: 0.75rem 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+    }
+    .phase-num {
+      width: 2rem; height: 2rem;
+      background: var(--accent-dim);
+      color: #fff;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 0.85rem;
+    }
+    .phase-card h4 { font-size: 0.95rem; margin-bottom: 0.25rem; }
+    .phase-card .meta { font-size: 0.75rem; color: var(--muted); }
+    .gate { border-left: 3px solid var(--orange); padding-left: 0.75rem; margin: 0.5rem 0; }
+    footer {
+      margin-top: 3rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    @media (max-width: 768px) {
+      nav { display: none; }
+      main { margin-left: 0; padding: 1.25rem; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="brand">
+      <h1>VoiceClaw</h1>
+      <p>Complete project workflow</p>
+    </div>
+    <div class="section-label">Overview</div>
+    <a href="#summary">Executive summary</a>
+    <a href="#graphify">Graphify graph</a>
+    <a href="#context">System context</a>
+    <div class="section-label">Flows</div>
+    <a href="#chat-flow">Chat / voice</a>
+    <a href="#heartbeat">Org heartbeat</a>
+    <a href="#pipeline">Digital pipeline</a>
+    <a href="#task-status">Task status machine</a>
+    <a href="#orchestration">Orchestration layers</a>
+    <div class="section-label">Governance</div>
+    <a href="#approvals">Approval gates</a>
+    <a href="#skills">Skill chain</a>
+    <div class="section-label">Target</div>
+    <a href="#agentic">Agentic architecture</a>
+    <a href="#data">Data stores</a>
+    <a href="#commands">Commands</a>
+  </nav>
+
+  <main>
+    <header class="hero" id="summary">
+      <h1>VoiceClaw — Complete Project Workflow</h1>
+      <p class="subtitle">
+        Local-first one-person AI company: Express API, LangGraph ReAct agent, skill sub-graphs,
+        orchestration heartbeats, and digital-product pipeline.
+      </p>
+      <div class="stats">
+        <div class="stat"><strong>3273</strong> graphify nodes</div>
+        <div class="stat"><strong>10216</strong> edges</div>
+        <div class="stat"><strong>99</strong> communities</div>
+        <div class="stat"><strong>4</strong> pipeline phases</div>
+        <div class="stat"><strong>:3000</strong> API port</div>
+      </div>
+      <div class="links">
+        <a href="../graphify-out/graph.html" target="_blank">Open knowledge graph (graphify)</a>
+        <a href="project-architecture-deep-dive.md">Architecture deep dive (MD)</a>
+        <a href="orchestration-task-architecture.md">Task architecture (MD)</a>
+        <a href="competitor-upgrade-pipeline-sop.md">Pipeline SOP (MD)</a>
+      </div>
+    </header>
+
+    <section id="graphify">
+      <h2>Graphify knowledge graph</h2>
+      <p>
+        Run graphify before major refactors. The interactive graph surfaces cross-file dependencies
+        that line-by-line reading misses — especially orchestration ↔ agent ↔ skill bridges.
+      </p>
+      <table>
+        <thead><tr><th>Artifact</th><th>Path</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td>Interactive graph</td><td><code>graphify-out/graph.html</code></td><td>Browse 99 communities in browser</td></tr>
+          <tr><td>Audit report</td><td><code>graphify-out/GRAPH_REPORT.md</code></td><td>God nodes, surprises, cohesion</td></tr>
+          <tr><td>GraphRAG JSON</td><td><code>graphify-out/graph.json</code></td><td>MCP query, path, explain</td></tr>
+          <tr><td>Update scripts</td><td><code>scripts/graphify-update-*.py</code></td><td>Incremental AST refresh</td></tr>
+        </tbody>
+      </table>
+      <h3>Key communities (navigation)</h3>
+      <table>
+        <thead><tr><th>Theme</th><th>Representative nodes</th></tr></thead>
+        <tbody>
+          <tr><td>Orchestration core</td><td>TaskManager, HeartbeatScheduler, GovernanceEngine</td></tr>
+          <tr><td>Agent execution</td><td>ReactAgent, AgentFactory, MCPClientManager</td></tr>
+          <tr><td>Admin SPA</td><td>useOrchestration, TaskBoard, PipelineWorkflowPanel</td></tr>
+          <tr><td>Digital pipeline</td><td>pipeline-workflow, pipeline-mode label, artifact RAG</td></tr>
+          <tr><td>Docs / planning</td><td>Project Architecture Deep Dive, Digital Product Pipeline SOP</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="context">
+      <h2>System context</h2>
+      <div class="diagram mermaid">
+flowchart TB
+  subgraph Human["Human (solo founder)"]
+    AdminUI["Admin SPA /admin"]
+    Flutter["Flutter client"]
+    Channels["Discord · Telegram · WhatsApp"]
+  end
+  subgraph VoiceClaw["VoiceClaw Node :3000"]
+    API["Express api/server.ts"]
+    Agent["ReactAgent + LangGraph"]
+    Orch["Orchestration heartbeats"]
+    Pipe["Pipeline engine"]
+    Skills["Skill sub-graphs"]
+    Tools["Platform + MCP tools"]
+  end
+  subgraph Local["Local services"]
+    Ollama["Ollama / llama.cpp"]
+    Comfy["ComfyUI :8000"]
+    Searx["SearXNG optional"]
+    WS["workspace/ JSON + artifacts"]
+  end
+  subgraph External["External"]
+    Web["Web · markets · stores"]
+    Mongo["MongoDB optional"]
+    Redis["Redis optional"]
+  end
+  AdminUI --> API
+  Flutter --> API
+  Channels --> API
+  API --> Agent
+  API --> Orch
+  Orch --> Agent
+  Agent --> Skills
+  Skills --> Tools
+  Agent --> Ollama
+  Skills --> Ollama
+  Tools --> Web
+  Orch --> WS
+  Agent --> WS
+  Tools --> Comfy
+  API --> Searx
+      </div>
+      <h3>Backend module containers</h3>
+      <div class="diagram mermaid">
+flowchart LR
+  index["index.ts bootstrap"]
+  config["config/index.ts"]
+  server["api/server.ts"]
+  react["agents/react-agent.ts"]
+  factory["agents/agent-factory.ts"]
+  router["models/model-router.ts"]
+  registry["skills/registry.ts"]
+  orch["orchestration/*"]
+  pipeline["pipeline/*"]
+  mcp["mcp-servers/*"]
+  tools["tools/*"]
+  index --> config --> server
+  server --> react
+  react --> factory --> registry
+  react --> router
+  server --> orch
+  orch --> react
+  server --> pipeline
+  react --> mcp
+  factory --> tools
+      </div>
+    </section>
+
+    <section id="chat-flow">
+      <h2>Voice / text chat flow</h2>
+      <p><span class="badge badge-blue">When</span> Interactive chat, admin voice pill, Flutter client.</p>
+      <p><span class="badge badge-green">Why</span> Lowest-latency path; bypasses org task state unless <code>orgTaskId</code> is set from heartbeat.</p>
+      <div class="diagram mermaid">
+sequenceDiagram
+  participant U as User
+  participant API as api/server.ts
+  participant STT as stt/whisper
+  participant RA as ReactAgent
+  participant LE as learning-engine
+  participant SK as Skill subgraph
+  participant TTS as tts/kokoro
+  U->>API: POST /chat/audio or /chat/text
+  API->>STT: transcribe (audio only)
+  API->>RA: processStream(messages)
+  RA->>LE: matchMacro(intent)?
+  alt Macro hit
+    LE-->>RA: deterministic steps
+    RA-->>API: tool results + text
+  else No macro
+    RA->>RA: route skill / master tools
+    RA->>SK: invoke skill graph
+    SK-->>RA: tool trace + answer
+    RA->>LE: optional extractMacro
+  end
+  API->>TTS: synthesize chunks (SSE)
+  API-->>U: event stream token/audio/done
+      </div>
+    </section>
+
+    <section id="heartbeat">
+      <h2>Org heartbeat flow</h2>
+      <p><span class="badge badge-blue">When</span> Every ~15s per org agent + events: task:created, task:review_needed, task:unblocked.</p>
+      <p><span class="badge badge-orange">Where</span> <code>heartbeat-scheduler.ts</code> wired in <code>api/server.ts</code>.</p>
+      <div class="diagram mermaid">
+sequenceDiagram
+  participant HS as heartbeat-scheduler
+  participant TM as task-manager
+  participant TW as task-workflow
+  participant RA as ReactAgent
+  participant Gov as governance
+  HS->>TM: getNextTask(agentId)
+  alt Review queue
+    HS->>RA: review mode + JSON decision
+    RA->>TW: processReviewDecision
+  else Work queue
+    HS->>TM: checkout → in_progress
+    HS->>RA: processStream(orgTaskId, orgAgentId)
+    RA-->>HS: output + tool trace
+    alt awaiting-user / STOP AND ASK
+      HS->>Gov: request_clarification
+      HS->>TM: status blocked
+    else Manager with reports
+      HS->>HS: ensureTeamDelegation
+    else Leaf worker
+      HS->>TM: complete / submitForReview
+    end
+  end
+  TM->>TW: unblockDependents on done
+      </div>
+    </section>
+
+    <section id="pipeline">
+      <h2>Digital product pipeline (4-step SOP)</h2>
+      <p>
+        Aligns with <code>competitor-upgrade-pipeline-sop.md</code> and
+        <code>pipeline-workflow-schema.ts</code>. Root task label <code>pipeline-mode</code> enables
+        coordinator rules, model pin, and <code>PipelineWorkflowPanel</code> in admin UI.
+      </p>
+      <div class="diagram mermaid">
+flowchart LR
+  S1["1 Market Research<br/>ebook-validation · niche-validator · tiktok-ads"]
+  S2["2 Product Engineering<br/>competitor-breakdown · content-writer"]
+  S3["3 Creative Design<br/>comfyui-prompt · generate images"]
+  S4["4 Creator / PDF<br/>pdf-formatter · deliver"]
+  S1 -->|USER APPROVES top 5 pick| S2
+  S2 -->|all chapters on disk| S3
+  S3 -->|images in artifact folder| S4
+  S4 -->|digital-product.pdf| Done
+  S1 -.->|blocked awaiting-user| Gov["Governance approval"]
+      </div>
+
+      <h3>Pipeline phases (workflow.json schema)</h3>
+      <div class="phase-card">
+        <div class="phase-num">1</div>
+        <div>
+          <h4>Market Research <span class="badge badge-orange">requires approval</span></h4>
+          <p class="meta">ID: <code>market-research</code> · Skills: digital-product-research-fallback</p>
+          <ul>
+            <li>Find top 5 selling products with proof</li>
+            <li>STOP AND ASK user to pick one before proceeding</li>
+          </ul>
+          <p class="meta">Expected outputs: <code>competitor-shortlist.md</code></p>
+        </div>
+      </div>
+      <div class="phase-card">
+        <div class="phase-num">2</div>
+        <div>
+          <h4>Product Engineering</h4>
+          <p class="meta">ID: <code>product-engineering</code> · blocked after: market-research</p>
+          <ul><li>Write improved chapters after user selection</li></ul>
+          <p class="meta">Expected outputs: <code>chapter-*.md</code>, <code>table-of-contents.md</code></p>
+        </div>
+      </div>
+      <div class="phase-card">
+        <div class="phase-num">3</div>
+        <div>
+          <h4>Creative Design</h4>
+          <p class="meta">ID: <code>creative-design</code> · reads from: product-engineering</p>
+          <ul><li>Cover art and chapter images (ComfyUI, one job at a time)</li></ul>
+          <p class="meta">Expected outputs: <code>cover-*.png</code>, <code>images/</code></p>
+        </div>
+      </div>
+      <div class="phase-card">
+        <div class="phase-num">4</div>
+        <div>
+          <h4>Creator</h4>
+          <p class="meta">ID: <code>creator</code> · reads from: product-engineering + creative-design</p>
+          <ul><li>Assemble final PDF via pdf_merge_pipeline</li></ul>
+          <p class="meta">Expected outputs: <code>digital-product.pdf</code></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="task-status">
+      <h2>Task status machine</h2>
+      <p>
+        <strong>Note:</strong> status <code>blocked</code> (waiting on human) ≠ field <code>blockedBy</code>
+        (dependency DAG). Dependency waiting uses <code>backlog</code>.
+      </p>
+      <div class="diagram mermaid">
+stateDiagram-v2
+  [*] --> backlog: agent task / waiting on blockers
+  backlog --> todo: blockers satisfied
+  todo --> in_progress: checkout
+  in_progress --> review: submitForReview (has manager)
+  in_progress --> done: complete (no manager)
+  review --> done: approve_release
+  review --> todo: rework
+  review --> review: approve_escalate
+  review --> blocked: escalate_user / clarification
+  blocked --> todo: human responds via governance
+  todo --> done: admin override
+  any --> cancelled: admin
+      </div>
+    </section>
+
+    <section id="orchestration">
+      <h2>Orchestration layers</h2>
+      <div class="diagram mermaid">
+flowchart TB
+  subgraph UI["Admin UI"]
+    TB[TaskBoard / TaskDetailPanel]
+    PWP[PipelineWorkflowPanel]
+    HOOK[useOrchestration]
+  end
+  subgraph API["HTTP API"]
+    R[routes.ts]
+  end
+  subgraph Core["Orchestration core"]
+    TM[taskManager]
+    TW[taskWorkflow]
+    OD[orchestration-delegation]
+    OT[orchestration-tools]
+    HS[heartbeatScheduler]
+    PW[pipeline-workflow]
+  end
+  subgraph Exec["Agent execution"]
+    RA[ReactAgent processStream]
+    SK[Skills + org tools]
+  end
+  subgraph Persist["Persistence"]
+    ST[(workspace/orchestration/*.json)]
+    AR[artifacts/{root}/{task}/]
+  end
+  TB --> HOOK --> R
+  PWP --> R
+  R --> TM
+  R --> PW
+  TM --> TW
+  HS --> TM
+  HS --> RA
+  RA --> OT
+  OT --> OD --> TM
+  TM --> ST
+  TW --> ST
+  SK --> AR
+      </div>
+      <table>
+        <thead><tr><th>Module</th><th>Responsibility</th></tr></thead>
+        <tbody>
+          <tr><td><code>task-manager.ts</code></td><td>CRUD, checkout, complete, events</td></tr>
+          <tr><td><code>task-workflow.ts</code></td><td>Blockers, review chain, rework, unblock dependents</td></tr>
+          <tr><td><code>orchestration-delegation.ts</code></td><td>spawnTasks JSON, create_subtask</td></tr>
+          <tr><td><code>heartbeat-scheduler.ts</code></td><td>Work/review loops, GPU pause, awaiting-user</td></tr>
+          <tr><td><code>pipeline-workflow.ts</code></td><td>workflow.json load/save, phase schema</td></tr>
+          <tr><td><code>governance.ts</code></td><td>Human approvals queue</td></tr>
+          <tr><td><code>task-artifacts.ts</code></td><td>Artifact paths, upstream context merge</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="approvals">
+      <h2>Approval gates</h2>
+      <div class="diagram mermaid">
+flowchart TD
+  A[Agent output signals pause] --> B{Type?}
+  B -->|Top 5 selection| C[governance: clarification]
+  B -->|Review escalate_user| C
+  B -->|Hire / budget / high priority| D[governance: typed approval]
+  C --> E[Human responds via Admin]
+  D --> E
+  E --> F[task → todo + inputContext merge]
+  F --> G[Heartbeat resumes]
+      </div>
+      <table>
+        <thead><tr><th>Gate</th><th>Who</th><th>Blocks</th></tr></thead>
+        <tbody>
+          <tr><td>Pick competitor from top 5</td><td>Human (unless auto-proceed)</td><td>Step 2 writing</td></tr>
+          <tr><td>Hire agent</td><td>Human via governance</td><td>Agent activation</td></tr>
+          <tr><td>Budget increase</td><td>Human</td><td>Spend over cap</td></tr>
+          <tr><td>High-priority task</td><td>Human (if setting enabled)</td><td>Task leaves queue</td></tr>
+          <tr><td>request_clarification</td><td>Human</td><td>Task status blocked → todo</td></tr>
+        </tbody>
+      </table>
+      <div class="gate">
+        <strong>Auto-proceed warning:</strong> Company <code>autoProceed</code> picks research target #1 without you.
+        Test <code>pipeline-mode</code> + <code>autoReleasePipelineSubtasks</code> on one root task first.
+      </div>
+    </section>
+
+    <section id="skills">
+      <h2>Digital product skill chain</h2>
+      <table>
+        <thead><tr><th>Step</th><th>Skill IDs</th><th>Hard gate</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Research</td>
+            <td>ebook-validation-engine, etsy-gumroad-niche-validator, tiktok-ad-creative-research</td>
+            <td>User picks 1 of top 5 (awaiting-user)</td>
+          </tr>
+          <tr>
+            <td>Breakdown</td>
+            <td>digital-product-competitor-breakdown</td>
+            <td>After selection</td>
+          </tr>
+          <tr>
+            <td>Write</td>
+            <td>digital-product-content-writer</td>
+            <td>write_file → chapter-*.md</td>
+          </tr>
+          <tr>
+            <td>Visuals</td>
+            <td>digital-product-comfyui-prompt</td>
+            <td>One comfyui_generate at a time (VRAM)</td>
+          </tr>
+          <tr>
+            <td>PDF</td>
+            <td>digital-product-pdf-formatter</td>
+            <td>pdf_merge_pipeline success required</td>
+          </tr>
+          <tr>
+            <td>Fallback</td>
+            <td>digital-product-research-fallback</td>
+            <td>On search/fetch failure</td>
+          </tr>
+        </tbody>
+      </table>
+      <h3>Research engine (recommended)</h3>
+      <div class="diagram mermaid">
+flowchart LR
+  Q[Query planner] --> S[SearXNG / web_search]
+  S --> R[Rank URLs by domain trust]
+  R --> F[Fetch budget allocator]
+  F --> E[Extract structured fields]
+  E --> V[Validate against schema]
+  V --> OUT[JSON + markdown]
+      </div>
+    </section>
+
+    <section id="agentic">
+      <h2>Agentic target architecture</h2>
+      <p>Plan → Execute → Verify → Govern → Learn</p>
+      <div class="diagram mermaid">
+flowchart TB
+  subgraph Perception
+    STT[STT]
+    Channels[Channels]
+    Admin[Admin UI]
+  end
+  subgraph Cognition
+    Router[Intent + skill router]
+    GraphRAG[Graphify MCP]
+    ContextEnrich[Context enrich engine]
+    LocalLLM[Local model router]
+  end
+  subgraph Action
+    Orch[Orchestration DAG]
+    Skills[Skill graphs]
+    Tools[Tools + MCP + OS]
+    GPU[ComfyUI]
+  end
+  subgraph Memory
+    WS[workspace artifacts]
+    Mem[MCP memory]
+    Learn[Macros + learned skills]
+  end
+  subgraph Governance
+    Approvals[Human approvals]
+  end
+  Perception --> Router
+  Router --> GraphRAG
+  GraphRAG --> ContextEnrich
+  ContextEnrich --> LocalLLM
+  LocalLLM --> Orch
+  Orch --> Skills --> Tools
+  Skills --> GPU
+  Tools --> WS
+  LocalLLM --> Mem
+  Tools --> Learn
+  Orch --> Approvals
+  Approvals --> Orch
+      </div>
+      <div class="diagram mermaid">
+flowchart TB
+  Plan[Planner agent / CEO]
+  Graph[Graphify context query]
+  Exec[Worker agents + skills]
+  Verify[Schema + artifact verifier]
+  Gov[Human approvals]
+  Learn[Macros + graph update]
+  Plan --> Graph
+  Graph --> Exec
+  Exec --> Verify
+  Verify -->|fail| Exec
+  Verify -->|pass| Gov
+  Gov -->|approved| Learn
+      </div>
+      <table>
+        <thead><tr><th>Phase</th><th>Focus</th><th>Approval</th></tr></thead>
+        <tbody>
+          <tr><td>P0 (now)</td><td>Heartbeats + digital pipeline SOP + graphify audit</td><td>Human at research pick + clarifications</td></tr>
+          <tr><td>P1</td><td>Research planner + context enrich + cycle detection</td><td>Review auto-release settings</td></tr>
+          <tr><td>P2</td><td>GraphRAG in heartbeat preamble (--mcp)</td><td>Budget for extra inference</td></tr>
+          <tr><td>P3</td><td>Learned macros + failure classifier</td><td>Auto-macro create stays opt-in</td></tr>
+          <tr><td>P4</td><td>Multi-instance store</td><td>Infra approval</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="data">
+      <h2>Data stores</h2>
+      <table>
+        <thead><tr><th>Store</th><th>Path</th><th>Written by</th><th>Read by</th></tr></thead>
+        <tbody>
+          <tr><td>Hot config</td><td><code>workspace/config.json</code></td><td>Admin, API</td><td>configManager</td></tr>
+          <tr><td>Orchestration</td><td><code>workspace/orchestration/*.json</code></td><td>store, taskManager</td><td>Heartbeats, admin API</td></tr>
+          <tr><td>Artifacts</td><td><code>workspace/orchestration/artifacts/{root}/{task}/</code></td><td>Skills, task-artifacts</td><td>Downstream via inputContext</td></tr>
+          <tr><td>Pipeline workflow</td><td><code>.../pipeline/workflow.json</code></td><td>pipeline-workflow.ts</td><td>PipelineWorkflowPanel, heartbeats</td></tr>
+          <tr><td>Chats</td><td><code>workspace/chats/</code></td><td>agent-history</td><td>/chats, admin chat</td></tr>
+          <tr><td>Macros</td><td><code>workspace/learned/macros/</code></td><td>learning-engine</td><td>ReactAgent bypass</td></tr>
+          <tr><td>Pipelines</td><td><code>workspace/pipelines.json</code></td><td>pipeline-engine</td><td>Scheduler ticker</td></tr>
+          <tr><td>Models</td><td><code>workspace/models-config.json</code></td><td>Admin models UI</td><td>model-registry</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="commands">
+      <h2>Commands quick reference</h2>
+      <table>
+        <thead><tr><th>Command</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>npm run dev</code></td><td>Start API server</td></tr>
+          <tr><td><code>npm run admin:build</code></td><td>Build admin SPA</td></tr>
+          <tr><td><code>npm run onboard</code></td><td>Initialize workspace</td></tr>
+          <tr><td><code>python -c "from graphify.detect import detect_incremental; ..."</code></td><td>Detect changed files</td></tr>
+          <tr><td><code>python scripts/graphify-update-ast.py</code></td><td>AST extract changed code</td></tr>
+          <tr><td><code>python scripts/graphify-update-merge.py</code></td><td>Merge into graph + refresh graph.html</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      Generated 2026-06-11 · Graphify: 3273 nodes · 10216 edges · 99 communities ·
+      Sources: project-architecture-deep-dive.md, orchestration-task-architecture.md,
+      pipeline-workflow-schema.ts, graphify-out/GRAPH_REPORT.md
+    </footer>
+  </main>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        primaryColor: '#1a3d1f',
+        primaryTextColor: '#e6edf3',
+        primaryBorderColor: '#24a02c',
+        lineColor: '#58a6ff',
+        secondaryColor: '#161b22',
+        tertiaryColor: '#1c2129',
+        background: '#0f1117',
+        mainBkg: '#161b22',
+        nodeBorder: '#30363d',
+        clusterBkg: '#161b22',
+        titleColor: '#e6edf3',
+        edgeLabelBackground: '#161b22',
+      },
+      flowchart: { curve: 'basis', padding: 16 },
+      sequence: { actorMargin: 40, messageMargin: 30 },
+    });
+
+    const sections = document.querySelectorAll('section[id], header[id]');
+    const navLinks = document.querySelectorAll('nav a');
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        navLinks.forEach((link) => {
+          link.classList.toggle('active', link.getAttribute('href') === '#' + entry.target.id);
+        });
+      });
+    }, { rootMargin: '-20% 0px -70% 0px' });
+    sections.forEach((s) => observer.observe(s));
+  </script>
+</body>
+</html>

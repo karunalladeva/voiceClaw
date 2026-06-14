@@ -1,0 +1,48 @@
+# docker-compose.yml
+version: '3.7'
+
+services:
+  redis:
+    container_name: searxng-redis
+    image: redis:alpine
+    command: redis-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    networks:
+      - searxng
+    volumes:
+      - searxng-redis-data:/data
+    cap_drop:
+      - ALL
+
+  searxng:
+    container_name: searxng
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    networks:
+      - searxng
+    ports:
+      - "7979:8080" # Exposed on new port
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:7979/
+      - SEARXNG_REDIS_URL=redis://redis:6379/0
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m" # Prevents Docker logs from eating your hard drive
+        max-file: "1"
+    depends_on:
+      - redis
+
+networks:
+  searxng:
+
+volumes:
+  searxng-redis-data:
