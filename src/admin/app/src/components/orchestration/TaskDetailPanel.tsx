@@ -15,6 +15,7 @@ import { MarkdownField } from './MarkdownField';
 import { TaskDependencyPicker } from './TaskDependencyPicker';
 import { TaskLabelsField, isRootOrchestrationTask } from './TaskLabelsField';
 import { TaskAdminActions } from './TaskAdminActions';
+import { PipelineWorkflowPanel } from './PipelineWorkflowPanel';
 import { WorkProductAssets } from './WorkProductAssets';
 import { AWAITING_USER_LABEL, AWAITING_PARENT_LABEL } from './taskStatusHelpers';
 
@@ -56,6 +57,7 @@ interface Props {
   fetchWorkProducts: (taskId: string) => Promise<WorkProduct[]>;
   fetchComments: (taskId: string) => Promise<TaskComment[]>;
   fetchSubtasks?: (taskId: string) => Promise<Task[]>;
+  fetchPipelineWorkflow?: (taskId: string) => Promise<import('@/types/orchestration').PipelineWorkflowInfo>;
   delegateTeam?: (taskId: string, options?: { supersede?: boolean; managerId?: string }) => Promise<void>;
   refreshTaskContext?: (taskId: string) => Promise<void>;
   refreshRootContext?: (rootTaskId: string) => Promise<void>;
@@ -75,6 +77,7 @@ export function TaskDetailPanel({
   fetchWorkProducts,
   fetchComments,
   fetchSubtasks,
+  fetchPipelineWorkflow,
   delegateTeam,
   refreshTaskContext,
   refreshRootContext,
@@ -266,6 +269,14 @@ export function TaskDetailPanel({
           onChange={setEditLabels}
           showPipelineToggle={isRootOrchestrationTask(task)}
         />
+        {fetchPipelineWorkflow && (
+          <PipelineWorkflowPanel
+            task={task}
+            tasks={tasks}
+            fetchPipelineWorkflow={fetchPipelineWorkflow}
+            onSelectTask={onSelectTask}
+          />
+        )}
         <button
           type="button"
           disabled={loading || !editTitle.trim() || !editDesc.trim()}

@@ -34,7 +34,7 @@ export function OrchestrationDashboard() {
 
   const { companies, createCompany, updateCompanySettings } = useCompanies(liveRevision);
   const { agents, createAgent, updateAgent, triggerHeartbeat } = useOrgAgents(selectedCompany?.id, liveRevision);
-  const { tasks, createTask, updateTask, reviewTask, fetchWorkProducts, fetchComments, fetchSubtasks, delegateTeam, refreshTaskContext, refreshRootContext, requestClarification, addTaskComment, refresh: refreshTasks } = useTasks(
+  const { tasks, createTask, updateTask, reviewTask, fetchWorkProducts, fetchComments, fetchSubtasks, fetchPipelineWorkflow, delegateTeam, refreshTaskContext, refreshRootContext, requestClarification, addTaskComment, refresh: refreshTasks } = useTasks(
     selectedCompany?.id,
     liveRevision,
   );
@@ -210,6 +210,7 @@ export function OrchestrationDashboard() {
               fetchWorkProducts={fetchWorkProducts}
               fetchComments={fetchComments}
               fetchSubtasks={fetchSubtasks}
+              fetchPipelineWorkflow={fetchPipelineWorkflow}
               delegateTeam={delegateTeam}
               refreshTaskContext={refreshTaskContext}
               refreshRootContext={refreshRootContext}

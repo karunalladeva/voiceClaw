@@ -2,8 +2,11 @@ import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { BaseSkill, SkillDefinition } from './base-skill';
 import * as fs from 'fs/promises';
+import * as crypto from 'crypto';
 import * as path from 'path';
 import { getAgentRunContext, toTaskArtifactScope } from '../agents/agent-run-context';
+import { configManager } from '../config/index';
+import { isReadPathAllowed } from '../orchestration/artifact-read-allowlist';
 import {
   ensureTaskArtifactDir,
   getTaskArtifactAbsDir,
@@ -55,19 +58,35 @@ function resolveReadTarget(filename: string): string {
     const scope = toTaskArtifactScope(ctx);
     const taskRelDir = getTaskArtifactRelDir(scope);
     const taskAbsDir = getTaskArtifactAbsDir(scope);
+    let abs: string | null = null;
+
     if (norm.startsWith('workspace/')) {
-      const abs = path.resolve(process.cwd(), norm);
+      abs = path.resolve(process.cwd(), norm);
+    } else if (norm.startsWith(taskRelDir + '/')) {
+      abs = path.resolve(process.cwd(), norm);
+    } else {
+      const underTask = norm.includes('/') || norm.includes('\\')
+        ? path.join(taskAbsDir, ...norm.split(/[/\\]/).filter(Boolean))
+        : resolveTaskArtifactFile(scope, norm).absPath;
+      abs = underTask;
+    }
+
+    if (!abs) throw new Error('Access denied.');
+
+    const cfg = configManager.getConfig();
+    const enforceIo = ctx.pipelineMode && cfg.agent.artifactOnlyIo !== false;
+    if (enforceIo && ctx.allowedReadPaths) {
+      if (!isReadPathAllowed(abs, ctx.allowedReadPaths)) {
+        throw new Error(
+          'Read denied — not in your allowlist. Upstream outputs: use paths listed in task context or list_files.',
+        );
+      }
+      return abs;
+    }
+
+    if (abs.startsWith(taskAbsDir + path.sep) || abs === taskAbsDir) return abs;
+    if (norm.startsWith('workspace/')) {
       if (abs.startsWith(WORKSPACE + path.sep) || abs === WORKSPACE) return abs;
-    }
-    if (norm.startsWith(taskRelDir + '/')) {
-      const abs = path.resolve(process.cwd(), norm);
-      if (abs.startsWith(taskAbsDir + path.sep) || abs === taskAbsDir) return abs;
-    }
-    const underTask = norm.includes('/') || norm.includes('\\')
-      ? path.join(taskAbsDir, ...norm.split(/[/\\]/).filter(Boolean))
-      : resolveTaskArtifactFile(scope, norm).absPath;
-    if (underTask.startsWith(taskAbsDir + path.sep) || underTask === taskAbsDir) {
-      return underTask;
     }
   }
   if (norm.startsWith('workspace/')) {
@@ -134,6 +153,17 @@ export const writeFileTool = tool(
       const { absPath, relPath } = resolveWriteTarget(filename);
       await fs.mkdir(path.dirname(absPath), { recursive: true });
       await fs.writeFile(absPath, content, 'utf-8');
+
+      const cfg = configManager.getConfig();
+      if (ctx?.orgTaskId && cfg.agent.verifyActWrite !== false) {
+        const readBack = await fs.readFile(absPath, 'utf-8');
+        const expectedHash = crypto.createHash('sha256').update(content, 'utf-8').digest('hex');
+        const actualHash = crypto.createHash('sha256').update(readBack, 'utf-8').digest('hex');
+        if (expectedHash !== actualHash || readBack.length !== content.length) {
+          return `Error writing file: verify-act failed (read-back mismatch for ${relPath})`;
+        }
+      }
+
       const savedName = path.basename(filename);
       if (savedName.toLowerCase().endsWith('.pdf')) {
         return `Saved PDF: [${savedName}](/workspace/download/${relPath.replace(/^workspace\//, '')})`;

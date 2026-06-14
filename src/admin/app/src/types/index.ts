@@ -84,6 +84,28 @@ export interface AppConfig {
     enableInternet: boolean
     maxParallelSkills: number
     skillQueueTimeoutMs: number
+    maxPromptChars?: number
+    microRouter?: {
+      enabled?: boolean
+      useLlmFallback?: boolean
+      keepAlive?: boolean
+      modelId?: string
+      bm25MarginThreshold?: number
+      maxMatches?: number
+      generalLaneBias?: number
+      specialistMinMargin?: number
+      cacheTtlMs?: number
+    }
+    historyContext?: {
+      ranking?: 'recency' | 'bm25' | 'embedding'
+      embedModel?: string
+      embedBaseUrl?: string
+      minRecentTurns?: number
+    }
+    artifactOnlyIo?: boolean
+    allowUpstreamArtifactReads?: boolean
+    requirePipelineWorkflow?: boolean
+    verifyActWrite?: boolean
   }
   memory: {
     enabled: boolean
@@ -124,6 +146,9 @@ export interface AppConfig {
   webSearch?: {
     httpFallbackEnabled: boolean
     browserFallbackEnabled: boolean
+    snippetConfidenceTags?: boolean
+    multiQueryRrf?: boolean
+    rrfK?: number
   }
   webFetch?: {
     maxChars: number
@@ -134,6 +159,9 @@ export interface AppConfig {
     embedBaseUrl: string
     ignoreTlsErrors: boolean
     proxyUrl: string
+    rejectShellContent?: boolean
+    stripBoilerplate?: boolean
+    expandRankingQuery?: boolean
   }
   llamacpp?: {
     enabled: boolean
@@ -152,6 +180,10 @@ export interface AppConfig {
     apiKey: string
   }
   assistantName: string
+  debug: {
+    enabled: boolean
+    logLlmIo: boolean
+  }
 }
 
 export interface MemoryEntry {

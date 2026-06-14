@@ -28,6 +28,11 @@ import { modelRegistry } from './model-registry';
 
 import type { ModelConfig } from './types';
 
+import {
+  resolveMicroRouterModelConfig,
+  shouldKeepMicroRouterAlive,
+} from '../agents/micro-router-model';
+
 
 
 type QueueEntry = {
@@ -164,7 +169,12 @@ class ModelLoadCoordinator {
 
     const targetModel = config.model;
 
-    const keepWarm = config.id === this.getMasterId();
+    const routeConfig = resolveMicroRouterModelConfig();
+    const keepRouteAlive =
+      shouldKeepMicroRouterAlive() &&
+      routeConfig != null &&
+      config.id === routeConfig.id;
+    const keepWarm = config.id === this.getMasterId() || keepRouteAlive;
 
     if (this.residentModelName && this.residentModelName !== targetModel) {
 
@@ -270,9 +280,17 @@ class ModelLoadCoordinator {
 
       ranConfig.id !== masterId && ranConfig.id !== DEFAULT_ORG_MODEL_ID;
 
+    const routePinned =
+      shouldKeepMicroRouterAlive() &&
+      resolveMicroRouterModelConfig()?.id === ranConfig.id;
+
     if (usedNonMaster && master && isLocalProvider(master.provider)) {
 
-      if (this.residentModelName && this.residentModelName !== master.model) {
+      if (
+        !routePinned &&
+        this.residentModelName &&
+        this.residentModelName !== master.model
+      ) {
 
         await this.unloadWithPrepare(ranConfig, this.residentModelName);
 

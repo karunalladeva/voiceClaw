@@ -112,9 +112,8 @@ registerStep('ai_task', async (config, context): Promise<StepResult> => {
 
   try {
     // Lazy import to avoid circular deps
-    const { ReactAgent } = await import('../agents/react-agent');
-    const agent = new ReactAgent();
-    await agent.initialize([]);
+    const { getSharedReactAgent } = await import('../agents/shared-agent');
+    const agent = getSharedReactAgent();
     const chatId = buildPipelineScopedChatId(config, 'ai_task');
 
     let result = '';
@@ -243,9 +242,8 @@ registerStep('summarize', async (config, context): Promise<StepResult> => {
         : null);
     if (fallbackPrompt) {
       try {
-        const { ReactAgent } = await import('../agents/react-agent');
-        const agent = new ReactAgent();
-        await agent.initialize([]);
+        const { getSharedReactAgent } = await import('../agents/shared-agent');
+        const agent = getSharedReactAgent();
         const chatId = buildPipelineScopedChatId(config, 'summarize-fallback');
         let result = '';
         for await (const event of agent.processStream(fallbackPrompt, chatId, new AbortController().signal)) {
@@ -283,9 +281,8 @@ registerStep('summarize', async (config, context): Promise<StepResult> => {
       );
     }
 
-    const { ReactAgent } = await import('../agents/react-agent');
-    const agent = new ReactAgent();
-    await agent.initialize([]);
+    const { getSharedReactAgent } = await import('../agents/shared-agent');
+    const agent = getSharedReactAgent();
     const chatId = buildPipelineScopedChatId(config, 'summarize');
 
     let result = '';
@@ -327,9 +324,8 @@ registerStep('generate_doc', async (config, context): Promise<StepResult> => {
     : `${prompt}\n\n--- Context ---\n${context || 'No context provided.'}`;
 
   try {
-    const { ReactAgent } = await import('../agents/react-agent');
-    const agent = new ReactAgent();
-    await agent.initialize([]);
+    const { getSharedReactAgent } = await import('../agents/shared-agent');
+    const agent = getSharedReactAgent();
     const chatId = buildPipelineScopedChatId(config, 'generate_doc');
 
     let result = '';

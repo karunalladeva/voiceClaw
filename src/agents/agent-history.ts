@@ -2,6 +2,16 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import { BaseMessage, HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages';
+import {
+  getHistoryContextConfig,
+  selectHistoryIndices,
+  type HistoryCandidate,
+} from '../services/history-context-ranker';
+import { removeSpokenSummaryBlock } from '../utils/speech-for-tts';
+
+function messageContentForDisplay(role: string, content: string): string {
+  return role === 'ai' ? removeSpokenSummaryBlock(content) : content;
+}
 
 export interface ChatSummaryRecord {
   id: string;
@@ -184,11 +194,14 @@ export class AgentHistoryManager {
       title: 'Chat',
       updatedAt: Date.now(),
       summaries: meta.summaries,
-      messages: thread.map((m, i) => ({
-        role: m.getType() === 'human' ? 'user' : m.getType() === 'system' ? 'system' : 'ai',
-        content: m.content.toString(),
-        isSummarized: meta.isSummarized[i] ?? false,
-      })),
+      messages: thread.map((m, i) => {
+        const role = m.getType() === 'human' ? 'user' : m.getType() === 'system' ? 'system' : 'ai';
+        return {
+          role,
+          content: messageContentForDisplay(role, m.content.toString()),
+          isSummarized: meta.isSummarized[i] ?? false,
+        };
+      }),
     };
   }
 
@@ -205,11 +218,14 @@ export class AgentHistoryManager {
       title,
       updatedAt: Date.now(),
       summaries: meta.summaries,
-      messages: thread.map((m, i) => ({
-        role: m.getType() === 'human' ? 'user' : m.getType() === 'system' ? 'system' : 'ai',
-        content: m.content.toString(),
-        isSummarized: meta.isSummarized[i] ?? false,
-      })),
+      messages: thread.map((m, i) => {
+        const role = m.getType() === 'human' ? 'user' : m.getType() === 'system' ? 'system' : 'ai';
+        return {
+          role,
+          content: messageContentForDisplay(role, m.content.toString()),
+          isSummarized: meta.isSummarized[i] ?? false,
+        };
+      }),
     };
     try {
       await this.writeJsonAtomic(path.join(this.chatsDir, `${chatId}.json`), doc);
@@ -238,9 +254,14 @@ export class AgentHistoryManager {
   }
 
   /**
-   * Messages for the LLM only: latest summary (if any) + non-summarized turns, newest-first within budget.
+   * Messages for the LLM: latest summary + non-summarized turns within budget.
+   * With ranking=bm25|embedding, older turns are query-ranked; recent turns stay pinned.
    */
-  async buildLlmContextMessages(chatId: string, maxChars: number): Promise<BaseMessage[]> {
+  async buildLlmContextMessages(
+    chatId: string,
+    maxChars: number,
+    query = '',
+  ): Promise<BaseMessage[]> {
     await this.loadChat(chatId);
     const thread = this.getThread(chatId);
     const meta = this.ensureMeta(chatId, thread.length);
@@ -254,7 +275,11 @@ export class AgentHistoryManager {
       selected.push(summaryMsg);
       used += summaryMsg.content.toString().length;
     }
-    for (let i = thread.length - 1; i >= 0; i--) {
+    const messageBudget = maxChars - used;
+    if (messageBudget <= 0) return selected;
+
+    const candidates: HistoryCandidate[] = [];
+    for (let i = 0; i < thread.length; i++) {
       if (meta.isSummarized[i]) continue;
       const msg = thread[i];
       if (msg.getType() === 'system' && isLegacySummaryContent(msg.content.toString())) {
@@ -262,11 +287,40 @@ export class AgentHistoryManager {
       }
       const content = msg.content?.toString?.() ?? '';
       if (!content) continue;
-      if (used + content.length > maxChars) break;
-      selected.unshift(msg);
-      used += content.length;
+      candidates.push({ index: i, message: msg, text: content, chars: content.length });
     }
-    return selected;
+
+    const { ranking } = getHistoryContextConfig();
+    const q = query.trim();
+    const useSemantic = ranking !== 'recency' && q.length > 0;
+    const totalCandidateChars = candidates.reduce((sum, c) => sum + c.chars, 0);
+
+    if (!useSemantic || totalCandidateChars <= messageBudget) {
+      let budgetUsed = 0;
+      const recencySelected: BaseMessage[] = [];
+      for (let i = thread.length - 1; i >= 0; i--) {
+        if (meta.isSummarized[i]) continue;
+        const msg = thread[i];
+        if (msg.getType() === 'system' && isLegacySummaryContent(msg.content.toString())) {
+          continue;
+        }
+        const content = msg.content?.toString?.() ?? '';
+        if (!content) continue;
+        if (budgetUsed + content.length > messageBudget) break;
+        recencySelected.unshift(msg);
+        budgetUsed += content.length;
+      }
+      return [...selected, ...recencySelected];
+    }
+
+    const indices = await selectHistoryIndices(candidates, messageBudget, q);
+    const rankedMessages = indices
+      .sort((a, b) => a - b)
+      .map((i) => thread[i]);
+    console.log(
+      `[History] Semantic context (${ranking}): ${rankedMessages.length}/${candidates.length} turns, query="${q.slice(0, 60)}"`,
+    );
+    return [...selected, ...rankedMessages];
   }
 
   isMessageSummarized(chatId: string, index: number): boolean {

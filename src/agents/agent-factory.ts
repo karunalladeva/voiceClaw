@@ -9,6 +9,7 @@ import { modelRegistry } from '../models/model-registry';
 import { modelRouter } from '../models/model-router';
 import { truncateToolMessages, truncateToolOutput } from '../utils/tool-output-truncate';
 import { invokeWithToolXmlFallback } from '../utils/ollama-tool-call';
+import { invokeLlmWithDebug } from '../utils/debug-logger';
 import { getAgentRunContext, toTaskArtifactScope } from './agent-run-context';
 import { persistTaskResponse } from '../orchestration/task-response-store';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
@@ -109,6 +110,7 @@ export class AgentFactory {
         llmWithTools,
         llm,
         state.messages,
+        { label: `skill:${skill.name}` },
       );
       return { messages: [response] };
     };
@@ -153,13 +155,17 @@ export class AgentFactory {
       `Follow your skill instructions, including any required fenced \`\`\`json\`\`\` block. ` +
       `Mark unverified data clearly; do not invent metrics.`;
     try {
-      const response = await llm.invoke([
-        new SystemMessage(skill.systemPrompt),
-        new HumanMessage({ content: query }),
-        new HumanMessage({
-          content: `${instruction}\n\n--- Collected tool output ---\n\n${appendix}`,
-        }),
-      ]);
+      const response = await invokeLlmWithDebug(
+        llm,
+        [
+          new SystemMessage(skill.systemPrompt),
+          new HumanMessage({ content: query }),
+          new HumanMessage({
+            content: `${instruction}\n\n--- Collected tool output ---\n\n${appendix}`,
+          }),
+        ],
+        { label: `skill-grace:${skill.name}` },
+      );
       return messageContentToString(response.content).trim();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

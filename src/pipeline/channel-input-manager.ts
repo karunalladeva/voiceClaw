@@ -17,6 +17,7 @@ import { STTModule } from '../stt/whisper';
 import { ReactAgent } from '../agents/react-agent';
 import { agentEvents } from '../admin/agent-events';
 import { configManager } from '../config/index';
+import { removeSpokenSummaryBlock } from '../utils/speech-for-tts';
 
 export interface PendingPairing {
   code: string;
@@ -188,7 +189,7 @@ class ChannelInputManager {
         response = typeof event.data === 'string' ? event.data : String(event.data);
       }
     }
-    return response || 'Sorry, I could not generate a response.';
+    return removeSpokenSummaryBlock(response) || 'Sorry, I could not generate a response.';
   }
 
   /**

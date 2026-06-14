@@ -8,6 +8,9 @@ import { taskManager } from './task-manager';
 
 import { resolveAssigneeId, spawnTasksFromParent } from './orchestration-delegation';
 import { isAwaitingParentAnswer } from './orchestration-parent-clarification';
+import { hasPipelineModeLabel } from './orchestration-labels';
+import { loadPipelineWorkflow } from './pipeline-workflow';
+import { configManager } from '../config/index';
 
 import { getOpenParentQuestion } from './orchestration-parent-clarification';
 
@@ -201,6 +204,25 @@ export async function buildOrchestrationTools(
           const parent = await taskManager.getTaskById(ctx.taskId);
 
           if (!parent) return `Parent task not found: ${ctx.taskId}`;
+
+          const rootId = parent.rootTaskId ?? parent.id;
+          const root =
+            parent.rootTaskId && parent.rootTaskId !== parent.id
+              ? await taskManager.getTaskById(rootId)
+              : parent;
+          if (
+            root &&
+            hasPipelineModeLabel(root.labels) &&
+            configManager.getConfig().agent.requirePipelineWorkflow !== false
+          ) {
+            const workflow = await loadPipelineWorkflow({ id: parent.id, rootTaskId: rootId });
+            if (!workflow) {
+              return (
+                'create_subtask blocked: write pipeline/workflow.json to your task artifact first ' +
+                '(phases, blockedAfter, responsibilities), then delegate.'
+              );
+            }
+          }
 
           const resolvedId = await resolveAssigneeId(
 

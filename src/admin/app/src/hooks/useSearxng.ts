@@ -18,6 +18,9 @@ export type SearxngConfigForm = {
 export type WebSearchConfigForm = {
   httpFallbackEnabled: boolean
   browserFallbackEnabled: boolean
+  snippetConfidenceTags: boolean
+  multiQueryRrf: boolean
+  rrfK: number
 }
 
 export type WebFetchConfigForm = {
@@ -29,6 +32,16 @@ export type WebFetchConfigForm = {
   embedBaseUrl: string
   ignoreTlsErrors: boolean
   proxyUrl: string
+  rejectShellContent: boolean
+  stripBoilerplate: boolean
+  expandRankingQuery: boolean
+}
+
+export type AgentQualityConfigForm = {
+  artifactOnlyIo: boolean
+  allowUpstreamArtifactReads: boolean
+  requirePipelineWorkflow: boolean
+  verifyActWrite: boolean
 }
 
 export const DEFAULT_SEARXNG_CONFIG: SearxngConfigForm = {
@@ -42,6 +55,9 @@ export const DEFAULT_SEARXNG_CONFIG: SearxngConfigForm = {
 export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfigForm = {
   httpFallbackEnabled: true,
   browserFallbackEnabled: true,
+  snippetConfidenceTags: true,
+  multiQueryRrf: true,
+  rrfK: 60,
 }
 
 export const DEFAULT_WEB_FETCH_CONFIG: WebFetchConfigForm = {
@@ -53,6 +69,16 @@ export const DEFAULT_WEB_FETCH_CONFIG: WebFetchConfigForm = {
   embedBaseUrl: 'http://localhost:11434',
   ignoreTlsErrors: false,
   proxyUrl: '',
+  rejectShellContent: true,
+  stripBoilerplate: true,
+  expandRankingQuery: true,
+}
+
+export const DEFAULT_AGENT_QUALITY_CONFIG: AgentQualityConfigForm = {
+  artifactOnlyIo: true,
+  allowUpstreamArtifactReads: true,
+  requirePipelineWorkflow: true,
+  verifyActWrite: true,
 }
 
 export function useSearxng() {

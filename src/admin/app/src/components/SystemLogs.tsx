@@ -33,13 +33,35 @@ export function SystemLogs({ events, connected }: SystemLogsProps) {
   
   useEffect(() => {
     const systemLogs = events
-      .filter(e => e.type === 'system:log')
+      .filter((e) => e.type === 'system:log' || e.type === 'debug:llm_request' || e.type === 'debug:llm_response')
       .slice(0, 10)
-      .map(e => ({
-        time: new Date(e.timestamp).toLocaleTimeString(),
-        level: (e.data.level as LogEntry['level']) || 'info',
-        message: (e.data.message as string) || ''
-      }))
+      .map((e) => {
+        if (e.type === 'debug:llm_request') {
+          const label = (e.data.label as string) || 'request'
+          const model = e.data.modelId as string | undefined
+          const count = e.data.messageCount as number | undefined
+          return {
+            time: new Date(e.timestamp).toLocaleTimeString(),
+            level: 'debug' as const,
+            message: `LLM IN [${label}]${model ? ` ${model}` : ''}${count != null ? ` (${count} msgs)` : ''}`,
+          }
+        }
+        if (e.type === 'debug:llm_response') {
+          const label = (e.data.label as string) || 'response'
+          const model = e.data.modelId as string | undefined
+          const content = ((e.data.content as string) || '').slice(0, 200)
+          return {
+            time: new Date(e.timestamp).toLocaleTimeString(),
+            level: 'debug' as const,
+            message: `LLM OUT [${label}]${model ? ` ${model}` : ''}: ${content || '(empty)'}`,
+          }
+        }
+        return {
+          time: new Date(e.timestamp).toLocaleTimeString(),
+          level: (e.data.level as LogEntry['level']) || 'info',
+          message: (e.data.message as string) || '',
+        }
+      })
     
     if (systemLogs.length > 0) {
       setLogs(prev => [...systemLogs, ...prev].slice(0, 100))

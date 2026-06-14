@@ -264,6 +264,13 @@ export function useTasks(companyId?: string, liveRevision: number = 0) {
     return data.tasks || [];
   };
 
+  const fetchPipelineWorkflow = async (taskId: string) => {
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/pipeline-workflow`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load pipeline workflow');
+    return data as import('@/types/orchestration').PipelineWorkflowInfo;
+  };
+
   const delegateTeam = async (
     taskId: string,
     options?: { supersede?: boolean; managerId?: string },
@@ -347,6 +354,7 @@ export function useTasks(companyId?: string, liveRevision: number = 0) {
     fetchWorkProducts,
     fetchComments,
     fetchSubtasks,
+    fetchPipelineWorkflow,
     delegateTeam,
     refreshTaskContext,
     refreshRootContext,

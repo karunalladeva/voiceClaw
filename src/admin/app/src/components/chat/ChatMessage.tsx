@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils'
 import { ChatMarkdown } from '@/components/chat/ChatMarkdown'
 import { ChatMediaAttachments } from '@/components/chat/ChatMediaAttachments'
 import { attachmentsNotInMarkdown, extractMediaAttachments } from '@/lib/mediaAttachments'
+import { removeSpokenSummaryBlock } from '@/lib/spokenSummary'
 import type { ChatMessage as ChatMessageType } from '@/hooks/useChat'
 
 interface ChatMessageProps {
@@ -22,8 +23,9 @@ export function ChatMessage({
   const isSystem = message.sender === 'System'
   const isArchived = message.isSummarized === true
   const isSummaryBlock = message.isSummaryBlock === true
+  const displayText = isUser ? message.text : removeSpokenSummaryBlock(message.text)
   const mediaAttachments = !isUser
-    ? attachmentsNotInMarkdown(message.text, extractMediaAttachments(message.text))
+    ? attachmentsNotInMarkdown(displayText, extractMediaAttachments(displayText))
     : []
 
   return (
@@ -76,12 +78,12 @@ export function ChatMessage({
           </div>
           {isUser ? (
             <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words text-foreground/90">
-              {message.text}
+              {displayText}
             </p>
           ) : (
             <>
               <ChatMarkdown
-                content={message.text || (isProcessing && isLast ? '…' : '')}
+                content={displayText || (isProcessing && isLast ? '…' : '')}
                 className={cn(isSystem && 'text-warning')}
               />
               <ChatMediaAttachments attachments={mediaAttachments} />

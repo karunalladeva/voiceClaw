@@ -1,3 +1,4 @@
+import type { BaseMessage } from '@langchain/core/messages';
 import { extractStockSymbols } from '../utils/stock-tickers';
 
 /** Extract plain text from string or multimodal user input. */
@@ -135,6 +136,58 @@ export function isSynthesisOverProvidedData(text: string): boolean {
   return /\b(summarize|summary|synthesis|analyze each|recommendations?|key metrics|per symbol|each of the|for each)\b/i.test(
     t,
   );
+}
+
+const PIPELINE_HISTORY_MARKERS =
+  /\[Pipeline Output\]|\[pipeline\]|Recommendation:|Current Price|TECH SECTOR|## Market data for /i;
+
+const PRESENTATION_INTENT =
+  /\b(table view|format as|in a table|as columns|list each|reformat|show as)\b|\btable\b/i;
+
+const EXPLICIT_LIVE_REFRESH = /\b(latest|live|fetch|update|right now)\b/i;
+
+/** Standalone buy/sell language — live trading, not history reformat. */
+export function isStandaloneLiveTradingQuery(query: string): boolean {
+  const t = query.trim();
+  if (!t) return false;
+  if (PRESENTATION_INTENT.test(t)) return false;
+  if (/\bbuy\s*[|/]\s*sell\b/i.test(t)) return true;
+  if (/\bbuy\/sell\b/i.test(t)) return true;
+  if (/\b(should I buy|hold or sell|buy or sell)\b/i.test(t)) return true;
+  if (/\b(entry|exit)\b/i.test(t) && /\b(trade|trading|stock|position)\b/i.test(t)) return true;
+  if (/\bsignal(s)?\b/i.test(t) && /\b(buy|sell|trade|trading)\b/i.test(t)) return true;
+  return false;
+}
+
+export function hasPipelineHistorySignal(historyText: string): boolean {
+  return PIPELINE_HISTORY_MARKERS.test(historyText);
+}
+
+export function hasPresentationIntent(query: string): boolean {
+  return PRESENTATION_INTENT.test(query.trim());
+}
+
+export function extractHistoryText(messages: BaseMessage[]): string {
+  return messages
+    .map((m) => m.content?.toString?.() ?? '')
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** Reformat/summarize prior pipeline or report content already in chat history. */
+export function isFollowUpOverProvidedHistory(query: string, historyText: string): boolean {
+  if (!historyText.trim()) return false;
+  if (!hasPipelineHistorySignal(historyText)) return false;
+  if (!hasPresentationIntent(query)) return false;
+  if (EXPLICIT_LIVE_REFRESH.test(query.trim())) return false;
+  if (isStandaloneLiveTradingQuery(query)) return false;
+  return true;
+}
+
+export function shouldUseSynthesisMode(query: string, historyText?: string): boolean {
+  if (isSynthesisOverProvidedData(query)) return true;
+  if (historyText && isFollowUpOverProvidedHistory(query, historyText)) return true;
+  return false;
 }
 
 /** T20 cricket reply with impossible overs remaining. */

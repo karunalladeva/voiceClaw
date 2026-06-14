@@ -5,6 +5,7 @@ import TurndownService from 'turndown';
 import { configManager } from '../config/index';
 import { enrichCatalogHtml } from './web-listing-parser';
 import { isCatalogLikeUrl } from './web-heuristics';
+import { stripMarkdownBoilerplate } from '../utils/markdown-cleanup';
 
 const RETRY_STATUSES = new Set([403, 429, 502, 503]);
 const MAX_RETRIES = 2;
@@ -100,6 +101,7 @@ export type PageMarkdownResult = {
   title: string;
   markdown: string;
   fullMarkdown: string;
+  cleanupRemovedChars?: number;
 };
 
 export async function fetchPageMarkdown(url: string): Promise<PageMarkdownResult> {
@@ -124,9 +126,19 @@ export async function fetchPageMarkdown(url: string): Promise<PageMarkdownResult
     extracted = extractPlainFallback(html, url);
   }
 
+  let fullMarkdown = extracted.markdown;
+  let cleanupRemovedChars = 0;
+  const cfg = configManager.getConfig().webFetch;
+  if (cfg.stripBoilerplate !== false) {
+    const cleaned = stripMarkdownBoilerplate(fullMarkdown);
+    fullMarkdown = cleaned.text;
+    cleanupRemovedChars = cleaned.removedChars;
+  }
+
   return {
     title: extracted.title,
-    markdown: extracted.markdown,
-    fullMarkdown: extracted.markdown,
+    markdown: fullMarkdown,
+    fullMarkdown,
+    cleanupRemovedChars,
   };
 }

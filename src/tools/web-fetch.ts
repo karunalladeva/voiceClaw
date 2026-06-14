@@ -7,6 +7,8 @@ import { checkUrlReachability } from './web-url-reachability';
 import { fetchPageMarkdown } from './web-page-fetch';
 import { packMarkdownForQuery, queryFromTitle } from '../utils/query-aware-truncate';
 import { configManager } from '../config/index';
+import { isNavigationShellContent } from './web-heuristics';
+import { expandRankingQuery, marketplaceHintTokens } from '../utils/query-expansion';
 
 const WEB_FETCH_TOOL_TIMEOUT_MS = 90_000;
 const WEB_FETCH_CACHE_TTL_MS = 15 * 60 * 1000;
@@ -14,6 +16,7 @@ const WEB_FETCH_CACHE_TTL_MS = 15 * 60 * 1000;
 type FullFetchCache = {
   fullMarkdown: string;
   title: string;
+  cleanupRemovedChars?: number;
 };
 
 function isSkillToolCancelled(): boolean {
@@ -33,9 +36,21 @@ function normalizeUrlKey(url: string): string {
 function resolveBm25Query(opts: {
   query?: string;
   focus?: string;
+  title?: string;
 }): string {
   const runCtx = getAgentRunContext();
   const explicit = opts.query?.trim() || opts.focus?.trim();
+  const cfg = configManager.getConfig().webFetch;
+  if (cfg.expandRankingQuery !== false) {
+    const expanded = expandRankingQuery([
+      explicit,
+      runCtx?.lastWebSearchQuery,
+      runCtx?.lastUserQuery,
+      opts.title ? queryFromTitle(opts.title) : '',
+      marketplaceHintTokens(runCtx?.lastUserQuery),
+    ]);
+    if (expanded) return expanded;
+  }
   if (explicit) return explicit;
   if (runCtx?.lastWebSearchQuery?.trim()) return runCtx.lastWebSearchQuery.trim();
   if (runCtx?.lastUserQuery?.trim()) return runCtx.lastUserQuery.trim();
@@ -74,6 +89,9 @@ function formatFetchOutput(
     queryUsed: string;
     totalChars: number;
     bridgeOverlapChars: number;
+    confidence?: string;
+    cleanupRemovedChars?: number;
+    queryExpanded?: boolean;
   },
 ): string {
   const header = [
@@ -81,9 +99,15 @@ function formatFetchOutput(
     `URL: ${url}`,
     title ? `Title: ${title}` : null,
     'Source: impit+readability',
+    meta.confidence ? `Confidence: ${meta.confidence}` : null,
+    meta.cleanupRemovedChars && meta.cleanupRemovedChars > 0
+      ? `Cleanup: removed ${meta.cleanupRemovedChars} chars boilerplate`
+      : null,
     `Chars: ${body.length}/${meta.totalChars}`,
     meta.rankingMode !== 'none' ? `Ranking: ${meta.rankingMode}` : null,
-    meta.queryUsed ? `Query: ${meta.queryUsed}` : null,
+    meta.queryUsed
+      ? `Query: ${meta.queryUsed}${meta.queryExpanded ? ' (expanded)' : ''}`
+      : null,
     meta.part > 0 || meta.totalParts > 1 ? `Part: ${meta.part + 1}/${meta.totalParts}` : null,
     meta.bridgeOverlapChars > 0 ? `Overlap: ${meta.bridgeOverlapChars} chars bridged from prior part` : null,
   ]
@@ -104,7 +128,11 @@ async function getFullMarkdown(url: string): Promise<FullFetchCache> {
     }
   }
   const page = await fetchPageMarkdown(url);
-  const entry: FullFetchCache = { fullMarkdown: page.fullMarkdown, title: page.title };
+  const entry: FullFetchCache = {
+    fullMarkdown: page.fullMarkdown,
+    title: page.title,
+    cleanupRemovedChars: page.cleanupRemovedChars,
+  };
   await cache.set(cacheKey, JSON.stringify(entry), WEB_FETCH_CACHE_TTL_MS);
   return entry;
 }
@@ -133,8 +161,31 @@ export async function runWebFetch(
   }
 
   const full = await getFullMarkdown(url);
+
+  const cfg = configManager.getConfig().webFetch;
+  if (cfg.rejectShellContent !== false && isNavigationShellContent(full.fullMarkdown)) {
+    return formatFetchOutput(
+      url,
+      full.title,
+      'Confidence: LOW — page looks like navigation shell (sign-in/cookie chrome) with little substance. Try the next URL from web_search.',
+      {
+        part,
+        totalParts: 1,
+        rankingMode: 'rejected',
+        queryUsed: effectiveQuery,
+        totalChars: full.fullMarkdown.length,
+        bridgeOverlapChars: 0,
+        confidence: 'LOW',
+        cleanupRemovedChars: full.cleanupRemovedChars,
+      },
+    );
+  }
+
+  const queryExpanded = cfg.expandRankingQuery !== false;
   if (!effectiveQuery) {
-    effectiveQuery = queryFromTitle(full.title);
+    effectiveQuery = resolveBm25Query({ query, focus, title: full.title });
+  } else if (queryExpanded && !query?.trim() && !focus?.trim()) {
+    effectiveQuery = resolveBm25Query({ query, focus, title: full.title });
   }
 
   const priorPartKey =
@@ -143,6 +194,8 @@ export async function runWebFetch(
   const priorBody = priorPartText?.split('\n\n---\n\n').slice(1).join('\n\n---\n\n') ?? null;
 
   const packed = await packMarkdownForQuery(full.fullMarkdown, effectiveQuery, part, priorBody);
+  const substance = full.fullMarkdown.replace(/\s+/g, ' ').trim().length;
+  const confidence = substance > 1400 ? 'HIGH' : 'MEDIUM';
   const result = formatFetchOutput(url, full.title, packed.text, {
     part: packed.partIndex,
     totalParts: packed.totalParts,
@@ -150,6 +203,9 @@ export async function runWebFetch(
     queryUsed: packed.queryUsed,
     totalChars: full.fullMarkdown.length,
     bridgeOverlapChars: packed.bridgeOverlapChars,
+    confidence,
+    cleanupRemovedChars: full.cleanupRemovedChars,
+    queryExpanded,
   });
 
   await cache.set(memoKey, result, WEB_FETCH_CACHE_TTL_MS);

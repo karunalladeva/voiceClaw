@@ -17,10 +17,12 @@ import { startPipelineTicker } from '../pipeline/pipeline-engine';
 import '../pipeline/steps'; // register step executors
 import { vramMonitor } from '../utils/vram-monitor';
 import { channelInputManager } from '../pipeline/channel-input-manager';
+import { setSharedReactAgent } from '../agents/shared-agent';
 import { deliverToChannel } from '../pipeline/channels';
 import { evolutionService } from '../services/evolution-service';
 import { evolutionScheduler } from '../services/evolution-scheduler';
 import { setupAdminWebSocket, setupAdminRoutes } from '../admin/admin-server';
+import { setupMicroRouterAdminRoutes } from '../admin/micro-router-routes';
 import { agentEvents } from '../admin/agent-events';
 import { setupOrchestrationRoutes } from '../orchestration/routes';
 import { setupCreatorRoutes } from '../creator/routes';
@@ -37,7 +39,13 @@ import {
 } from '../orchestration';
 import { logAgentRun } from '../orchestration/agent-run-logger';
 import type { AgentRunMode } from '../orchestration/types';
-import { capSpeechPlain, selectPlainTextForTts, splitIntoTtsChunks } from '../utils/speech-for-tts';
+import {
+  capSpeechPlain,
+  removeSpokenSummaryBlock,
+  selectPlainTextForTts,
+  SpokenSummaryDisplayFilter,
+  splitIntoTtsChunks,
+} from '../utils/speech-for-tts';
 import { inferenceActivity } from '../utils/inference-activity';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
 import { modelLoadCoordinator } from '../models/model-load-coordinator';
@@ -66,6 +74,26 @@ function sendSSE(res: express.Response, event: StreamEvent) {
   if (res.writableEnded || res.destroyed) return;
   res.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
   if (typeof (res as any).flush === 'function') (res as any).flush();
+}
+
+/** Relay agent stream to client; hide <spoken_summary> from UI while keeping raw text for TTS. */
+function relayAgentStreamEvent(
+  res: express.Response,
+  event: StreamEvent,
+  displayFilter: SpokenSummaryDisplayFilter,
+): string | undefined {
+  if (event.type === 'token' && event.data) {
+    const display = displayFilter.feed(String(event.data));
+    if (display) sendSSE(res, { type: 'token', data: display });
+    return undefined;
+  }
+  if (event.type === 'text_done' && event.data) {
+    const raw = String(event.data);
+    sendSSE(res, { type: 'text_done', data: removeSpokenSummaryBlock(raw) });
+    return raw;
+  }
+  sendSSE(res, event);
+  return undefined;
 }
 
 function initSSE(res: express.Response) {
@@ -161,16 +189,16 @@ async function handleStreamingChat(
   }, 5000);
 
   let fullText = '';
+  const displayFilter = new SpokenSummaryDisplayFilter();
   const releaseInference = inferenceActivity.begin();
 
   try {
     for await (const event of agent.processStream(input, chatId, controller.signal)) {
       if (controller.signal.aborted) break;
 
-      sendSSE(res, event);
-
-      if (event.type === 'text_done' && event.data) {
-        fullText = event.data;
+      const rawAnswer = relayAgentStreamEvent(res, event, displayFilter);
+      if (rawAnswer) {
+        fullText = rawAnswer;
         if (!controller.signal.aborted && configManager.getConfig().speech.finalOnly) {
           try {
             await emitTtsForAnswer(res, fullText, controller.signal);
@@ -268,16 +296,16 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
     });
 
     let fullText = '';
+    const displayFilter = new SpokenSummaryDisplayFilter();
     const releaseInference = inferenceActivity.begin();
 
     try {
       for await (const event of agent.processStream(textOrAudioPayload, chatId, controller.signal)) {
         if (controller.signal.aborted) break;
 
-        sendSSE(res, event);
-
-        if (event.type === 'text_done' && event.data) {
-          fullText = event.data;
+        const rawAnswer = relayAgentStreamEvent(res, event, displayFilter);
+        if (rawAnswer) {
+          fullText = rawAnswer;
           if (!controller.signal.aborted && configManager.getConfig().speech.finalOnly) {
             try {
               await emitTtsForAnswer(res, fullText, controller.signal);
@@ -1243,6 +1271,7 @@ export const startServer = async (port: number = 3000) => {
 
   // Initialize local tools first
   await agent.initialize([fsServerPath, memoryServerPath, marketServerPath, chromaServerPath]);
+  setSharedReactAgent(agent);
   const masterAtStartup = modelRegistry.getMaster();
   if (masterAtStartup) {
     modelLoadCoordinator.markResidentFromStartup(masterAtStartup);
@@ -1307,6 +1336,7 @@ export const startServer = async (port: number = 3000) => {
 
   // ── Setup Admin Dashboard Routes ────────────────────────────────────────────
   setupAdminRoutes(app);
+  setupMicroRouterAdminRoutes(app, agent);
 
   // ── Setup Orchestration (Paperclip-style) ──────────────────────────────────
   await orchestrationStore.initialize();
@@ -1335,7 +1365,7 @@ export const startServer = async (port: number = 3000) => {
   const { registerCreatorSkillReload } = await import('../creator/creator-skill-bridge');
   registerCreatorSkillReload(() => agent.reloadCreatorWorkspaceSkills());
 
-  heartbeatScheduler.setHandler(async (orgAgent, task, context, mode) => {
+  heartbeatScheduler.setHandler(async (orgAgent, task, context, mode, runPrep) => {
     const { agentRegistry } = await import('../orchestration/agent-registry');
     const {
       formatTeamDelegationHint,
@@ -1399,6 +1429,11 @@ export const startServer = async (port: number = 3000) => {
         orgTaskId: task?.id,
         orgRootTaskId: task?.rootTaskId ?? task?.id,
         orgSystemAppend,
+        allowedReadPaths: runPrep?.allowedReadPaths,
+        isManagerRun: runPrep?.isManager,
+        pipelineMode: runPrep?.pipelineMode,
+        blockersOpen: runPrep?.blockersOpen,
+        userDecisionBound: !!runPrep?.userDecision,
       })) {
         if (event.type === 'text_done') {
           output = event.data;

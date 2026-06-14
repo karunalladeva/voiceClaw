@@ -60,12 +60,16 @@ async function main(): Promise<void> {
   const hasResults = /\[1\]/.test(searchOut) && /URL:/.test(searchOut);
   const usedSearx = /Engine:/.test(searchOut);
   const hasScore = /Score:/.test(searchOut);
+  const hasConfidence = /Confidence:\s*LOW/i.test(searchOut);
+  const hasRrfHint = /Merged:\s*RRF/i.test(searchOut);
 
   console.log('\n[web_search]', {
     durationMs: searchMs,
     pass: !searchFailed && hasResults,
     providerHint: usedSearx ? 'SearXNG' : 'fallback (no Engine: lines)',
     hasScore,
+    hasConfidence,
+    hasRrfHint,
     resultCount: (searchOut.match(/^\[\d+\]/gm) ?? []).length,
   });
   summarize('web_search output', searchOut);
@@ -100,11 +104,13 @@ async function main(): Promise<void> {
     fetchOut.length > 400 &&
     !fetchFailed &&
     fetchOut.includes('Source: impit+readability');
+  const hasFetchConfidence = /Confidence:\s*(MEDIUM|HIGH|LOW)/i.test(fetchOut);
 
   console.log('\n[web_fetch]', {
     durationMs: fetchMs,
     pass: hasBody,
     chars: fetchOut.length,
+    hasFetchConfidence,
   });
   summarize('web_fetch output', fetchOut);
 
@@ -114,6 +120,7 @@ async function main(): Promise<void> {
   }
 
   console.log('\n=== PASS: web_search and web_fetch validated ===');
+  console.log('Run scripts/validate-quality-utils.ts for RRF/strip/gate unit checks.');
 }
 
 main().catch((err) => {

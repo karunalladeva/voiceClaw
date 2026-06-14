@@ -47,8 +47,77 @@ export function stripMarkdownForSpeech(text: string): string {
 /**
  * Plain text body without the spoken_summary block (for optional display logic).
  */
+const SPOKEN_OPEN_TAG = '<spoken_summary>';
+const SPOKEN_CLOSE_TAG = '</spoken_summary>';
+const SPOKEN_OPEN_RE = /<spoken_summary>/i;
+const SPOKEN_CLOSE_RE = /<\/spoken_summary>/i;
+
 export function removeSpokenSummaryBlock(raw: string): string {
   return raw.replace(/<spoken_summary>[\s\S]*?<\/spoken_summary>/gi, '').trim();
+}
+
+/** Hold back a suffix that may be the start of an XML tag split across chunks. */
+function splitPartialTagSuffix(text: string, tag: string): { safe: string; carry: string } {
+  const lowerText = text.toLowerCase();
+  const lowerTag = tag.toLowerCase();
+  for (let len = Math.min(text.length, lowerTag.length - 1); len >= 1; len--) {
+    const suffix = lowerText.slice(-len);
+    if (lowerTag.startsWith(suffix) && suffix.startsWith('<')) {
+      return { safe: text.slice(0, text.length - len), carry: text.slice(text.length - len) };
+    }
+  }
+  return { safe: text, carry: '' };
+}
+
+/** Strip <spoken_summary> from streamed tokens so the block never appears in chat UI. */
+export class SpokenSummaryDisplayFilter {
+  private inBlock = false;
+  private carry = '';
+
+  reset(): void {
+    this.inBlock = false;
+    this.carry = '';
+  }
+
+  feed(chunk: string): string {
+    if (!chunk) return '';
+    let work = this.carry + chunk;
+    this.carry = '';
+    let out = '';
+
+    while (work.length > 0) {
+      if (this.inBlock) {
+        const closeMatch = work.match(SPOKEN_CLOSE_RE);
+        if (closeMatch && closeMatch.index !== undefined) {
+          work = work.slice(closeMatch.index + closeMatch[0].length);
+          this.inBlock = false;
+          continue;
+        }
+        const partial = splitPartialTagSuffix(work, SPOKEN_CLOSE_TAG);
+        this.carry = partial.carry;
+        break;
+      }
+
+      const openMatch = work.match(SPOKEN_OPEN_RE);
+      if (openMatch && openMatch.index !== undefined) {
+        out += work.slice(0, openMatch.index);
+        work = work.slice(openMatch.index + openMatch[0].length);
+        this.inBlock = true;
+        continue;
+      }
+
+      const partial = splitPartialTagSuffix(work, SPOKEN_OPEN_TAG);
+      out += partial.safe;
+      this.carry = partial.carry;
+      break;
+    }
+
+    return out;
+  }
+}
+
+export function sanitizeAgentTextForDisplay(raw: string): string {
+  return removeSpokenSummaryBlock(raw);
 }
 
 export function selectPlainTextForTts(

@@ -35,10 +35,23 @@ class GovernanceEngine {
     const approval = approvals.find(a => a.id === id);
     if (!approval || approval.status !== 'pending') return null;
 
+    if (approval.type === 'clarification') {
+      const data = approval.data as { taskId?: string; response?: string };
+      const response = (data.response ?? notes ?? '').trim();
+      if (!response) {
+        throw new Error(
+          'Clarification approval requires a user response. Use respondToClarification with the answer.',
+        );
+      }
+      approval.data = { ...data, response };
+      approval.reviewNotes = response;
+    } else {
+      approval.reviewNotes = notes;
+    }
+
     approval.status = 'approved';
     approval.reviewerId = reviewerId;
     approval.reviewedAt = Date.now();
-    approval.reviewNotes = notes;
 
     await orchestrationStore.save('approvals', approvals);
 

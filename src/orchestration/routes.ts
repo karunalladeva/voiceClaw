@@ -430,6 +430,87 @@ router.get('/tasks/:id/subtasks', async (req, res) => {
   }
 });
 
+router.get('/tasks/:id/pipeline-workflow', async (req, res) => {
+  try {
+    const task = await taskManager.getTaskById(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    const { hasPipelineModeLabel } = await import('./orchestration-labels');
+    const {
+      loadPipelineWorkflow,
+      loadUserDecision,
+      resolveManagerTaskIdForRoot,
+    } = await import('./pipeline-workflow');
+    const { getTaskArtifactRelDir } = await import('./task-artifacts');
+
+    const rootId = task.rootTaskId ?? task.id;
+    const root =
+      rootId !== task.id ? await taskManager.getTaskById(rootId) : task;
+    const pipelineMode = hasPipelineModeLabel(root?.labels);
+
+    const allTasks = await orchestrationStore.load('tasks');
+    const rootTasks = allTasks.filter(
+      (t) => t.id === rootId || (t.rootTaskId ?? t.id) === rootId,
+    );
+
+    const managerTaskId = await resolveManagerTaskIdForRoot(rootId, rootTasks);
+    const managerScope = managerTaskId
+      ? { id: managerTaskId, rootTaskId: rootId }
+      : { id: task.id, rootTaskId: rootId };
+
+    const workflow = await loadPipelineWorkflow(managerScope);
+    const userDecision = await loadUserDecision(managerScope);
+
+    const workflowRelPath = workflow
+      ? `${getTaskArtifactRelDir(managerScope)}/pipeline/workflow.json`
+      : null;
+    const userDecisionRelPath = userDecision
+      ? `${getTaskArtifactRelDir(managerScope)}/pipeline/user-decision.json`
+      : null;
+    const managerArtifactRelPath = managerTaskId
+      ? `${getTaskArtifactRelDir(managerScope)}/`
+      : null;
+
+    const phases =
+      workflow?.phases.map((phase) => {
+        const match = rootTasks.find(
+          (t) =>
+            t.title.trim().toLowerCase() === phase.title.trim().toLowerCase() ||
+            t.title.trim().toLowerCase() === phase.id.toLowerCase(),
+        );
+        const blockerTasks = (match?.blockedBy ?? [])
+          .map((id) => rootTasks.find((t) => t.id === id))
+          .filter(Boolean)
+          .map((t) => ({ id: t!.id, title: t!.title, status: t!.status }));
+
+        return {
+          ...phase,
+          taskId: match?.id ?? null,
+          taskStatus: match?.status ?? null,
+          assigneeId: match?.assigneeId ?? phase.assigneeId ?? null,
+          artifactRelPath: match
+            ? `${getTaskArtifactRelDir({ id: match.id, rootTaskId: rootId })}/`
+            : null,
+          blockerTasks,
+        };
+      }) ?? [];
+
+    res.json({
+      pipelineMode,
+      rootTaskId: rootId,
+      managerTaskId,
+      managerArtifactRelPath,
+      workflowRelPath,
+      userDecisionRelPath,
+      workflow,
+      userDecision,
+      phases,
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.post('/tasks/:id/delegate-team', async (req, res) => {
   try {
     const task = await taskManager.getTaskById(req.params.id);

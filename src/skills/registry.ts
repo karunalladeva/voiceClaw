@@ -6,11 +6,14 @@ import {
   isSynthesisOverProvidedData,
   isTradingRelatedQuery,
 } from '../agents/prompt-context';
+import { isGeneralLane, type MicroRouteResult } from '../agents/micro-router';
 
 export type SkillRoutingMode = 'auto' | 'compact' | 'standard' | 'trading-focused' | 'synthesis';
 
 const TRADING_SKILL_PREFIX = 'trading-';
 const MAX_RANKED_TRADING_SKILLS = 10;
+const MAX_MICRO_ROUTE_SKILLS = 10;
+const MAX_MICRO_ROUTE_TOOLS = 8;
 
 export class SkillRegistry {
   private skills: Map<string, SkillDefinition> = new Map();
@@ -138,6 +141,7 @@ export class SkillRegistry {
     userQuery?: string,
     allowedSkillIds?: string[],
     mode: SkillRoutingMode = 'auto',
+    microRoute?: MicroRouteResult,
   ): string {
     let enabled = this.getEnabledSkills();
     if (allowedSkillIds && allowedSkillIds.length > 0) {
@@ -151,8 +155,20 @@ export class SkillRegistry {
     const tradingQuery = isTradingRelatedQuery(query);
     const synthesis = mode === 'synthesis' || (mode === 'auto' && isSynthesisOverProvidedData(query));
 
-    const core = enabled.filter((s) => !s.id.startsWith(TRADING_SKILL_PREFIX));
+    let core = enabled.filter((s) => !s.id.startsWith(TRADING_SKILL_PREFIX));
     const trading = enabled.filter((s) => s.id.startsWith(TRADING_SKILL_PREFIX));
+
+    if (microRoute && !isGeneralLane(microRoute.category) && microRoute.rankedSkillIds.length > 0) {
+      const focusIds = new Set(microRoute.rankedSkillIds);
+      const focused = core.filter((s) => focusIds.has(s.id));
+      const ranked = this.rankSkillsForQuery(focused.length > 0 ? focused : core, query);
+      core = (ranked.length > 0 ? ranked : focused).slice(0, MAX_MICRO_ROUTE_SKILLS);
+    } else if (microRoute && !isGeneralLane(microRoute.category)) {
+      const ranked = this.rankSkillsForQuery(core, query);
+      if (ranked.length > 0) core = ranked.slice(0, MAX_MICRO_ROUTE_SKILLS);
+    } else if (microRoute && isGeneralLane(microRoute.category) && microRoute.rankedSkillIds.length > 0 && !casual) {
+      core = this.prioritizeSkillsByIds(core, microRoute.rankedSkillIds);
+    }
 
     const coreLines = core.map((s) => this.formatSkillLine(s));
 
@@ -183,19 +199,98 @@ ${detailedLines.length > 0 ? `\nRelevant trading skills for this message:\n${det
 
     let routingMode: string;
     if (synthesis) routingMode = 'synthesis';
+    else if (microRoute && !isGeneralLane(microRoute.category)) routingMode = `micro-${microRoute.category}`;
     else if (mode !== 'auto') routingMode = mode;
     else routingMode = casual && !tradingQuery ? 'compact' : tradingQuery ? 'trading-focused' : 'standard';
 
+    const microRouteBlock =
+      microRoute && !isGeneralLane(microRoute.category)
+        ? this.buildMicroRouteBlock(microRoute)
+        : microRoute && isGeneralLane(microRoute.category) && microRoute.matches.length > 0
+          ? this.buildGeneralRouteBlock(microRoute)
+          : '';
+
+    const microToolsBlock =
+      microRoute && microRoute.rankedToolNames.length > 0
+        ? this.buildMicroRouteToolsBlock(microRoute, query)
+        : '';
+
+    const coreHeading =
+      microRoute && !isGeneralLane(microRoute.category)
+        ? 'Focused skills for this request (route via route_to_skill):'
+        : microRoute && isGeneralLane(microRoute.category) && microRoute.rankedSkillIds.length > 0
+          ? 'Core skills (catalog-ranked for this message; full list below):'
+          : 'Core skills (always available):';
+
     return `
-<skills routing="${routingMode}">
+${microRouteBlock}${microToolsBlock}<skills routing="${routingMode}">
 You have specialized skills via the NATIVE JSON tool \`route_to_skill\`.
 CRITICAL: DO NOT use shell_exec or scripts to launch skills — call \`route_to_skill\` directly with skillId and query.
 
-Core skills (always available):
+${coreHeading}
 ${coreLines.join('\n')}
 
 ${tradingSection}
 </skills>`;
+  }
+
+  private prioritizeSkillsByIds(skills: SkillDefinition[], orderedIds: string[]): SkillDefinition[] {
+    const rank = new Map(orderedIds.map((id, index) => [id, index]));
+    const matched = skills.filter((s) => rank.has(s.id));
+    const rest = skills.filter((s) => !rank.has(s.id));
+    matched.sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
+    return [...matched, ...rest];
+  }
+
+  private buildGeneralRouteBlock(route: MicroRouteResult): string {
+    const topSkills = route.rankedSkillIds.slice(0, 5).join(', ') || '(see ranked skills below)';
+    const topTools = route.rankedToolNames.slice(0, 5).join(', ') || '(see tools below)';
+    return `<micro_route lane="general" confidence="${route.confidence.toFixed(2)}">
+General assistant lane. Prefer catalog matches: skills → ${topSkills}; tools → ${topTools}.
+Use route_to_skill or native/MCP tools directly — full skill catalog remains available below.
+</micro_route>
+`;
+  }
+
+  private buildMicroRouteBlock(route: MicroRouteResult): string {
+    const topSkills = route.rankedSkillIds.slice(0, 5).join(', ') || '(see focused skills below)';
+    const lane = route.category;
+    return `<micro_route lane="${lane}" confidence="${route.confidence.toFixed(2)}">
+Specialist lane "${lane}" (from live catalog). Prefer route_to_skill → ${topSkills}, or matched native/MCP tools below.
+Do not browse unrelated skills — act on the first turn.
+</micro_route>
+`;
+  }
+
+  private buildMicroRouteToolsBlock(route: MicroRouteResult, query: string): string {
+    const lines: string[] = [];
+    const seen = new Set<string>();
+
+    for (const match of route.matches) {
+      if (match.kind !== 'skill') {
+        if (seen.has(match.id)) continue;
+        seen.add(match.id);
+        lines.push(`- ${match.id}: ${match.hint}`);
+      } else {
+        const skill = this.getSkill(match.id);
+        if (!skill) continue;
+        for (const tool of skill.tools) {
+          const name = tool?.name;
+          if (!name || seen.has(name)) continue;
+          seen.add(name);
+          lines.push(`- ${name} (skill ${match.id})`);
+        }
+      }
+      if (lines.length >= MAX_MICRO_ROUTE_TOOLS) break;
+    }
+
+    if (!lines.length) return '';
+
+    return `<micro_route_tools query="${query.slice(0, 80).replace(/"/g, "'")}">
+Relevant native + MCP tools for this message (call directly — not shell_exec):
+${lines.join('\n')}
+</micro_route_tools>
+`;
   }
 
   // ── Learned Skills (OpenClaw-style SKILL.md) ─────────────────────────────

@@ -5,6 +5,14 @@ import { taskManager } from './task-manager';
 import { hasPipelineModeLabel } from './orchestration-labels';
 import { splitChapterSubtaskIfEnabled } from './pipeline-chapter-split';
 import { titlesOverlap } from './pipeline-helpers';
+import {
+  buildSpawnInputsFromWorkflow,
+  validateSpawnMatchesWorkflow,
+} from './pipeline-delegation-template';
+import {
+  ensureDefaultPipelineWorkflow,
+  loadPipelineWorkflow,
+} from './pipeline-workflow';
 import type { ApprovalRequest, OrgAgent, SpawnTaskInput, Task } from './types';
 
 export interface DelegationResult {
@@ -330,8 +338,9 @@ export async function ensureTeamDelegation(
   const rootId = parentTask.rootTaskId ?? parentTask.id;
   const root =
     rootId === parentTask.id ? parentTask : await taskManager.getTaskById(rootId);
+  const pipelineMode = hasPipelineModeLabel(root?.labels);
   const supersede =
-    options?.supersede === true && hasPipelineModeLabel(root?.labels);
+    options?.supersede === true && pipelineMode;
   if (existing.length > 0 && !supersede) {
     console.log(`[Orchestration] Parent task already has ${existing.length} subtask(s)`);
     return { tasks: existing, spawnedNewly: false };
@@ -345,14 +354,54 @@ export async function ensureTeamDelegation(
     return { tasks: [], spawnedNewly: false };
   }
 
+  let workflow = await loadPipelineWorkflow({ id: parentTask.id, rootTaskId: rootId });
+  if (pipelineMode && !workflow) {
+    workflow = await ensureDefaultPipelineWorkflow(
+      { id: parentTask.id, rootTaskId: rootId },
+      manager.id,
+    );
+    console.log(`[Orchestration] Bootstrapped default pipeline/workflow.json for ${parentTask.id}`);
+  }
+
   let created = await applyDelegationFromOutput(manager, parentTask, output, options);
-  if (created.length > 0) return { tasks: created, spawnedNewly: true };
+  if (created.length > 0) {
+    if (workflow) {
+      const validation = validateSpawnMatchesWorkflow(
+        created.map((t) => ({
+          title: t.title,
+          description: t.description,
+          assigneeId: t.assigneeId ?? '',
+          blockedBy: t.blockedBy,
+        })),
+        workflow,
+      );
+      if (!validation.ok) {
+        console.warn(`[Orchestration] Spawn/workflow mismatch: ${validation.message}`);
+        await taskManager.addComment(
+          parentTask.id,
+          manager.id,
+          'agent',
+          `[DELEGATION_MISMATCH] ${validation.message}`,
+        );
+      }
+    }
+    return { tasks: created, spawnedNewly: true };
+  }
 
   console.log(`[Orchestration] No subtasks from output/tools — generating assignments for ${manager.name}…`);
-  const generated = await generateSpawnTasksWithLlm(manager, parentTask, output);
+  let generated = await generateSpawnTasksWithLlm(manager, parentTask, output);
+  if (generated.length === 0 && workflow) {
+    generated = await buildSpawnInputsFromWorkflow(manager, parentTask, workflow);
+  }
   if (generated.length === 0) {
     console.warn(`[Orchestration] LLM delegation produced no valid subtasks for ${parentTask.id}`);
     return { tasks: [], spawnedNewly: false };
+  }
+  if (workflow) {
+    const validation = validateSpawnMatchesWorkflow(generated, workflow);
+    if (!validation.ok) {
+      console.warn(`[Orchestration] Generated spawn/workflow mismatch: ${validation.message}`);
+    }
   }
   created = await spawnTasksFromParent(parentTask, manager.id, generated, options);
   return { tasks: created, spawnedNewly: created.length > 0 };
@@ -390,8 +439,9 @@ export function buildOrgOrchestrationSystemAppend(
   if (reports.length > 0) {
     parts.push(
       `You manage ${reports.length} direct report(s). Delegation tools: list_team_members, create_subtask, list_my_subtasks, list_pending_subtask_questions, reply_to_subtask_question.`,
-      `After route_to_skill returns, read the [Sub-Agent Result] synthesis first; use the "Orchestrator tool trace" section only if you need raw tool evidence. Then call create_subtask for each direct report — do not call route_to_skill again for the same skill id if VALIDATION RESUME says it is blocked (use partial data from the tool trace, a fallback skill once, or ask the user).`,
-      `Do not create_subtask while the latest skill handoff is incomplete or missing required structured output — resolve with synthesis, fallback, or user clarification first.`,
+      `FIRST: write pipeline/workflow.json to your task artifact (phases, blockedAfter, readsFrom, responsibilities). Then delegate one subtask per workflow phase.`,
+      `After route_to_skill returns, read the [Sub-Agent Result] synthesis first; use the "Orchestrator tool trace" section only if you need raw tool evidence. Then call create_subtask for each direct report — do not call route_to_skill again for the same skill id if VALIDATION RESUME says it is blocked (use partial data from the tool trace or ask the user).`,
+      `Do not create_subtask while the latest skill handoff is incomplete or missing required structured output — resolve with synthesis or user clarification first.`,
       `Do not finish without creating subtasks for each report who must contribute.`,
       `Use sequential blockedBy when phases depend on each other (requirements before design).`,
       `Answer subtask questions with reply_to_subtask_question when list_pending_subtask_questions shows any.`,

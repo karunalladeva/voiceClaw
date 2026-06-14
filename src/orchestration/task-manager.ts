@@ -18,6 +18,7 @@ import {
 } from './awaiting-user-input';
 import { normalizeBlockedByIds } from './orchestration-blocked-by';
 import { ensureTaskArtifactDir } from './task-artifacts';
+import { saveUserDecision } from './pipeline-workflow';
 import type {
   Task,
   TaskStatus,
@@ -874,8 +875,16 @@ class TaskManager extends EventEmitter {
     if (!task) return null;
     await this.addComment(taskId, reviewerId, 'human', `[Clarification] ${trimmed}`);
     const priorContext = task.inputContext?.trim() ?? '';
+    const bindingSection = `### User decision (binding)\n\n${trimmed}`;
     const section = `### User clarification\n\n${trimmed}`;
-    const inputContext = priorContext ? `${priorContext}\n\n${section}` : section;
+    const inputContext = priorContext
+      ? `${priorContext}\n\n${bindingSection}\n\n${section}`
+      : `${bindingSection}\n\n${section}`;
+    const rootId = task.rootTaskId ?? task.id;
+    await saveUserDecision(
+      { id: taskId, rootTaskId: rootId },
+      { decision: trimmed, approvedAt: Date.now(), source: 'clarification' },
+    );
     const labels = (task.labels ?? []).filter(
       (l) => l !== AWAITING_USER_LABEL && l !== AWAITING_PARENT_LABEL,
     );

@@ -4,6 +4,7 @@
 
 import { getAgentRunContext } from './agent-run-context';
 import { packMarkdownToCharBudget } from '../utils/query-aware-truncate';
+import { mapReduceUpstreamContext } from '../services/context-map-reduce';
 import { truncateToolOutput } from '../utils/tool-output-truncate';
 
 export const SKILL_RUN_INCOMPLETE_MARKER = '[SKILL_RUN_INCOMPLETE]';
@@ -67,7 +68,8 @@ export function capOrchestratorHandoff(handoff: string, query?: string): string 
   }
 
   if (!appendix) {
-    return prefix + capHandoffSection(narrative, rankingQuery, budget) + HANDOFF_TRUNCATION_NOTE;
+    const reduced = mapReduceUpstreamContext(narrative, Math.floor(budget * 0.9));
+    return prefix + capHandoffSection(reduced, rankingQuery, budget) + HANDOFF_TRUNCATION_NOTE;
   }
 
   const narrativeBudget = Math.floor(budget * 0.55);

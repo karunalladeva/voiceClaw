@@ -40,6 +40,7 @@ interface Props {
   fetchWorkProducts?: (taskId: string) => Promise<import('@/types/orchestration').WorkProduct[]>;
   fetchComments?: (taskId: string) => Promise<import('@/types/orchestration').TaskComment[]>;
   fetchSubtasks?: (taskId: string) => Promise<Task[]>;
+  fetchPipelineWorkflow?: (taskId: string) => Promise<import('@/types/orchestration').PipelineWorkflowInfo>;
   delegateTeam?: (taskId: string, options?: { supersede?: boolean; managerId?: string }) => Promise<void>;
   refreshTaskContext?: (taskId: string) => Promise<void>;
   refreshRootContext?: (rootTaskId: string) => Promise<void>;
@@ -161,6 +162,7 @@ export function TaskBoard({
   fetchWorkProducts,
   fetchComments,
   fetchSubtasks,
+  fetchPipelineWorkflow,
   delegateTeam,
   refreshTaskContext,
   refreshRootContext,
@@ -313,6 +315,7 @@ export function TaskBoard({
           fetchWorkProducts={fetchWorkProducts}
           fetchComments={fetchComments}
           fetchSubtasks={fetchSubtasks}
+          fetchPipelineWorkflow={fetchPipelineWorkflow}
           delegateTeam={delegateTeam}
           refreshTaskContext={refreshTaskContext}
           refreshRootContext={refreshRootContext}

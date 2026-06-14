@@ -9,4 +9,10 @@ export interface AgentRunOptions {
   orgRootTaskId?: string;
   /** Extra system prompt for org / heartbeat runs */
   orgSystemAppend?: string;
+  /** Pipeline artifact read allowlist for this run */
+  allowedReadPaths?: import('../orchestration/artifact-read-allowlist').ReadAllowlistResult;
+  isManagerRun?: boolean;
+  pipelineMode?: boolean;
+  blockersOpen?: boolean;
+  userDecisionBound?: boolean;
 }

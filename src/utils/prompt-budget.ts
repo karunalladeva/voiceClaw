@@ -1,4 +1,5 @@
 import { BaseMessage } from '@langchain/core/messages';
+import { isLlmIoDebugEnabled } from './debug-logger';
 import { packMarkdownToCharBudget } from './query-aware-truncate';
 import {
   countMarketSymbolsInHumanInput,
@@ -95,8 +96,7 @@ export function marketSymbolStatsFromHumanInput(input: string): {
 }
 
 export function debugPromptDumpEnabled(): boolean {
-  const v = process.env.DEBUG_PROMPT?.trim().toLowerCase();
-  return v === '1' || v === 'true' || v === 'yes';
+  return isLlmIoDebugEnabled();
 }
 
 export function debugLogPromptMessages(label: string, messages: BaseMessage[]): void {

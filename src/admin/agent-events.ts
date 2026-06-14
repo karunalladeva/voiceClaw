@@ -20,7 +20,9 @@ export type AgentEventType =
   | 'skill:completed'
   | 'memory:search'
   | 'memory:stored'
-  | 'system:log';
+  | 'system:log'
+  | 'debug:llm_request'
+  | 'debug:llm_response';
 
 export interface AgentEvent {
   id: string;

@@ -19,7 +19,9 @@ import { invokeWithToolXmlFallback } from '../utils/ollama-tool-call';
 import {
   buildBlockedSkillRouteResult,
   registerBlockedSkill,
+  buildDeniedSkillRouteResult,
   resolveBlockedSkillIdsForRun,
+  resolveSkillRouteDenial,
 } from './skill-route-guard';
 import { SkillRegistry } from '../skills/registry';
 import { configManager } from '../config/index';
@@ -34,13 +36,16 @@ import { agentEvents } from '../admin/agent-events';
 import { historyManager } from './agent-history';
 import {
   extractUserQueryText,
+  extractHistoryText,
   isCasualMessage,
+  isFollowUpOverProvidedHistory,
   isSynthesisOverProvidedData,
   requiresLiveLookup,
   getLiveLookupDomain,
   hasVolatileNumericToolOutput,
   toolTraceHasAdequateLiveData,
   failsCricketSanityCheck,
+  shouldUseSynthesisMode,
   type LiveLookupDomain,
 } from './prompt-context';
 import {
@@ -51,12 +56,14 @@ import {
   sumMessagesChars,
 } from '../utils/prompt-budget';
 import type { SkillRoutingMode } from '../skills/registry';
+import { classifyMicroRoute, clearMicroRouteCache, type MicroRouteResult } from './micro-router';
 import type { AgentRunOptions } from './agent-run-options';
 import { DEFAULT_ORG_MODEL_ID } from '../orchestration/agent-normalizer';
 import { getAgentRunContext, getAgentRunStorage, toTaskArtifactScope, type AgentRunContext } from './agent-run-context';
 import { persistTaskResponse } from '../orchestration/task-response-store';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
 import { truncateToolOutput } from '../utils/tool-output-truncate';
+import { removeSpokenSummaryBlock } from '../utils/speech-for-tts';
 
 export type { AgentRunOptions } from './agent-run-options';
 
@@ -223,14 +230,14 @@ If you need information or need to perform an action, use your tools.
 </identity>
 
 <rules>
-1. TTS OUTPUT: Your final answer will be spoken aloud by a Text-to-Speech engine. Keep responses brief, natural, and avoid markdown formatting.
-2. VOICE & PERSONALITY: You MUST understand and support SLANG, informal language, and cultural references fluently. Adapt your tone to match the user's level of formality. Never use bullet points in your final response.
+1. SCREEN OUTPUT (MARKDOWN): The main answer is displayed in chat as Markdown. Use clear structure — headings, bullet or numbered lists, **emphasis**, and GFM tables (header row + columns) when the user asks for a table or when structure improves readability. Put full detail in this Markdown body.
+2. VOICE & TTS: Text-to-Speech reads only the plain-text inside <spoken_summary> (see rule 6) for long answers, or a stripped short body when no block is needed — not the full Markdown aloud. Support slang, informal language, and cultural references in the spoken line; match the user's tone.
 3. VISION ENTRITLEMENT (CRITICAL): You DO have access to the user's screen via the native JSON tool named "route_to_skill" (skillId: "screen-reader"). NEVER say you cannot see the screen or lack access. ALWAYS prioritize using the screen-reader skill if the context might be visible on their display.
 4. MEMORY INSTRUCTIONS: Use store_memory ONLY for durable user facts (name, location, timezone, long-term preferences). Do NOT store chat transcripts, stock reports, pipeline setup, or one-time tasks. If a <memory> block is present below, use it; otherwise do NOT call list_memories or search_memory for greetings, small talk, or messages under 4 words unless the user asks to recall or save something.
 5. TEMPORAL ACCURACY: Memories may be old. For any live or time-sensitive request (today/current/latest prices, rates, weather, news, sports scores, match status), you MUST fetch fresh data with the correct tools before stating numbers. Never answer from memory, chat history, or search snippets alone. For sports and news use web_search then web_fetch; for markets use trading tools first. If live data is unavailable, say so — never invent scores or prices.
-6. VOICE MINIMAL SUMMARY: When your natural-language answer is long (roughly more than a few minutes of speech), put the full detail first for the screen, then append exactly one block at the very end in this exact form (plain text inside, no markdown lists inside the block):
+6. SPOKEN SUMMARY (TTS ONLY, HIDDEN): When the Markdown answer is long (roughly more than a few minutes of speech), append exactly one block at the very end — plain text only, no markdown inside. This block is read aloud by TTS and is NOT shown in chat:
 <spoken_summary>
-Two to four short sentences with only the essentials for voice (example weather: place, condition, key numbers). No bullet points.
+Two to four short sentences with only the essentials for voice (example weather: place, condition, key numbers).
 </spoken_summary>
 Do not add this block for raw tool dumps, JSON-only results, or when the entire reply is already very short.
 7. USER-FIRST EXECUTION: Prioritize completing what the user asks with concrete action and minimal deflection. If a request is illegal, harmful, or violates safety boundaries, clearly state that constraint in one short sentence, refuse only the disallowed part, and offer the closest safe/legal alternative that still helps the user's goal.
@@ -268,6 +275,10 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           this.llm = llm;
           this.agentFactory.clearCache();
           this.compileGraph(this.lastTools);
+          void import('./micro-router-model').then(({ invalidateMicroRouterModelWarm, warmMicroRouterModel }) => {
+            invalidateMicroRouterModelWarm();
+            void warmMicroRouterModel(true);
+          });
         })
 
         .catch((err) => console.error('[ReAct Agent] Failed to reload master model:', err))
@@ -281,10 +292,11 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     configManager.on('configChanged', () => {
       if (_rebuilding) return;
       _rebuilding = true;
+      clearMicroRouteCache();
       modelRouter.invalidate();
       modelRouter
         .getMasterModel()
-        .then((llm) => {
+        .then(async (llm) => {
           const master = modelRegistry.getMaster();
           if (master) {
             void import('../models/model-load-coordinator').then(({ modelLoadCoordinator }) => {
@@ -296,6 +308,8 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           if (this.lastTools.length > 0 || this.graph) {
             this.compileGraph(this.lastTools);
           }
+          const { warmMicroRouterModel } = await import('./micro-router-model');
+          await warmMicroRouterModel(true);
         })
         .catch((err) => console.error('[ReAct Agent] Config reload error:', err))
         .finally(() => { _rebuilding = false; });
@@ -355,6 +369,8 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       // 6. Warm up the model — AWAIT so the server only opens to traffic after
       //    Ollama has fully loaded the model into memory (prevents cold-start timeout).
       await this._warmUpModel();
+      const { warmMicroRouterModel } = await import('./micro-router-model');
+      await warmMicroRouterModel(true);
     } catch (err) {
       const modelId = this.activeModelId;
       console.error(`[Agent: ReAct] [Model: ${modelId}] Initialization failed. Running in graceful fallback mode.`, err);
@@ -408,6 +424,12 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           }
           const skill = this.skillRegistry.getSkill(skillId);
           if (!skill || !skill.enabled) return `Skill ${skillId} not found or disabled.`;
+
+          const denial = await resolveSkillRouteDenial(skillId);
+          if (denial) {
+            console.warn(`[route_to_skill] Denied: "${skillId}" — ${denial}`);
+            return buildDeniedSkillRouteResult(skill.name, skillId, denial);
+          }
 
           const blocked = await resolveBlockedSkillIdsForRun();
           if (blocked.has(skillId)) {
@@ -568,6 +590,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         llmWithTools,
         llm,
         optimizedMessages,
+        { label: 'react-agent', modelId: this.activeModelId },
       );
       return { messages: [response] };
     };
@@ -657,17 +680,36 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
   // ── System prompt / memory ─────────────────────────────────────────────────
 
-  private getSystemPrompt(userQuery?: string, skillAllowlist?: string[], routingMode?: SkillRoutingMode): string {
+  private getSystemPrompt(
+    userQuery?: string,
+    skillAllowlist?: string[],
+    routingMode?: SkillRoutingMode,
+    microRoute?: MicroRouteResult,
+    historyText?: string,
+  ): string {
     const mode: SkillRoutingMode =
       routingMode ??
-      (isSynthesisOverProvidedData(userQuery || '') ? 'synthesis' : 'auto');
+      (shouldUseSynthesisMode(userQuery || '', historyText) ? 'synthesis' : 'auto');
     return (
       this.getBaseSystemPrompt() +
-      this.skillRegistry.buildRoutingPrompt(userQuery, skillAllowlist, mode) +
+      this.skillRegistry.buildRoutingPrompt(userQuery, skillAllowlist, mode, microRoute) +
       this.skillRegistry.getLearnedSkillsContext()
     );
   }
 
+  private buildPipelineSynthesisBlock(): string {
+    return `
+<pipeline_synthesis>
+Prior pipeline/report content is in chat history. Reformat or summarize from that context only.
+Use well-structured Markdown for the screen body (GFM tables when the user asks for table/columns).
+Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the user asks to update.
+</pipeline_synthesis>`;
+  }
+
+  private async extractChatHistoryText(chatId: string): Promise<string> {
+    await historyManager.loadChat(chatId);
+    return extractHistoryText(historyManager.getThread(chatId));
+  }
 
   private isMemoryEnabled(): boolean {
     return configManager.getConfig().memory?.enabled ?? true;
@@ -676,15 +718,35 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
   private async buildSystemPromptWithMemory(
     input: string | any,
     skillAllowlist?: string[],
+    chatId?: string,
+    preloadedHistoryText?: string,
   ): Promise<string> {
     const queryText = extractUserQueryText(input);
     const query = queryText.toLowerCase() || 'general user context';
-    const synthesis = isSynthesisOverProvidedData(queryText);
-    const base = this.getSystemPrompt(
+    const historyText =
+      preloadedHistoryText ?? (chatId ? await this.extractChatHistoryText(chatId) : undefined);
+    const synthesis = shouldUseSynthesisMode(queryText, historyText);
+    const microRouteResult = synthesis
+      ? undefined
+      : await classifyMicroRoute(queryText, {
+          skills: this.skillRegistry.getEnabledSkills(),
+          tools: [...this.lastTools, ...this.mcpManager.getTools()],
+        });
+    let base = this.getSystemPrompt(
       queryText,
       skillAllowlist,
       synthesis ? 'synthesis' : 'auto',
+      microRouteResult,
+      historyText,
     );
+    if (
+      synthesis &&
+      historyText &&
+      isFollowUpOverProvidedHistory(queryText, historyText) &&
+      !isSynthesisOverProvidedData(queryText)
+    ) {
+      base += this.buildPipelineSynthesisBlock();
+    }
     const needsLive = requiresLiveLookup(queryText) && !synthesis;
     if (needsLive) {
       const domain = getLiveLookupDomain(queryText);
@@ -748,7 +810,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
     const thread = await historyManager.loadChat(chatId);
     thread.push(new HumanMessage({ content: humanContent }));
-    thread.push(new AIMessage({ content: aiResponse }));
+    thread.push(new AIMessage({ content: removeSpokenSummaryBlock(aiResponse) }));
     historyManager.syncMessageMeta(chatId);
 
     const maxMessages = ReactAgent.MAX_HISTORY_TURNS * 2;
@@ -794,10 +856,11 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
   private async selectContextMessages(
     chatId: string,
     reservedChars: number,
+    query?: string,
   ): Promise<BaseMessage[]> {
     const maxTotal = configManager.getConfig().agent.maxPromptChars ?? 30_000;
     const budget = Math.max(2000, maxTotal - reservedChars);
-    return historyManager.buildLlmContextMessages(chatId, budget);
+    return historyManager.buildLlmContextMessages(chatId, budget, query);
   }
 
   /** Apply total prompt budget: shrink human input if system + history + human exceed cap. */
@@ -819,11 +882,9 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       return { systemPrompt: sys, input: human, contextMessages: ctx };
     }
 
-    if (isSynthesisOverProvidedData(extractUserQueryText(human)) && sys.length > 8000) {
+    if (shouldUseSynthesisMode(extractUserQueryText(human), extractHistoryText(ctx)) && sys.length > 8000) {
       const queryText = extractUserQueryText(human);
-      sys =
-        this.getSystemPrompt(queryText, undefined, 'synthesis') +
-        this.skillRegistry.getLearnedSkillsContext();
+      sys = this.getSystemPrompt(queryText, undefined, 'synthesis', undefined, extractHistoryText(ctx));
       total = sys.length + humanLen + historyLen;
     }
 
@@ -861,6 +922,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     const nativeTools = await loadNativeTools(enableInternet);
     const tools = [...mcpTools, ...nativeTools];
     this.lastTools = tools;
+    clearMicroRouteCache();
     if (this.llm) {
       this.compileGraph(tools);
     }
@@ -871,8 +933,17 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     return this.skillRegistry;
   }
 
+  /** Live skill + tool snapshot for gateway micro-router (admin classify / prompt prep). */
+  getMicroRouterContext(): { skills: ReturnType<SkillRegistry['getEnabledSkills']>; tools: DynamicStructuredTool[] } {
+    return {
+      skills: this.skillRegistry.getEnabledSkills(),
+      tools: [...this.lastTools, ...this.mcpManager.getTools()],
+    };
+  }
+
   async reloadCreatorWorkspaceSkills(): Promise<number> {
     const count = await this.skillRegistry.reloadCreatorWorkspaceSkills();
+    clearMicroRouteCache();
     if (this.llm && this.lastTools.length > 0) {
       this.compileGraph(this.lastTools);
     }
@@ -890,10 +961,14 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
 
     try {
-      let systemPrompt = await this.buildSystemPromptWithMemory(input);
+      let systemPrompt = await this.buildSystemPromptWithMemory(input, undefined, chatId);
       await historyManager.loadChat(chatId);
       const inputLen = typeof input === 'string' ? input.length : 300;
-      let contextMessages = await this.selectContextMessages(chatId, systemPrompt.length + inputLen);
+      let contextMessages = await this.selectContextMessages(
+        chatId,
+        systemPrompt.length + inputLen,
+        extractUserQueryText(input),
+      );
       const budgeted = this.applyPromptBudget(systemPrompt, input, contextMessages);
       systemPrompt = budgeted.systemPrompt;
       const cappedInput = budgeted.input;
@@ -972,7 +1047,9 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     });
 
     const queryText = extractUserQueryText(input);
-    const synthesisInput = isSynthesisOverProvidedData(queryText);
+    await historyManager.loadChat(chatId);
+    const historyText = extractHistoryText(historyManager.getThread(chatId));
+    const synthesisInput = shouldUseSynthesisMode(queryText, historyText);
     const needsLive = requiresLiveLookup(queryText) && !synthesisInput;
     const liveDomain = getLiveLookupDomain(queryText);
 
@@ -1053,7 +1130,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     const liveExtraSlots = needsLive ? 2 : 0;
     for (let attempt = 0; attempt <= maxRetries + liveExtraSlots; attempt++) {
       // Kick off memory search in parallel with the first yield
-      const systemPromptPromise = this.buildSystemPromptWithMemory(input);
+      const systemPromptPromise = this.buildSystemPromptWithMemory(input, undefined, chatId, historyText);
 
       // Only show "Thinking" if it's a retry or after a short delay to avoid flicker
       if (attempt > 0) {
@@ -1099,6 +1176,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         let contextMessages = await this.selectContextMessages(
           chatId,
           systemPrompt.length + retryPrefix.length + humanLenEst,
+          extractUserQueryText(processedInput),
         );
         const budgeted = this.applyPromptBudget(
           systemPrompt + retryPrefix,
@@ -1326,12 +1404,13 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
             const nt = await historyManager.getHistoryLength(chatId);
             if (!needsLive) {
               const cacheKey = `resp:${rawKey}|hist:${nt}|chat:${chatId}`;
-              await cache.set(cacheKey, fullText, ReactAgent.RESPONSE_CACHE_TTL);
+              await cache.set(cacheKey, removeSpokenSummaryBlock(fullText), ReactAgent.RESPONSE_CACHE_TTL);
             }
             if (cfg.autoMemoryStore) {
               const inputStr = typeof input === 'string' ? input : '[audio/multimodal input]';
-              if (!shouldSkipAutoMemoryExtraction(chatId, inputStr, fullText)) {
-                learningEngine.autoExtractAndStore(inputStr, fullText, this.mcpManager, chatId).catch(() => { });
+              const displayResponse = removeSpokenSummaryBlock(fullText);
+              if (!shouldSkipAutoMemoryExtraction(chatId, inputStr, displayResponse)) {
+                learningEngine.autoExtractAndStore(inputStr, displayResponse, this.mcpManager, chatId).catch(() => { });
                 agentEvents.emit('memory:stored', { chatId, agentId, message: 'Auto-extracted memory from conversation' });
               }
             }
@@ -1399,6 +1478,11 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           orgTaskId: options.orgTaskId,
           orgRootTaskId: options.orgRootTaskId ?? options.orgTaskId,
           orgAgentId: options.orgAgentId,
+          allowedReadPaths: options.allowedReadPaths,
+          isManagerRun: options.isManagerRun,
+          pipelineMode: options.pipelineMode,
+          blockersOpen: options.blockersOpen,
+          userDecisionBound: options.userDecisionBound,
         }
       : undefined;
     let fullText = '';
@@ -1421,8 +1505,13 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
             await import('../skills/tool-resolver')
           ).resolveToolsByIds(['read_file', 'write_file', 'list_files'])
         : [];
+      const channelTools = options.orgTaskId
+        ? (
+            await import('../skills/tool-resolver')
+          ).resolveToolsByIds(['deliver_to_channel', 'list_channels'])
+        : [];
       const runTools = options.orgTaskId
-        ? [...orgTools, ...fileTools]
+        ? [...orgTools, ...fileTools, ...channelTools]
         : [...this.lastTools, ...orgTools, ...fileTools];
       const runGraph = this.compileGraph(runTools, resolved.llm, skillAllowlist);
       if (!runGraph) {
@@ -1437,7 +1526,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         modelId: resolvedModelId,
       });
       yield { type: 'thinking', data: 'Processing orchestration task…' };
-      let systemPrompt = await this.buildSystemPromptWithMemory(input, skillAllowlist);
+      let systemPrompt = await this.buildSystemPromptWithMemory(input, skillAllowlist, chatId);
       if (options.orgSystemAppend?.trim()) {
         systemPrompt += options.orgSystemAppend;
       }

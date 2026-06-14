@@ -15,12 +15,20 @@ const OUTPUT_WAIT_PATTERNS: RegExp[] = [
 
 export function detectAwaitingUserInput(output: string, task?: Task): boolean {
   const trimmed = output?.trim() ?? '';
-  if (trimmed.length < 80) return false;
-  // Skill handoff only — manager did not write its own pause message; do not pause pipeline.
+  if (trimmed.length < 40) return false;
+
+  if (/STOP\s+AND\s+ASK/i.test(trimmed)) return true;
+  if (/top\s*5|pick\s+one|select\s+(one|a|your)/i.test(trimmed) && trimmed.includes('?')) {
+    return true;
+  }
+
+  // Skill handoff with explicit pause from manager
   if (
     trimmed.includes('[Sub-Agent Result from') &&
-    !/STOPPED ALL TASK DELEGATION|PAUSED\s*[-–—]*\s*waiting/i.test(trimmed)
+    !/STOPPED ALL TASK DELEGATION|PAUSED\s*[-–—]*\s*waiting|STOP\s+AND\s+ASK/i.test(trimmed)
   ) {
+    const desc = task?.description ?? '';
+    if (/stop and ask/i.test(desc)) return true;
     return false;
   }
   if (OUTPUT_WAIT_PATTERNS.some((pattern) => pattern.test(trimmed))) return true;

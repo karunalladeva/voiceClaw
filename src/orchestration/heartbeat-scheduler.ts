@@ -31,6 +31,16 @@ import {
   getTaskArtifactRelDir,
   listSiblingTaskArtifactDirs,
 } from './task-artifacts';
+import { configManager } from '../config/index';
+import { companyManager } from './company-manager';
+import { hasPipelineModeLabel } from './orchestration-labels';
+import { mapReduceUpstreamContext } from '../services/context-map-reduce';
+import { buildTaskScopedArtifactRag } from '../services/task-artifact-rag';
+import {
+  formatRunPrepPromptSections,
+  prepareOrchestrationRunPrep,
+  type OrchestrationRunPrep,
+} from './orchestration-run-prep';
 
 export interface HeartbeatResult {
   agentId: string;
@@ -55,6 +65,7 @@ type HeartbeatHandler = (
   task: Task | null,
   context: string,
   mode: HeartbeatMode,
+  runPrep?: OrchestrationRunPrep,
 ) => Promise<string>;
 
 class HeartbeatScheduler extends EventEmitter {
@@ -323,7 +334,8 @@ class HeartbeatScheduler extends EventEmitter {
       );
     }
 
-    const context = await this.buildContext(agent, activeTask, mode);
+    const runPrep = await prepareOrchestrationRunPrep(agent, activeTask);
+    const context = await this.buildContext(agent, activeTask, mode, runPrep);
 
     await agentRegistry.updateStatus(agentId, 'active');
 
@@ -334,7 +346,7 @@ class HeartbeatScheduler extends EventEmitter {
         throw new Error('No heartbeat handler configured');
       }
 
-      const output = await this.handler(agent, activeTask, context, mode);
+      const output = await this.handler(agent, activeTask, context, mode, runPrep);
 
       if (activeTask && mode === 'review') {
         await this.applyReviewDecision(activeTask.id, agentId, output);
@@ -408,7 +420,28 @@ class HeartbeatScheduler extends EventEmitter {
               workTask,
               output,
             );
-            if (spawned.length === 0) {
+            const rootId = workTask.rootTaskId ?? workTask.id;
+            const root =
+              workTask.rootTaskId && workTask.rootTaskId !== workTask.id
+                ? await taskManager.getTaskById(rootId)
+                : workTask;
+            const pipelineMode = hasPipelineModeLabel(root?.labels);
+            const company = await companyManager.getById(workTask.companyId);
+            const requireDelegation =
+              pipelineMode &&
+              (company?.settings.requireDelegationBeforeComplete !== false);
+            if (spawned.length === 0 && requireDelegation) {
+              console.warn(
+                `[Orchestration] ${agent.name} blocked from completing "${workTask.title}" — DELEGATION_REQUIRED`,
+              );
+              await taskManager.addComment(
+                workTask.id,
+                agentId,
+                'agent',
+                '[DELEGATION_REQUIRED] Manager must create subtasks matching pipeline/workflow.json before completing this epic.',
+              );
+              await taskWorkflow.saveWorkProduct(workTask.id, agentId, workProduct);
+            } else if (spawned.length === 0) {
               console.warn(
                 `[Orchestration] ${agent.name} completed "${workTask.title}" without creating subtasks`,
               );
@@ -493,6 +526,7 @@ class HeartbeatScheduler extends EventEmitter {
     agent: OrgAgent,
     task: Task | null,
     mode: HeartbeatMode,
+    runPrep?: OrchestrationRunPrep,
   ): Promise<string> {
     const parts: string[] = [];
 
@@ -558,17 +592,37 @@ class HeartbeatScheduler extends EventEmitter {
       );
       const siblingDirs = await listSiblingTaskArtifactDirs(rootId);
       const peerDirs = siblingDirs.filter((d) => !d.endsWith(`/${task.id}`));
-      if (peerDirs.length > 0) {
+      if (peerDirs.length > 0 && (!runPrep?.enforceArtifactIo || runPrep.isManager)) {
         parts.push(
           `\nSibling task artifact folders under \`${getRootArtifactRelDir(rootId)}/\`:\n${peerDirs.map((d) => `- \`${d}/\``).join('\n')}`,
         );
       }
       if (task.inputContext?.trim()) {
-        parts.push(`\nUpstream outputs (Markdown):\n${task.inputContext}`);
+        const cfg = configManager.getConfig();
+        const threshold = cfg.pipeline.mapReduceThresholdChars ?? 12_000;
+        const reduced = mapReduceUpstreamContext(task.inputContext, threshold);
+        parts.push(`\nUpstream outputs (Markdown):\n${reduced}`);
       }
       const depCtx = await taskManager.getDependencyContext(task.id);
       if (depCtx && !task.inputContext?.includes(depCtx)) {
-        parts.push(`\nDependency context (Markdown):\n${depCtx}`);
+        const cfg = configManager.getConfig();
+        const threshold = cfg.pipeline.mapReduceThresholdChars ?? 12_000;
+        const reduced = mapReduceUpstreamContext(depCtx, threshold);
+        parts.push(`\nDependency context (Markdown):\n${reduced}`);
+      }
+
+      const cfg = configManager.getConfig();
+      const ragMax = cfg.pipeline.artifactRagMaxChars ?? 3000;
+      if (ragMax > 0 && runPrep?.pipelineMode) {
+        const rootId = task.rootTaskId ?? task.id;
+        const ragQuery = `${task.title} ${task.description}`.slice(0, 500);
+        const ragExcerpt = await buildTaskScopedArtifactRag(rootId, ragQuery, ragMax);
+        if (ragExcerpt) parts.push(`\n${ragExcerpt}`);
+      }
+
+      if (runPrep) {
+        const prepSections = await formatRunPrepPromptSections(runPrep, task);
+        parts.push(...prepSections);
       }
       const taskComments = await taskManager.getComments(task.id);
       const openQuestion = getOpenParentQuestion(taskComments);

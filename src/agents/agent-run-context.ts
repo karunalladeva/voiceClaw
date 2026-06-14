@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { ReadAllowlistResult } from '../orchestration/artifact-read-allowlist';
 
 export interface AgentRunContext {
   orgTaskId: string;
@@ -16,6 +17,16 @@ export interface AgentRunContext {
   skillRunCancelled?: boolean;
   /** Skills that must not be re-routed on this task (incomplete prior run). */
   blockedSkillIds?: Set<string>;
+  /** Pipeline-mode read allowlist (absolute paths). */
+  allowedReadPaths?: ReadAllowlistResult;
+  /** Manager with direct reports on this heartbeat. */
+  isManagerRun?: boolean;
+  /** Root has pipeline-mode label. */
+  pipelineMode?: boolean;
+  /** Task has unsatisfied blockedBy dependencies. */
+  blockersOpen?: boolean;
+  /** User decision recorded — block research fallback skills. */
+  userDecisionBound?: boolean;
 }
 
 const storage = new AsyncLocalStorage<AgentRunContext>();

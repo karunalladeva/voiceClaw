@@ -50,6 +50,8 @@ export interface CompanySettings {
   autoReleasePipelineSubtasks?: boolean;
   /** When true AND root has pipeline-mode label, multi-chapter drafting subtasks split into one task per chapter. Default false. */
   splitChapterSubtasks?: boolean;
+  /** When true AND root has pipeline-mode label, managers cannot complete without subtasks. Default true. */
+  requireDelegationBeforeComplete?: boolean;
 }
 
 export type TaskSource = 'user' | 'agent';

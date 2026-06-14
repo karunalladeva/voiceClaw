@@ -457,4 +457,56 @@ export interface ReviewDecisionPayload {
 
 }
 
+export interface PipelinePhaseInfo {
+  id: string;
+  title: string;
+  assigneeId?: string | null;
+  assigneeName?: string;
+  blockedAfter?: string | null;
+  readsFrom?: string[];
+  responsibilities?: string[];
+  expectedOutputs?: string[];
+  requiresUserApproval?: boolean;
+  taskId?: string | null;
+  taskStatus?: TaskStatus | null;
+  artifactRelPath?: string | null;
+  blockerTasks?: Array<{ id: string; title: string; status: TaskStatus }>;
+}
+
+export interface PipelineWorkflowDocument {
+  version: number;
+  updatedAt: number;
+  updatedBy?: string;
+  phases: Array<{
+    id: string;
+    title: string;
+    assigneeId?: string;
+    assigneeName?: string;
+    blockedAfter?: string | null;
+    readsFrom?: string[];
+    responsibilities?: string[];
+    expectedOutputs?: string[];
+    requiresUserApproval?: boolean;
+    skillIds?: string[];
+  }>;
+}
+
+export interface UserDecisionRecord {
+  decision: string;
+  approvedAt: number;
+  source: 'clarification' | 'manual';
+}
+
+export interface PipelineWorkflowInfo {
+  pipelineMode: boolean;
+  rootTaskId: string;
+  managerTaskId: string | null;
+  managerArtifactRelPath: string | null;
+  workflowRelPath: string | null;
+  userDecisionRelPath: string | null;
+  workflow: PipelineWorkflowDocument | null;
+  userDecision: UserDecisionRecord | null;
+  phases: PipelinePhaseInfo[];
+}
+
 

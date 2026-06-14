@@ -1,5 +1,6 @@
 import { configManager } from '../config/index';
 import { bm25RankIndices, tokenize } from './bm25';
+import { rankTextsByEmbedding } from './embedding-rank';
 import { truncateToolOutput } from './tool-output-truncate';
 
 export type ChunkPackResult = {
@@ -132,7 +133,7 @@ async function rankChunkIndices(chunks: string[], query: string): Promise<{ indi
   }
 
   if (cfg.chunkRanking === 'embedding') {
-    const embedded = await rankByEmbedding(chunks, q, cfg.embedBaseUrl, cfg.embedModel);
+    const embedded = await rankTextsByEmbedding(chunks, q, cfg.embedBaseUrl, cfg.embedModel);
     if (embedded) return { indices: embedded, mode: 'embedding' };
   }
 
@@ -140,51 +141,6 @@ async function rankChunkIndices(chunks: string[], query: string): Promise<{ indi
     return { indices: bm25RankIndices(chunks, q), mode: 'bm25' };
   } catch {
     return { indices: chunks.map((_, i) => i), mode: 'head' };
-  }
-}
-
-async function rankByEmbedding(
-  chunks: string[],
-  query: string,
-  baseUrl: string,
-  model: string,
-): Promise<number[] | null> {
-  const maxChunks = 60;
-  const slice = chunks.slice(0, maxChunks);
-  try {
-    const embed = async (text: string): Promise<number[] | null> => {
-      const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/embeddings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, prompt: text.slice(0, 2000) }),
-      });
-      if (!res.ok) return null;
-      const data = (await res.json()) as { embedding?: number[] };
-      return data.embedding ?? null;
-    };
-
-    const qVec = await embed(query);
-    if (!qVec?.length) return null;
-
-    const scored: { idx: number; score: number }[] = [];
-    for (let i = 0; i < slice.length; i++) {
-      const vec = await embed(slice[i]);
-      if (!vec || vec.length !== qVec.length) continue;
-      let dot = 0;
-      let na = 0;
-      let nb = 0;
-      for (let j = 0; j < qVec.length; j++) {
-        dot += qVec[j] * vec[j];
-        na += qVec[j] * qVec[j];
-        nb += vec[j] * vec[j];
-      }
-      const sim = dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
-      scored.push({ idx: i, score: sim });
-    }
-    if (!scored.length) return null;
-    return scored.sort((a, b) => b.score - a.score).map((s) => s.idx);
-  } catch {
-    return null;
   }
 }
 

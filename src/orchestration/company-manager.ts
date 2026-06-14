@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS: CompanySettings = {
   maxReworkAttempts: 3,
   defaultAgentBudgetUSD: 50,
   maxTotalBudgetUSD: 1000,
+  requireDelegationBeforeComplete: true,
 };
 
 class CompanyManager {

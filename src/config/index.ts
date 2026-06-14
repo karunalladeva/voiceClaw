@@ -21,10 +21,52 @@ export interface AppConfig {
     skillQueueTimeoutMs: number;
     /** Max total chars (system + history + human) before inference. */
     maxPromptChars: number;
+    /** Gateway micro-router: BM25 / tiny-model lane before full skill catalog injection. */
+    microRouter?: {
+      enabled?: boolean;
+      /** Use fast/summarize model when BM25 margin is ambiguous. */
+      useLlmFallback?: boolean;
+      /** Optional models-config id override (else role=fast). */
+      modelId?: string;
+      /** Min BM25 score gap between top-2 lanes before LLM fallback. */
+      bm25MarginThreshold?: number;
+      /** Max skill/tool/MCP matches kept for prompt focus. */
+      maxMatches?: number;
+      /** Extra weight for general lane in catalog voting. */
+      generalLaneBias?: number;
+      /** Specialist lane must beat general by this margin or fall back to general. */
+      specialistMinMargin?: number;
+      cacheTtlMs?: number;
+      /** Keep LLM fallback model loaded (Ollama keep_alive=-1) between route calls. */
+      keepAlive?: boolean;
+    };
+    /** How prior chat turns are selected when history exceeds the prompt budget. */
+    historyContext?: {
+      /** recency = newest-first (legacy); bm25 | embedding = query-ranked older turns. */
+      ranking?: 'recency' | 'bm25' | 'embedding';
+      /** Embedding model id (Ollama-compatible); defaults to webFetch.embedModel. */
+      embedModel?: string;
+      /** Embedding API base URL; defaults to webFetch.embedBaseUrl. */
+      embedBaseUrl?: string;
+      /** User/assistant turn pairs always kept at the tail before ranking older turns. */
+      minRecentTurns?: number;
+    };
+    /** Pipeline-mode: restrict read_file to allowlisted artifact paths. */
+    artifactOnlyIo?: boolean;
+    /** Pipeline-mode: allow reading completed upstream artifact folders. */
+    allowUpstreamArtifactReads?: boolean;
+    /** Pipeline-mode: manager must write pipeline/workflow.json before delegate. */
+    requirePipelineWorkflow?: boolean;
+    /** Verify-act read-back after write_file during org tasks. */
+    verifyActWrite?: boolean;
   };
   pipeline: {
     /** Max chars of research context passed into summarize / synthesis human message. */
     contextMaxChars: number;
+    /** Max chars for task-scoped artifact RAG excerpt in heartbeat context. */
+    artifactRagMaxChars?: number;
+    /** Map-reduce upstream context when inputContext exceeds this. */
+    mapReduceThresholdChars?: number;
   };
   memory: {
     enabled: boolean;
@@ -93,6 +135,12 @@ export interface AppConfig {
   webSearch: {
     httpFallbackEnabled: boolean;
     browserFallbackEnabled: boolean;
+    /** Tag search snippets with Confidence: LOW. */
+    snippetConfidenceTags?: boolean;
+    /** Merge multi-query SearXNG results with RRF. */
+    multiQueryRrf?: boolean;
+    /** RRF k parameter (default 60). */
+    rrfK?: number;
   };
   webFetch: {
     maxChars: number;
@@ -103,6 +151,12 @@ export interface AppConfig {
     embedBaseUrl: string;
     ignoreTlsErrors: boolean;
     proxyUrl: string;
+    /** Reject navigation-shell pages as LOW confidence. */
+    rejectShellContent?: boolean;
+    /** Strip boilerplate lines after extraction. */
+    stripBoilerplate?: boolean;
+    /** Expand BM25 query from search + user context. */
+    expandRankingQuery?: boolean;
   };
   llamacpp: {
     enabled: boolean;
@@ -122,6 +176,12 @@ export interface AppConfig {
   };
   assistantName: string;
   approved_senders: Record<string, string[]>;
+  debug: {
+    /** Verbose debug logs in server console and admin live events. */
+    enabled: boolean;
+    /** Log full messages sent to and received from the LLM. */
+    logLlmIo: boolean;
+  };
 }
 
 
@@ -142,9 +202,28 @@ const DEFAULT_CONFIG: AppConfig = {
     maxParallelSkills: 2,
     skillQueueTimeoutMs: 30000,
     maxPromptChars: 30_000,
+    microRouter: {
+      enabled: true,
+      useLlmFallback: true,
+      bm25MarginThreshold: 0.12,
+      generalLaneBias: 0.12,
+      specialistMinMargin: 0.1,
+      cacheTtlMs: 120_000,
+      keepAlive: true,
+    },
+    historyContext: {
+      ranking: 'recency',
+      minRecentTurns: 2,
+    },
+    artifactOnlyIo: true,
+    allowUpstreamArtifactReads: true,
+    requirePipelineWorkflow: true,
+    verifyActWrite: true,
   },
   pipeline: {
     contextMaxChars: 15_000,
+    artifactRagMaxChars: 3000,
+    mapReduceThresholdChars: 12_000,
   },
   memory: {
     enabled: true,
@@ -211,6 +290,9 @@ const DEFAULT_CONFIG: AppConfig = {
   webSearch: {
     httpFallbackEnabled: true,
     browserFallbackEnabled: true,
+    snippetConfidenceTags: true,
+    multiQueryRrf: true,
+    rrfK: 60,
   },
   webFetch: {
     maxChars: 12000,
@@ -221,6 +303,9 @@ const DEFAULT_CONFIG: AppConfig = {
     embedBaseUrl: 'http://localhost:11434',
     ignoreTlsErrors: false,
     proxyUrl: '',
+    rejectShellContent: true,
+    stripBoilerplate: true,
+    expandRankingQuery: true,
   },
   llamacpp: {
     enabled: false,
@@ -244,6 +329,10 @@ const DEFAULT_CONFIG: AppConfig = {
     telegram: [],
     whatsapp: [],
     slack: []
+  },
+  debug: {
+    enabled: false,
+    logLlmIo: false,
   },
 };
 
@@ -280,6 +369,7 @@ class ConfigManager extends EventEmitter {
           llamacpp: { ...DEFAULT_CONFIG.llamacpp, ...(parsed.llamacpp || {}) },
           pipeline: { ...DEFAULT_CONFIG.pipeline, ...(parsed.pipeline || {}) },
           agent: { ...DEFAULT_CONFIG.agent, ...(parsed.agent || {}) },
+          debug: { ...DEFAULT_CONFIG.debug, ...(parsed.debug || {}) },
         };
         this.applyEnvOverrides();
         console.log('[Config] Loaded existing configuration.');
@@ -323,6 +413,7 @@ class ConfigManager extends EventEmitter {
               llamacpp: { ...this.currentConfig.llamacpp, ...(newConfig.llamacpp || {}) },
               pipeline: { ...this.currentConfig.pipeline, ...(newConfig.pipeline || {}) },
               agent: { ...this.currentConfig.agent, ...(newConfig.agent || {}) },
+              debug: { ...this.currentConfig.debug, ...(newConfig.debug || {}) },
             };
             this.applyEnvOverrides();
             this.emit('configChanged', this.currentConfig);
@@ -447,7 +538,26 @@ class ConfigManager extends EventEmitter {
       llm: { ...this.currentConfig.llm, ...(newSettings.llm || {}) },
       stt: { ...this.currentConfig.stt, ...(newSettings.stt || {}) },
       tts: { ...this.currentConfig.tts, ...(newSettings.tts || {}) },
-      agent: { ...this.currentConfig.agent, ...(newSettings.agent || {}) },
+      agent: {
+        ...this.currentConfig.agent,
+        ...(newSettings.agent || {}),
+        ...(newSettings.agent?.microRouter || this.currentConfig.agent?.microRouter
+          ? {
+              microRouter: {
+                ...this.currentConfig.agent?.microRouter,
+                ...(newSettings.agent?.microRouter || {}),
+              },
+            }
+          : {}),
+        ...(newSettings.agent?.historyContext || this.currentConfig.agent?.historyContext
+          ? {
+              historyContext: {
+                ...this.currentConfig.agent?.historyContext,
+                ...(newSettings.agent?.historyContext || {}),
+              },
+            }
+          : {}),
+      },
       pipeline: { ...this.currentConfig.pipeline, ...(newSettings.pipeline || {}) },
       memory: { ...this.currentConfig.memory, ...(newSettings.memory || {}) },
       learning: { ...this.currentConfig.learning, ...(newSettings.learning || {}) },
@@ -459,6 +569,7 @@ class ConfigManager extends EventEmitter {
       webSearch: { ...this.currentConfig.webSearch, ...(newSettings.webSearch || {}) },
       webFetch: { ...this.currentConfig.webFetch, ...(newSettings.webFetch || {}) },
       llamacpp: { ...this.currentConfig.llamacpp, ...(newSettings.llamacpp || {}) },
+      debug: { ...this.currentConfig.debug, ...(newSettings.debug || {}) },
       approved_senders: newSettings.approved_senders || this.currentConfig.approved_senders,
     };
     this.applyEnvOverrides();

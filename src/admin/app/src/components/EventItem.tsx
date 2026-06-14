@@ -10,6 +10,7 @@ const typeColors: Record<string, string> = {
   model: 'text-success',
   skill: 'text-warning',
   system: 'text-muted-foreground',
+  debug: 'text-cyan-400',
   error: 'text-destructive',
 }
 
@@ -64,6 +65,19 @@ function formatEventMessage(event: AgentEvent): string {
       return `Skill agent completed: ${d.skillName || d.skillId}`
     case 'system:log':
       return (d.message as string) || ''
+    case 'debug:llm_request': {
+      const count = d.messageCount as number | undefined
+      const label = (d.label as string) || 'request'
+      const model = d.modelId as string | undefined
+      return `LLM IN [${label}]${model ? ` (${model})` : ''}${count != null ? ` — ${count} message(s)` : ''}`
+    }
+    case 'debug:llm_response': {
+      const label = (d.label as string) || 'response'
+      const model = d.modelId as string | undefined
+      const content = (d.content as string) || ''
+      const preview = content.length > 120 ? `${content.slice(0, 120)}…` : content
+      return `LLM OUT [${label}]${model ? ` (${model})` : ''}: ${preview || '(empty)'}`
+    }
     default:
       return (d.message as string) || JSON.stringify(d).substring(0, 100)
   }

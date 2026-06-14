@@ -8,6 +8,8 @@ import { getAgentRunContext } from '../agents/agent-run-context';
 import { normalizeSearchQueryKey } from './web-url-policy';
 import { classifyUrlForFetch } from './web-heuristics';
 import { configManager } from '../config/index';
+import { extractQueryVariants } from '../utils/query-expansion';
+import { reciprocalRankFusionHits } from '../utils/reciprocal-rank-fusion';
 import {
   isSearxngAvailable,
   probeSearxngAvailability,
@@ -35,7 +37,13 @@ function isSkillToolCancelled(): boolean {
   return getAgentRunContext()?.skillRunCancelled === true;
 }
 
-function formatSearchResults(query: string, results: SearchHit[]): string {
+function formatSearchResults(
+  query: string,
+  results: SearchHit[],
+  meta?: { merged?: boolean; queryCount?: number },
+): string {
+  const ws = configManager.getConfig().webSearch;
+  const showConfidence = ws.snippetConfidenceTags !== false;
   const blocks: string[] = [];
   const fetchNext: string[] = [];
   for (let i = 0; i < results.length; i++) {
@@ -56,18 +64,26 @@ function formatSearchResults(query: string, results: SearchHit[]): string {
     const scoreLine =
       r.score !== undefined && !Number.isNaN(r.score) ? `Score: ${r.score}\n` : '';
     const dateLine = r.publishedDate ? `Published: ${r.publishedDate}\n` : '';
+    const confidenceLine = showConfidence
+      ? 'Confidence: LOW — snippet only; call web_fetch before citing facts\n'
+      : '';
     blocks.push(
       `[${i + 1}] ${r.title}\n` +
         `${host ? `Site: ${host}\n` : ''}` +
         `${engineLine}` +
         `${scoreLine}` +
         `${dateLine}` +
+        `${confidenceLine}` +
         `URL: ${r.url}\n` +
         `web_fetch: ${fetchHint.class} — ${fetchHint.note}\n` +
         `Snippet: ${snippet}`,
     );
   }
-  let out = `Search results for: "${query}"\n\n${blocks.join('\n\n')}`;
+  const mergeLine =
+    meta?.merged && meta.queryCount
+      ? `\nMerged: RRF (${meta.queryCount} queries)\n`
+      : '';
+  let out = `Search results for: "${query}"${mergeLine}\n\n${blocks.join('\n\n')}`;
   if (fetchNext.length > 0) {
     out +=
       '\n\nNext step: call web_fetch on these HTML URLs (part=0; use part=1+ or focus for more):\n' +
@@ -75,6 +91,9 @@ function formatSearchResults(query: string, results: SearchHit[]): string {
   } else if (results.length > 0) {
     out +=
       '\n\nNext step: call web_fetch on the best HTML result URL above (skip PDF/binary).';
+  }
+  if (showConfidence) {
+    out += '\n\nNote: Search snippets are not verified facts. web_fetch required for claims.';
   }
   return out;
 }
@@ -245,7 +264,47 @@ async function searchFallbackProviders(query: string): Promise<SearchHit[] | nul
 async function searchAllProviders(
   query: string,
   timeRange?: string,
-): Promise<{ hits: SearchHit[]; provider: 'searxng' | 'fallback' } | null> {
+): Promise<{ hits: SearchHit[]; provider: 'searxng' | 'fallback'; merged?: boolean; queryCount?: number } | null> {
+  const ws = configManager.getConfig().webSearch;
+  const useRrf = ws.multiQueryRrf !== false;
+  let variants = useRrf ? extractQueryVariants(query) : [query];
+  const simplified = simplifySearchQuery(query);
+  if (useRrf && simplified && !variants.includes(simplified)) {
+    variants = [...variants, simplified];
+  }
+  const k = ws.rrfK ?? 60;
+
+  if (useRrf && variants.length > 1) {
+    const rankings: SearchHit[][] = [];
+    let provider: 'searxng' | 'fallback' = 'searxng';
+    await probeSearxngAvailability();
+
+    for (const variant of variants) {
+      if (isSearxngAvailable()) {
+        const searx = await searchViaSearxng(variant, timeRange);
+        if (searx?.length) {
+          rankings.push(searx);
+          continue;
+        }
+      }
+      const fallback = await searchFallbackProviders(variant);
+      if (fallback?.length) {
+        rankings.push(fallback);
+        provider = 'fallback';
+      }
+    }
+
+    if (rankings.length > 0) {
+      const fused = reciprocalRankFusionHits(rankings, k).slice(0, MAX_FALLBACK_RESULTS);
+      return {
+        hits: fused,
+        provider,
+        merged: rankings.length > 1,
+        queryCount: variants.length,
+      };
+    }
+  }
+
   await probeSearxngAvailability();
 
   if (isSearxngAvailable()) {
@@ -269,7 +328,10 @@ async function runWebSearch(query: string, timeRange?: string): Promise<string> 
   if (outcome) {
     const via = outcome.provider === 'searxng' ? 'SearXNG' : 'DuckDuckGo/Yahoo';
     console.log(`[Tool: Web Search] Search succeeded via ${via} (${outcome.hits.length} hits)`);
-    return formatSearchResults(query, outcome.hits);
+    return formatSearchResults(query, outcome.hits, {
+      merged: outcome.merged,
+      queryCount: outcome.queryCount,
+    });
   }
   if (isSearxngAvailable()) {
     return (

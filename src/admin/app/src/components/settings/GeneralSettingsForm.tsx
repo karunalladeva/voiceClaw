@@ -25,7 +25,12 @@ const defaultForm: AppConfig = {
   llm: { model: 'qwen3.5:9b', temperature: 0.2 },
   stt: { mode: 'transcribe' },
   tts: { engine: 'kokoro', defaultVoice: 'af_heart' },
-  agent: { enableInternet: true, maxParallelSkills: 2, skillQueueTimeoutMs: 30000 },
+  agent: {
+    enableInternet: true,
+    maxParallelSkills: 2,
+    skillQueueTimeoutMs: 30000,
+    historyContext: { ranking: 'recency', minRecentTurns: 2, embedModel: '', embedBaseUrl: '' },
+  },
   memory: { enabled: true },
   learning: {
     autoMemoryStore: true,
@@ -37,6 +42,7 @@ const defaultForm: AppConfig = {
   cache: { mode: 'memory', redisUrl: 'redis://localhost:6379' },
   voiceHandling: { vadEnabled: true, wakeWordEnabled: false, autoListen: false },
   assistantName: 'Claw',
+  debug: { enabled: false, logLlmIo: false },
 }
 
 export function GeneralSettingsForm({ onNavigate }: GeneralSettingsFormProps) {
@@ -51,12 +57,23 @@ export function GeneralSettingsForm({ onNavigate }: GeneralSettingsFormProps) {
         llm: { ...defaultForm.llm, ...config.llm },
         stt: { ...defaultForm.stt, ...config.stt },
         tts: { ...defaultForm.tts, ...config.tts },
-        agent: { ...defaultForm.agent, ...config.agent },
+        agent: {
+          ...defaultForm.agent,
+          ...config.agent,
+          historyContext: {
+            ...defaultForm.agent.historyContext,
+            ...config.agent?.historyContext,
+          },
+        },
         memory: { ...defaultForm.memory, ...config.memory },
         learning: { ...defaultForm.learning, ...config.learning },
         cache: { ...defaultForm.cache, ...config.cache },
         voiceHandling: { ...defaultForm.voiceHandling, ...config.voiceHandling },
         assistantName: config.assistantName ?? defaultForm.assistantName,
+        debug: {
+          enabled: config.debug?.enabled ?? defaultForm.debug.enabled,
+          logLlmIo: config.debug?.logLlmIo ?? defaultForm.debug.logLlmIo,
+        },
       })
     }
   }, [config])
@@ -136,6 +153,12 @@ export function GeneralSettingsForm({ onNavigate }: GeneralSettingsFormProps) {
             checked={form.agent.enableInternet}
             onChange={(v) => setForm((f) => ({ ...f, agent: { ...f.agent, enableInternet: v } }))}
           />
+        </SettingsRow>
+        <SettingsRow
+          label="Micro-router gateway"
+          subtitle="Fast lane classifier and skill-catalog focus before the main model."
+        >
+          <SettingsNavButton label="Open Micro-router" onClick={() => onNavigate('micro-router')} />
         </SettingsRow>
       </SettingsCard>
 
@@ -280,6 +303,84 @@ export function GeneralSettingsForm({ onNavigate }: GeneralSettingsFormProps) {
       <SettingsSection title="Conversation history" />
       <SettingsCard>
         <SettingsRow
+          label="History context ranking"
+          subtitle="When chat exceeds the prompt budget, pick older turns by query relevance (BM25 or embeddings) instead of only newest-first."
+        >
+          <SettingsSelect
+            value={form.agent.historyContext?.ranking ?? 'bm25'}
+            onChange={(v) =>
+              setForm((f) => ({
+                ...f,
+                agent: {
+                  ...f.agent,
+                  historyContext: { ...f.agent.historyContext, ranking: v },
+                },
+              }))
+            }
+            options={[
+              { value: 'recency', label: 'Recency (newest first)' },
+              { value: 'bm25', label: 'BM25 (keyword)' },
+              { value: 'embedding', label: 'Embedding model' },
+            ]}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Pinned recent turns"
+          subtitle="User/assistant pairs always kept at the end before ranking older messages."
+        >
+          <SettingsSlider
+            value={form.agent.historyContext?.minRecentTurns ?? 2}
+            min={0}
+            max={10}
+            step={1}
+            onChange={(v) =>
+              setForm((f) => ({
+                ...f,
+                agent: {
+                  ...f.agent,
+                  historyContext: { ...f.agent.historyContext, minRecentTurns: Math.round(v) },
+                },
+              }))
+            }
+            format={(v) => String(Math.round(v))}
+          />
+        </SettingsRow>
+        {form.agent.historyContext?.ranking === 'embedding' && (
+          <>
+            <SettingsRow label="Embedding model" subtitle="Ollama-compatible model id (e.g. nomic-embed-text).">
+              <SettingsTextField
+                value={form.agent.historyContext?.embedModel ?? ''}
+                onChange={(v) =>
+                  setForm((f) => ({
+                    ...f,
+                    agent: {
+                      ...f.agent,
+                      historyContext: { ...f.agent.historyContext, embedModel: v },
+                    },
+                  }))
+                }
+                placeholder={config?.webFetch?.embedModel ?? 'nomic-embed-text'}
+              />
+            </SettingsRow>
+            <SettingsRow label="Embedding API URL" subtitle="Defaults to web fetch embedding URL when empty.">
+              <SettingsTextField
+                value={form.agent.historyContext?.embedBaseUrl ?? ''}
+                onChange={(v) =>
+                  setForm((f) => ({
+                    ...f,
+                    agent: {
+                      ...f.agent,
+                      historyContext: { ...f.agent.historyContext, embedBaseUrl: v },
+                    },
+                  }))
+                }
+                placeholder={config?.webFetch?.embedBaseUrl ?? 'http://localhost:11434'}
+                className="w-64"
+              />
+            </SettingsRow>
+          </>
+        )}
+        <SettingsRow
           label="Clear all chat history"
           subtitle="Deletes every file in workspace/chats (all channels and admin chats), summaries, and response caches."
         >
@@ -288,6 +389,43 @@ export function GeneralSettingsForm({ onNavigate }: GeneralSettingsFormProps) {
             onClick={() => void handleClearAllHistory()}
             disabled={clearingHistory}
             loading={clearingHistory}
+          />
+        </SettingsRow>
+      </SettingsCard>
+
+      <SettingsSection title="Developer / Debug" />
+      <SettingsCard>
+        <SettingsRow
+          label="Debug logging"
+          subtitle="Verbose logs in the server console and admin Live Events / System Logs panels."
+        >
+          <SettingsSwitch
+            checked={form.debug.enabled}
+            onChange={(v) =>
+              setForm((f) => ({
+                ...f,
+                debug: { enabled: v, logLlmIo: v ? f.debug.logLlmIo : false },
+              }))
+            }
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Log LLM input & output"
+          subtitle={
+            form.debug.enabled
+              ? 'Full prompts sent to the model and responses received (including tool calls).'
+              : 'Enable debug logging first.'
+          }
+        >
+          <SettingsSwitch
+            checked={form.debug.enabled && form.debug.logLlmIo}
+            onChange={(v) => {
+              if (!form.debug.enabled) return
+              setForm((f) => ({
+                ...f,
+                debug: { ...f.debug, logLlmIo: v },
+              }))
+            }}
           />
         </SettingsRow>
       </SettingsCard>

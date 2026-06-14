@@ -4,6 +4,7 @@ import { yahooNewsTool, yahooOhlcvTool } from '../tools/market-data';
 import { financeRecallMarketMemoryTool, financeStoreMarketMemoryTool } from '../tools/finance-memory';
 import { comfyuiListWorkflowsTool, comfyuiGenerateTool, comfyuiCheckJobTool } from '../tools/comfyui';
 import { pdfGenerateTool, pdfMergeFilesTool, pdfMergePipelineTool } from '../tools/pdf';
+import { deliverToChannelTool, listChannelsTool } from '../tools/channel';
 import { listFilesTool, readFileTool, writeFileTool } from './file-manager';
 
 const toolRegistry: Record<string, DynamicStructuredTool> = {
@@ -22,6 +23,8 @@ const toolRegistry: Record<string, DynamicStructuredTool> = {
   read_file: readFileTool,
   write_file: writeFileTool,
   list_files: listFilesTool,
+  deliver_to_channel: deliverToChannelTool,
+  list_channels: listChannelsTool,
 };
 
 export function resolveToolsByIds(ids: string[] = []): DynamicStructuredTool[] {
