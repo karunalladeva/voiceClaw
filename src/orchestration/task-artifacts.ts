@@ -141,3 +141,55 @@ export async function copyFileIntoTaskArtifacts(
   const relPath = `${getTaskArtifactRelDir(task)}/${safeSub}`.replace(/\\/g, '/');
   return relPath;
 }
+
+const MAX_ARTIFACT_SEARCH_FILES = 2_000;
+
+async function walkFindBasename(
+  dirAbs: string,
+  basename: string,
+  budget: { remaining: number },
+): Promise<string | null> {
+  if (budget.remaining <= 0) return null;
+  let entries: Array<{ name: string; isDirectory: () => boolean }>;
+  try {
+    entries = await fs.readdir(dirAbs, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (budget.remaining <= 0) return null;
+    budget.remaining -= 1;
+    const abs = path.join(dirAbs, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await walkFindBasename(abs, basename, budget);
+      if (nested) return nested;
+      continue;
+    }
+    if (entry.name === basename) return abs;
+  }
+  return null;
+}
+
+/** Locate a deliverable by basename under task (and optionally root) artifact folders. */
+export async function findArtifactFileByBasename(
+  task: TaskArtifactScope,
+  filename: string,
+  options?: { searchRoot?: boolean },
+): Promise<{ absPath: string; relPath: string } | null> {
+  const safeName = path.basename(filename.replace(/\\/g, '/'));
+  if (!safeName) return null;
+  const searchDirs: string[] = [getTaskArtifactAbsDir(task)];
+  const rootId = task.rootTaskId ?? task.id;
+  if (options?.searchRoot) {
+    const rootAbs = getRootArtifactAbsDir(rootId);
+    if (!searchDirs.includes(rootAbs)) searchDirs.push(rootAbs);
+  }
+  const budget = { remaining: MAX_ARTIFACT_SEARCH_FILES };
+  for (const dir of searchDirs) {
+    const absPath = await walkFindBasename(dir, safeName, budget);
+    if (!absPath) continue;
+    const relPath = path.relative(process.cwd(), absPath).replace(/\\/g, '/');
+    return { absPath, relPath };
+  }
+  return null;
+}

@@ -335,7 +335,9 @@ registerStep('generate_doc', async (config, context): Promise<StepResult> => {
 
     // Optionally save to file
     if (config.output_path && result) {
-      const fs = require('fs/promises');
+      const fs = require('fs/promises') as typeof import('fs/promises');
+      const { ensureParentDir } = await import('../utils/workspace-dirs');
+      await ensureParentDir(config.output_path);
       await fs.writeFile(config.output_path, result, 'utf-8');
       result += `\n\n📄 Saved to: ${config.output_path}`;
     }

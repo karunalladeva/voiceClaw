@@ -323,6 +323,33 @@ export class AgentHistoryManager {
     return [...selected, ...rankedMessages];
   }
 
+  /** History prune: pin last N turn pairs; rank older turns when over char budget. */
+  async buildPrunedContextMessages(
+    chatId: string,
+    maxChars: number,
+    query = '',
+    minRecentTurns = 5,
+  ): Promise<BaseMessage[]> {
+    await this.loadChat(chatId);
+    const thread = this.getThread(chatId);
+    const pairs = minRecentTurns * 2;
+    const tail = thread.slice(-pairs);
+    let used = tail.reduce((s, m) => s + (m.content?.toString?.().length ?? 0), 0);
+    if (used <= maxChars) return tail;
+    const head = thread.slice(0, Math.max(0, thread.length - pairs));
+    if (head.length === 0 || !query.trim()) return tail.slice(-Math.max(2, pairs - 2));
+    const candidates: HistoryCandidate[] = head.map((m, i) => ({
+      index: i,
+      message: m,
+      text: m.content?.toString?.() ?? '',
+      chars: m.content?.toString?.().length ?? 0,
+    }));
+    const budget = Math.max(0, maxChars - used);
+    const rankedIdx = await selectHistoryIndices(candidates, budget, query);
+    const rankedMessages = rankedIdx.map((idx) => head[idx]).filter(Boolean);
+    return [...rankedMessages, ...tail];
+  }
+
   isMessageSummarized(chatId: string, index: number): boolean {
     return this.threadMeta[chatId]?.isSummarized[index] ?? false;
   }

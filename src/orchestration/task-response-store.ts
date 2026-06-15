@@ -18,6 +18,7 @@ const SKIP_PERSIST_TOOL_IDS = new Set([
   'list_my_subtasks',
   'create_subtask',
   'ask_parent_manager',
+  'ask_user',
   'reply_to_subtask_question',
   'list_pending_subtask_questions',
 ]);

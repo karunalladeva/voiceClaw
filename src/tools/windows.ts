@@ -6,10 +6,17 @@ import * as os from 'os';
 import * as fs from 'fs/promises';
 import { HumanMessage } from '@langchain/core/messages';
 import { modelRouter } from '../models/model-router';
+import {
+  ensureDir,
+  ensureParentDir,
+  OUTPUTS_SCREENSHOTS_DIR,
+  OUTPUTS_TMP_DIR,
+  WORKSPACE_ROOT,
+} from '../utils/workspace-dirs';
 
-const WORKSPACE = path.join(process.cwd(), 'workspace');
-const SCREENSHOTS_DIR = path.join(WORKSPACE, 'outputs', 'screenshots');
-const TEMP_DIR = path.join(WORKSPACE, 'outputs', '.tmp');
+const WORKSPACE = WORKSPACE_ROOT;
+const SCREENSHOTS_DIR = OUTPUTS_SCREENSHOTS_DIR;
+const TEMP_DIR = OUTPUTS_TMP_DIR;
 
 // Helper to run PowerShell commands
 function runPowerShell(script: string, timeoutMs = 30000): Promise<string> {
@@ -186,7 +193,7 @@ export const windowsPressKeyTool = tool(
 
 export const windowsTakeScreenshotTool = tool(
   async () => {
-    await fs.mkdir(SCREENSHOTS_DIR, { recursive: true });
+    await ensureDir(SCREENSHOTS_DIR);
     const filename = `screenshot_${Date.now()}.png`;
     const filepath = path.join(SCREENSHOTS_DIR, filename);
     const script = `
@@ -217,7 +224,7 @@ export const windowsTakeScreenshotTool = tool(
 
 export const windowsReadScreenTool = tool(
   async ({ query, expectedFormat }) => {
-    await fs.mkdir(TEMP_DIR, { recursive: true });
+    await ensureDir(TEMP_DIR);
     const filename = `read_screen_${Date.now()}.jpg`;
     const filepath = path.join(TEMP_DIR, filename);
     const script = `
@@ -471,7 +478,11 @@ export const windowsReadFileTool = tool(
 
 export const windowsWriteFileTool = tool(
   async ({ filePath, content }) => {
-    try { await fs.writeFile(filePath, content, 'utf-8'); return "Written."; }
+    try {
+      await ensureParentDir(filePath);
+      await fs.writeFile(filePath, content, 'utf-8');
+      return "Written.";
+    }
     catch (e: any) { return `Error: ${e.message}`; }
   },
   {

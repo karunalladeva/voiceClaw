@@ -5,6 +5,7 @@ import {
   unloadLlamacppModel,
   warmLlamacppModel,
 } from './llamacpp-client';
+import { getOllamaRequestTimeoutMs } from '../utils/ollama-fetch';
 import { modelRegistry } from './model-registry';
 import type { ModelConfig, ModelProvider } from './types';
 
@@ -58,17 +59,31 @@ export async function warmLocalModel(
   if (config.provider === 'ollama') {
     const baseUrl = getLocalBaseUrl(config);
     const keepAlive = keepWarm ? -1 : 300;
-    await fetch(`${baseUrl}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: modelName,
-        prompt: 'hi',
-        stream: false,
-        keep_alive: keepAlive,
-      }),
-      signal: AbortSignal.timeout(120000),
-    }).catch(() => {});
+    const warmTimeoutMs = Math.max(120_000, getOllamaRequestTimeoutMs());
+    try {
+      const res = await fetch(`${baseUrl}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: modelName,
+          prompt: 'hi',
+          stream: false,
+          keep_alive: keepAlive,
+        }),
+        signal: AbortSignal.timeout(warmTimeoutMs),
+      });
+      if (!res.ok) {
+        console.warn(
+          `[ModelLoadCoordinator] Ollama warm failed for ${modelName}: HTTP ${res.status}`,
+        );
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isTimeout = err instanceof Error && err.name === 'TimeoutError';
+      console.warn(
+        `[ModelLoadCoordinator] Ollama warm ${isTimeout ? 'timed out' : 'failed'} for ${modelName} (${warmTimeoutMs}ms): ${msg}`,
+      );
+    }
     console.log(`[ModelLoadCoordinator] Warmed Ollama model: ${modelName} (keep_alive=${keepAlive})`);
     return;
   }

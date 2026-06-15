@@ -6,7 +6,7 @@ import {
   isSynthesisOverProvidedData,
   isTradingRelatedQuery,
 } from '../agents/prompt-context';
-import { isGeneralLane, type MicroRouteResult } from '../agents/micro-router';
+import { isGeneralLane, isTradingLane, type MicroRouteResult } from '../agents/micro-router';
 
 export type SkillRoutingMode = 'auto' | 'compact' | 'standard' | 'trading-focused' | 'synthesis';
 
@@ -172,30 +172,14 @@ export class SkillRegistry {
 
     const coreLines = core.map((s) => this.formatSkillLine(s));
 
-    let tradingSection: string;
-    if (synthesis) {
-      tradingSection = `<trading_catalog synthesis="true">
-Market OHLCV and news for this task are already in the user message (## Market data for … blocks).
-Do NOT call yahoo_ohlcv, yahoo_news, or route_to_skill unless a symbol block is missing or the user asks for more symbols.
-Write the analysis from the provided blocks only.
-</trading_catalog>`;
-    } else if (casual && !tradingQuery) {
-      tradingSection = `<trading_catalog compact="true">
-Trading specialists use ids starting with "trading-" via route_to_skill.
-For general market questions use voiceclaw-financial-analyst (listed above).
-Full trading catalog (by category):
-${this.tradingCatalogText || '(none)'}
-</trading_catalog>`;
-    } else {
-      const ranked = this.rankSkillsForQuery(trading, query);
-      const detailed = (ranked.length > 0 ? ranked : trading).slice(0, MAX_RANKED_TRADING_SKILLS);
-      const detailedLines = detailed.map((s) => this.formatSkillLine(s));
-      tradingSection = `<trading_catalog>
-All trading skill ids are prefixed with "trading-". Categories:
-${this.tradingCatalogText || '(none)'}
-</trading_catalog>
-${detailedLines.length > 0 ? `\nRelevant trading skills for this message:\n${detailedLines.join('\n')}` : ''}`;
-    }
+    const tradingSection = this.buildTradingSection({
+      query,
+      casual,
+      tradingQuery,
+      synthesis,
+      microRoute,
+      trading,
+    });
 
     let routingMode: string;
     if (synthesis) routingMode = 'synthesis';
@@ -232,6 +216,49 @@ ${coreLines.join('\n')}
 
 ${tradingSection}
 </skills>`;
+  }
+
+  private buildTradingSection(opts: {
+    query: string;
+    casual: boolean;
+    tradingQuery: boolean;
+    synthesis: boolean;
+    microRoute?: MicroRouteResult;
+    trading: SkillDefinition[];
+  }): string {
+    const { query, casual, tradingQuery, synthesis, microRoute, trading } = opts;
+    if (synthesis) {
+      return `<trading_catalog synthesis="true">
+Market OHLCV and news for this task are already in the user message (## Market data for … blocks).
+Do NOT call yahoo_ohlcv, yahoo_news, or route_to_skill unless a symbol block is missing or the user asks for more symbols.
+Write the analysis from the provided blocks only.
+</trading_catalog>`;
+    }
+    const specialistLane = microRoute && !isGeneralLane(microRoute.category);
+    const tradingLane = microRoute && isTradingLane(microRoute.category);
+    if (specialistLane && !tradingLane && !tradingQuery) {
+      return `<trading_catalog omitted="specialist-lane">
+Specialist lane "${microRoute!.category}" — trading-* catalog omitted. Use focused skills, web_search, and web_fetch.
+</trading_catalog>`;
+    }
+    if (tradingQuery || tradingLane) {
+      const ranked = this.rankSkillsForQuery(trading, query);
+      const detailed = (ranked.length > 0 ? ranked : trading).slice(0, MAX_RANKED_TRADING_SKILLS);
+      const detailedLines = detailed.map((s) => this.formatSkillLine(s));
+      return `<trading_catalog>
+All trading skill ids are prefixed with "trading-". Categories:
+${this.tradingCatalogText || '(none)'}
+</trading_catalog>
+${detailedLines.length > 0 ? `\nRelevant trading skills for this message:\n${detailedLines.join('\n')}` : ''}`;
+    }
+    if (casual && !tradingQuery) {
+      return `<trading_catalog compact="true">
+Trading specialists use ids starting with "trading-" via route_to_skill when the user asks about markets.
+</trading_catalog>`;
+    }
+    return `<trading_catalog compact="true">
+For market/stock questions use route_to_skill with trading-* ids or voiceclaw-financial-analyst.
+</trading_catalog>`;
   }
 
   private prioritizeSkillsByIds(skills: SkillDefinition[], orderedIds: string[]): SkillDefinition[] {

@@ -2,17 +2,22 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { StateGraph, MessagesAnnotation } from '@langchain/langgraph';
 // @ts-ignore
+// @ts-ignore
 import { ToolNode } from '@langchain/langgraph/prebuilt';
+import { invokeSafeToolNode } from './graph/safe-tool-node';
+import { softenTools } from '../utils/soften-tool-schema';
 import { SkillDefinition, SkillToolLimits } from '../skills/base-skill';
 import { StreamEvent } from './react-agent';
 import { modelRegistry } from '../models/model-registry';
 import { modelRouter } from '../models/model-router';
 import { truncateToolMessages, truncateToolOutput } from '../utils/tool-output-truncate';
 import { invokeWithToolXmlFallback } from '../utils/ollama-tool-call';
+import { createOllamaFetch } from '../utils/ollama-fetch';
 import { invokeLlmWithDebug } from '../utils/debug-logger';
 import { getAgentRunContext, toTaskArtifactScope } from './agent-run-context';
 import { persistTaskResponse } from '../orchestration/task-response-store';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
+import { closeGraphStream } from './graph/safe-graph-stream';
 import {
   assessStructuredOutput,
   enrichHandoffWithStructuredOutput,
@@ -78,6 +83,7 @@ export class AgentFactory {
         model: skill.model,
         temperature: skill.temperature ?? 0.2,
         keepAlive: -1,
+        fetch: createOllamaFetch(),
       }) as unknown as BaseChatModel;
     }
     return modelRouter.getMasterModel();
@@ -102,7 +108,7 @@ export class AgentFactory {
   }
 
   private buildGraph(llm: BaseChatModel, skill: SkillDefinition): any {
-    const tools = skill.tools;
+    const tools = softenTools(skill.tools);
     const llmWithTools: any = tools.length > 0 ? (llm as any).bindTools(tools) : llm;
 
     const callModel = async (state: typeof MessagesAnnotation.State) => {
@@ -116,7 +122,7 @@ export class AgentFactory {
     };
 
     const toolNode = async (state: typeof MessagesAnnotation.State) => {
-      const output = await new ToolNode(tools).invoke(state);
+      const output = await invokeSafeToolNode(tools, state);
       truncateToolMessages(output.messages);
       return output;
     };
@@ -322,13 +328,7 @@ export class AgentFactory {
         if (runCtx && skillEndedEarly) {
           runCtx.skillRunCancelled = true;
         }
-        try {
-          await streamIterator.return?.();
-        } catch (closeErr: unknown) {
-          if (!isInferenceInterruptError(closeErr)) {
-            console.warn(`[AgentFactory] Skill "${skill.name}" stream close:`, closeErr);
-          }
-        }
+        await closeGraphStream(streamIterator);
       }
 
       if (this.needsGraceSynthesis(fullText, skillEndedEarly, toolTraces)) {

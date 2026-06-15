@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { chromium } from 'playwright';
+import { ensureParentDir } from '../utils/workspace-dirs';
 
 export type PdfPageFormat = 'A4' | 'Letter';
 
@@ -230,6 +231,7 @@ export async function generatePdfFromFiles(
     cleanMeta: true,
   });
   const mdSidecar = outputAbsPath.replace(/\.pdf$/i, '.md');
+  await ensureParentDir(mdSidecar);
   await fs.writeFile(mdSidecar, markdown, 'utf-8');
   const result = await generatePdfFromMarkdown(markdown, outputAbsPath, style);
   return { ...result, sourceFiles: absInputs };

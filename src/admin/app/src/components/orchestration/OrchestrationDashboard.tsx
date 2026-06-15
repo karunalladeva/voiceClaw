@@ -34,7 +34,7 @@ export function OrchestrationDashboard() {
 
   const { companies, createCompany, updateCompanySettings } = useCompanies(liveRevision);
   const { agents, createAgent, updateAgent, triggerHeartbeat } = useOrgAgents(selectedCompany?.id, liveRevision);
-  const { tasks, createTask, updateTask, reviewTask, fetchWorkProducts, fetchComments, fetchSubtasks, fetchPipelineWorkflow, delegateTeam, refreshTaskContext, refreshRootContext, requestClarification, addTaskComment, refresh: refreshTasks } = useTasks(
+  const { tasks, createTask, updateTask, reviewTask, fetchWorkProducts, fetchComments, fetchSubtasks, fetchPipelineWorkflow, delegateTeam, refreshTaskContext, refreshRootContext, requestClarification, addTaskComment, bulkUpdateTaskStatus, refresh: refreshTasks } = useTasks(
     selectedCompany?.id,
     liveRevision,
   );
@@ -216,6 +216,7 @@ export function OrchestrationDashboard() {
               refreshRootContext={refreshRootContext}
               requestClarification={requestClarification}
               addTaskComment={addTaskComment}
+              onBulkUpdateStatus={bulkUpdateTaskStatus}
               onTasksRefresh={() => void refreshTasks()}
             />
           )}

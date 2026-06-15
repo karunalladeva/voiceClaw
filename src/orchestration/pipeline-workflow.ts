@@ -8,6 +8,7 @@ import {
 import {
   getTaskArtifactAbsDir,
   getTaskArtifactRelDir,
+  getRootArtifactAbsDir,
   type TaskArtifactScope,
 } from './task-artifacts';
 import type { Task } from './types';
@@ -96,6 +97,65 @@ export async function resolveManagerTaskIdForRoot(
     const scope = { id: t.id, rootTaskId: rootTaskId };
     if (await loadPipelineWorkflow(scope)) return t.id;
   }
+  return null;
+}
+
+/** Locate pipeline/workflow.json under a pipeline root (any task subfolder). */
+export async function findPipelineWorkflowUnderRoot(
+  rootTaskId: string,
+): Promise<{ absPath: string; relPath: string } | null> {
+  const rootAbs = getRootArtifactAbsDir(rootTaskId);
+  let taskDirs: string[] = [];
+  try {
+    const entries = await fs.readdir(rootAbs, { withFileTypes: true });
+    taskDirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return null;
+  }
+  const ordered = [...new Set([rootTaskId, ...taskDirs])];
+  for (const taskId of ordered) {
+    const scope = { id: taskId, rootTaskId: rootTaskId };
+    const abs = pipelineWorkflowAbsPath(scope);
+    try {
+      await fs.access(abs);
+      return { absPath: abs, relPath: pipelineWorkflowRelPath(scope) };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Fix common workflow.json path mistakes (e.g. artifacts/{root}/pipeline/… missing {taskId}).
+ */
+export async function resolvePipelineWorkflowReadPath(
+  filename: string,
+  scope: TaskArtifactScope,
+): Promise<{ absPath: string; relPath: string } | null> {
+  const norm = filename.replace(/\\/g, '/').trim();
+  if (!norm.includes('workflow.json')) return null;
+
+  const ownAbs = pipelineWorkflowAbsPath(scope);
+  try {
+    await fs.access(ownAbs);
+    return { absPath: ownAbs, relPath: pipelineWorkflowRelPath(scope) };
+  } catch {
+    /* try alternatives */
+  }
+
+  const shallow = norm.match(
+    /^workspace\/orchestration\/artifacts\/([^/]+)\/pipeline\/workflow\.json$/i,
+  );
+  const rootId = shallow?.[1] ?? scope.rootTaskId ?? scope.id;
+  if (shallow || norm.endsWith('/pipeline/workflow.json')) {
+    return findPipelineWorkflowUnderRoot(rootId);
+  }
+
+  if (norm === 'pipeline/workflow.json') {
+    return findPipelineWorkflowUnderRoot(scope.rootTaskId ?? scope.id);
+  }
+
   return null;
 }
 

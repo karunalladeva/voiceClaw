@@ -8,6 +8,7 @@ import { MarkdownField } from './MarkdownField';
 import { TaskDetailPanel } from './TaskDetailPanel';
 import { TaskLabelsField } from './TaskLabelsField';
 import { TaskDependencyPicker } from './TaskDependencyPicker';
+import { TaskBulkCleanPanel } from './TaskBulkCleanPanel';
 
 interface Props {
   tasks: Task[];
@@ -46,6 +47,10 @@ interface Props {
   refreshRootContext?: (rootTaskId: string) => Promise<void>;
   requestClarification?: (taskId: string, question: string) => Promise<void>;
   addTaskComment?: (taskId: string, content: string) => Promise<void>;
+  onBulkUpdateStatus?: (options: {
+    status: TaskStatus;
+    fromStatuses?: TaskStatus[];
+  }) => Promise<{ count: number }>;
   onTasksRefresh?: () => void;
 }
 
@@ -168,6 +173,7 @@ export function TaskBoard({
   refreshRootContext,
   requestClarification,
   addTaskComment,
+  onBulkUpdateStatus,
   onTasksRefresh,
 }: Props) {
   const [isCreating, setIsCreating] = useState(false);
@@ -213,14 +219,23 @@ export function TaskBoard({
 
   return (
     <div className="flex flex-col gap-6 h-full">
-      <div className="flex justify-between items-center shrink-0">
+      <div className="flex justify-between items-center shrink-0 gap-2 flex-wrap">
         <h3 className="font-semibold text-lg text-white">Tasks</h3>
-        <button
-          onClick={() => setIsCreating(true)}
-          className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white rounded-md text-xs font-medium transition-colors"
-        >
-          + Add Task
-        </button>
+        <div className="flex items-center gap-2">
+          {onBulkUpdateStatus && (
+            <TaskBulkCleanPanel
+              tasks={tasks}
+              onBulkUpdateStatus={onBulkUpdateStatus}
+              onDone={onTasksRefresh}
+            />
+          )}
+          <button
+            onClick={() => setIsCreating(true)}
+            className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white rounded-md text-xs font-medium transition-colors"
+          >
+            + Add Task
+          </button>
+        </div>
       </div>
 
       {isCreating && (

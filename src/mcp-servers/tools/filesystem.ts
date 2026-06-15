@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as fs from "fs/promises";
 import * as path from "path";
+import { ensureParentDir, ensureWorkspaceDirs } from "../../utils/workspace-dirs";
 
 // Create MCP server
 const server = new Server(
@@ -24,11 +25,7 @@ const server = new Server(
 const ALLOWED_DIR = path.join(process.cwd(), "workspace");
 
 async function ensureWorkspace() {
-  try {
-    await fs.access(ALLOWED_DIR);
-  } catch {
-    await fs.mkdir(ALLOWED_DIR, { recursive: true });
-  }
+  await ensureWorkspaceDirs();
 }
 
 // Ensure the workspace exists
@@ -103,6 +100,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     } else if (name === "write_file") {
       const content = args.content as string;
+      await ensureParentDir(safePath);
       await fs.writeFile(safePath, content, "utf-8");
       return {
         content: [{ type: "text", text: `Successfully wrote to ${filename}` }],

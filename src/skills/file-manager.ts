@@ -5,18 +5,25 @@ import * as fs from 'fs/promises';
 import * as crypto from 'crypto';
 import * as path from 'path';
 import { getAgentRunContext, toTaskArtifactScope } from '../agents/agent-run-context';
+import { getRunContext } from '../platform/session/run-context-storage';
 import { configManager } from '../config/index';
 import { isReadPathAllowed } from '../orchestration/artifact-read-allowlist';
 import {
   ensureTaskArtifactDir,
+  findArtifactFileByBasename,
   getTaskArtifactAbsDir,
   getTaskArtifactRelDir,
   listTaskArtifactRelPaths,
   resolveTaskArtifactFile,
 } from '../orchestration/task-artifacts';
-
-const WORKSPACE = path.join(process.cwd(), 'workspace');
-const OUTPUTS_DIR = path.join(WORKSPACE, 'outputs', 'documents');
+import { resolvePipelineWorkflowReadPath } from '../orchestration/pipeline-workflow';
+import {
+  ensureDir,
+  ensureParentDir,
+  ensureWorkspaceDirs,
+  OUTPUTS_DOCUMENTS_DIR,
+  WORKSPACE_ROOT,
+} from '../utils/workspace-dirs';
 /** Avoid loading huge files into the skill LLM context. */
 const MAX_READ_BYTES = 512_000;
 /** Max write size — prevents OOM when saving large chapters. */
@@ -34,15 +41,27 @@ function filterDeliverablePaths(paths: string[], taskRelDir: string): string[] {
   });
 }
 
-function resolveWriteTarget(filename: string): { absPath: string; relPath: string } {
+function resolveOrgTaskScope(): { id: string; rootTaskId: string } | undefined {
   const ctx = getAgentRunContext();
-  if (ctx?.orgTaskId) {
-    const scope = toTaskArtifactScope(ctx);
+  if (ctx?.orgTaskId) return toTaskArtifactScope(ctx);
+  const platform = getRunContext();
+  if (platform?.orgTaskId) {
+    return {
+      id: platform.orgTaskId,
+      rootTaskId: platform.rootTaskId ?? platform.orgTaskId,
+    };
+  }
+  return undefined;
+}
+
+function resolveWriteTarget(filename: string): { absPath: string; relPath: string } {
+  const scope = resolveOrgTaskScope();
+  if (scope) {
     const { absPath, relPath } = resolveTaskArtifactFile(scope, filename);
     return { absPath, relPath };
   }
-  const safePath = path.resolve(OUTPUTS_DIR, path.basename(filename));
-  if (!safePath.startsWith(OUTPUTS_DIR)) {
+  const safePath = path.resolve(OUTPUTS_DOCUMENTS_DIR, path.basename(filename));
+  if (!safePath.startsWith(OUTPUTS_DOCUMENTS_DIR)) {
     throw new Error('Access denied.');
   }
   return {
@@ -54,8 +73,8 @@ function resolveWriteTarget(filename: string): { absPath: string; relPath: strin
 function resolveReadTarget(filename: string): string {
   const norm = filename.replace(/\\/g, '/').trim();
   const ctx = getAgentRunContext();
-  if (ctx?.orgTaskId) {
-    const scope = toTaskArtifactScope(ctx);
+  const scope = resolveOrgTaskScope();
+  if (scope) {
     const taskRelDir = getTaskArtifactRelDir(scope);
     const taskAbsDir = getTaskArtifactAbsDir(scope);
     let abs: string | null = null;
@@ -74,9 +93,9 @@ function resolveReadTarget(filename: string): string {
     if (!abs) throw new Error('Access denied.');
 
     const cfg = configManager.getConfig();
-    const enforceIo = ctx.pipelineMode && cfg.agent.artifactOnlyIo !== false;
-    if (enforceIo && ctx.allowedReadPaths) {
-      if (!isReadPathAllowed(abs, ctx.allowedReadPaths)) {
+    const enforceIo = ctx?.pipelineMode && cfg.agent.artifactOnlyIo !== false;
+    if (enforceIo && ctx?.allowedReadPaths) {
+      if (!isReadPathAllowed(abs, ctx!.allowedReadPaths)) {
         throw new Error(
           'Read denied — not in your allowlist. Upstream outputs: use paths listed in task context or list_files.',
         );
@@ -86,51 +105,101 @@ function resolveReadTarget(filename: string): string {
 
     if (abs.startsWith(taskAbsDir + path.sep) || abs === taskAbsDir) return abs;
     if (norm.startsWith('workspace/')) {
-      if (abs.startsWith(WORKSPACE + path.sep) || abs === WORKSPACE) return abs;
+      if (abs.startsWith(WORKSPACE_ROOT + path.sep) || abs === WORKSPACE_ROOT) return abs;
     }
   }
   if (norm.startsWith('workspace/')) {
     const abs = path.resolve(process.cwd(), norm);
-    if (abs.startsWith(WORKSPACE + path.sep) || abs === WORKSPACE) return abs;
+    if (abs.startsWith(WORKSPACE_ROOT + path.sep) || abs === WORKSPACE_ROOT) return abs;
   }
-  const outputsPath = path.resolve(OUTPUTS_DIR, path.basename(norm));
-  if (outputsPath.startsWith(OUTPUTS_DIR + path.sep)) return outputsPath;
-  const workspacePath = path.resolve(WORKSPACE, path.basename(norm));
-  if (!workspacePath.startsWith(WORKSPACE + path.sep)) throw new Error('Access denied.');
+  const outputsPath = path.resolve(OUTPUTS_DOCUMENTS_DIR, path.basename(norm));
+  if (outputsPath.startsWith(OUTPUTS_DOCUMENTS_DIR + path.sep)) return outputsPath;
+  const workspacePath = path.resolve(WORKSPACE_ROOT, path.basename(norm));
+  if (!workspacePath.startsWith(WORKSPACE_ROOT + path.sep)) throw new Error('Access denied.');
   return workspacePath;
+}
+
+async function resolveReadTargetWithFallback(filename: string): Promise<{
+  absPath: string;
+  resolvedVia?: string;
+}> {
+  const primary = resolveReadTarget(filename);
+  try {
+    await fs.access(primary);
+    return { absPath: primary };
+  } catch (err: unknown) {
+    const code = err && typeof err === 'object' && 'code' in err ? String((err as NodeJS.ErrnoException).code) : '';
+    if (code !== 'ENOENT') throw err;
+    const scope = resolveOrgTaskScope();
+    if (!scope) throw err;
+    const workflowPath = await resolvePipelineWorkflowReadPath(filename, scope);
+    if (workflowPath) {
+      return { absPath: workflowPath.absPath, resolvedVia: workflowPath.relPath };
+    }
+    const found = await findArtifactFileByBasename(scope, filename, { searchRoot: true });
+    if (!found) throw err;
+    return { absPath: found.absPath, resolvedVia: found.relPath };
+  }
+}
+
+function formatReadFileError(filename: string, err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const scope = resolveOrgTaskScope();
+  if (filename.replace(/\\/g, '/').includes('workflow.json')) {
+    const rootId = scope?.rootTaskId ?? scope?.id;
+    const hint = rootId
+      ? ` Workflow paths use artifacts/{rootTaskId}/{taskId}/pipeline/workflow.json — not artifacts/{rootTaskId}/pipeline/workflow.json.`
+      : '';
+    return `Error reading file: ${message}.${hint}`;
+  }
+  if (scope) {
+    const taskRel = getTaskArtifactRelDir(scope);
+    return (
+      `Error reading file: ${message}. ` +
+      `During org tasks, deliverables live under ${taskRel}/ (not workspace/outputs/documents/). ` +
+      `Use list_files to see available paths.`
+    );
+  }
+  return `Error reading file: ${message}`;
 }
 
 export const readFileTool = tool(
   async ({ filename }) => {
     try {
-      const safePath = resolveReadTarget(filename);
+      const { absPath: safePath, resolvedVia } = await resolveReadTargetWithFallback(filename);
       const stat = await fs.stat(safePath);
       if (stat.isDirectory()) {
         return `Error: "${filename}" is a directory. Use list_files to see files in this folder.`;
       }
+      let content: string;
       if (stat.size > MAX_READ_BYTES) {
         const handle = await fs.open(safePath, 'r');
         try {
           const buf = Buffer.alloc(MAX_READ_BYTES);
           await handle.read(buf, 0, MAX_READ_BYTES, 0);
-          return (
+          content =
             buf.toString('utf-8') +
-            `\n\n[TRUNCATED] File is ${stat.size} bytes; showing first ${MAX_READ_BYTES} bytes.`
-          );
+            `\n\n[TRUNCATED] File is ${stat.size} bytes; showing first ${MAX_READ_BYTES} bytes.`;
         } finally {
           await handle.close();
         }
+      } else {
+        content = await fs.readFile(safePath, 'utf-8');
       }
-      return await fs.readFile(safePath, 'utf-8');
-    } catch (e: any) {
-      return `Error reading file: ${e.message}`;
+      if (resolvedVia) {
+        return `[Resolved ${filename} → ${resolvedVia}]\n\n${content}`;
+      }
+      return content;
+    } catch (e: unknown) {
+      return formatReadFileError(filename, e);
     }
   },
   {
     name: 'read_file',
     description:
       'Read a file from the workspace. During org tasks, paths resolve under the task artifact folder ' +
-      '(basename, subpath like chapter-01.md, or full workspace/orchestration/artifacts/... path).',
+      '(basename, subpath like chapter-01.md or pipeline/workflow.json, or full workspace/orchestration/artifacts/... path). ' +
+      'For workflow.json use pipeline/workflow.json or the full path with both root and task ids.',
     schema: z.object({
       filename: z.string().describe('File name, subpath under task artifacts, or workspace/... path'),
     }),
@@ -144,18 +213,19 @@ export const writeFileTool = tool(
       if (byteLen > MAX_WRITE_BYTES) {
         return `Error writing file: content too large (${byteLen} bytes; max ${MAX_WRITE_BYTES}). Split into smaller chapter files.`;
       }
-      const ctx = getAgentRunContext();
-      if (ctx?.orgTaskId) {
-        await ensureTaskArtifactDir(toTaskArtifactScope(ctx));
+      const scope = resolveOrgTaskScope();
+      if (scope) {
+        await ensureTaskArtifactDir(scope);
       } else {
-        await fs.mkdir(OUTPUTS_DIR, { recursive: true });
+        await ensureDir(OUTPUTS_DOCUMENTS_DIR);
       }
       const { absPath, relPath } = resolveWriteTarget(filename);
-      await fs.mkdir(path.dirname(absPath), { recursive: true });
+      await ensureParentDir(absPath);
       await fs.writeFile(absPath, content, 'utf-8');
 
       const cfg = configManager.getConfig();
-      if (ctx?.orgTaskId && cfg.agent.verifyActWrite !== false) {
+      const ctx = getAgentRunContext();
+      if (scope && cfg.agent.verifyActWrite !== false) {
         const readBack = await fs.readFile(absPath, 'utf-8');
         const expectedHash = crypto.createHash('sha256').update(content, 'utf-8').digest('hex');
         const actualHash = crypto.createHash('sha256').update(readBack, 'utf-8').digest('hex');
@@ -176,10 +246,11 @@ export const writeFileTool = tool(
   {
     name: 'write_file',
     description:
-      'Write content to disk. During org tasks, saves under workspace/orchestration/artifacts/{rootTaskId}/{taskId}/. Otherwise workspace/outputs/documents/.',
+      'Write content to disk. During org tasks, saves under workspace/orchestration/artifacts/{rootTaskId}/{taskId}/. ' +
+      'Otherwise workspace/outputs/documents/. Always pass filename AND content as JSON strings.',
     schema: z.object({
-      filename: z.string().describe('Name of file to write (e.g. chapter-01.md, report.pdf)'),
-      content: z.string().describe('Content to write'),
+      filename: z.string().describe('Name of file to write (e.g. pipeline/workflow.json, chapter-01.md)'),
+      content: z.string().describe('Full file body to write (required — do not call with empty args)'),
     }),
   }
 );
@@ -187,9 +258,8 @@ export const writeFileTool = tool(
 export const listFilesTool = tool(
   async () => {
     try {
-      const ctx = getAgentRunContext();
-      if (ctx?.orgTaskId) {
-        const scope = toTaskArtifactScope(ctx);
+      const scope = resolveOrgTaskScope();
+      if (scope) {
         const taskRelDir = getTaskArtifactRelDir(scope);
         const paths = filterDeliverablePaths(await listTaskArtifactRelPaths(scope), taskRelDir);
         if (paths.length === 0) {
@@ -201,8 +271,8 @@ export const listFilesTool = tool(
         }
         return `Task artifact files (${taskRelDir}/):\n${paths.join('\n')}`;
       }
-      await fs.mkdir(WORKSPACE, { recursive: true });
-      const files = await fs.readdir(WORKSPACE);
+      await ensureWorkspaceDirs();
+      const files = await fs.readdir(WORKSPACE_ROOT);
       return files.length > 0 ? files.join('\n') : 'Workspace is empty.';
     } catch (e: any) {
       return `Error listing files: ${e.message}`;

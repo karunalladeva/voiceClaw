@@ -344,6 +344,26 @@ export function useTasks(companyId?: string, liveRevision: number = 0) {
     return data.comment;
   };
 
+  const bulkUpdateTaskStatus = async (options: {
+    status: string;
+    fromStatuses?: string[];
+  }) => {
+    const res = await fetch(`${API_BASE}/tasks/bulk-status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        companyId,
+        status: options.status,
+        fromStatuses: options.fromStatuses,
+        actorId: 'admin',
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Bulk status update failed');
+    await refresh();
+    return { count: data.count as number };
+  };
+
   return {
     tasks,
     loading,
@@ -360,6 +380,7 @@ export function useTasks(companyId?: string, liveRevision: number = 0) {
     refreshRootContext,
     requestClarification,
     addTaskComment,
+    bulkUpdateTaskStatus,
   };
 }
 

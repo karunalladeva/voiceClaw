@@ -36,6 +36,12 @@ if [[ "$START_FLUTTER" == "1" ]]; then
   fi
 fi
 
+echo "[start.sh] Building admin UI..."
+(
+  cd "$ROOT_DIR"
+  npm run admin:build
+)
+
 echo "[start.sh] Starting backend..."
 (
   cd "$ROOT_DIR"
@@ -63,6 +69,8 @@ if [[ -n "$APP_PID" ]]; then
   echo "[start.sh] App PID: $APP_PID"
 fi
 echo "[start.sh] Admin UI: http://localhost:3000/admin"
+echo "[start.sh] Live admin dev (optional): npm run admin:dev in another terminal"
+echo "[start.sh] Flutter (optional): START_FLUTTER=1 ./start.sh"
 echo "[start.sh] Press Ctrl+C to stop."
 
 if [[ -n "$APP_PID" ]]; then

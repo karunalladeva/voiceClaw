@@ -1,8 +1,10 @@
 import dotenv from 'dotenv';
 import { startServer } from './api/server';
+import { sessionRuntime } from './platform/session/session-runtime';
 import { configManager } from './config/index';
 import { probeSearxngAvailability, invalidateSearxngProbeCache } from './tools/searxng-client';
 import { resetImpitClient } from './tools/web-page-fetch';
+import { ensureWorkspaceDirs } from './utils/workspace-dirs';
 
 // Load environment variables
 dotenv.config();
@@ -23,8 +25,9 @@ async function bootstrap() {
     console.log(`   To monitor agent activity and tokens locally, set LANGCHAIN_TRACING_V2=true and LANGCHAIN_ENDPOINT=http://localhost:1984 in \`.env\`\n`);
   }
 
-  // Initialize the config manager (loads file, sets up watcher)
   await configManager.initialize();
+  await ensureWorkspaceDirs();
+  await sessionRuntime.initialize();
 
   configManager.on('configChanged', () => {
     invalidateSearxngProbeCache();

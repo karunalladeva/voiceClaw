@@ -7,6 +7,7 @@ import {
   getRootArtifactAbsDir,
   resolveTaskArtifactFile,
 } from '../orchestration/task-artifacts';
+import { ensureDir, OUTPUTS_DOCUMENTS_DIR } from '../utils/workspace-dirs';
 import {
   generatePdfFromDirectory,
   generatePdfFromFiles,
@@ -181,6 +182,8 @@ async function ensureTaskArtifactDirIfNeeded(): Promise<void> {
   const ctx = getAgentRunContext();
   if (ctx?.orgTaskId) {
     await ensureTaskArtifactDir(toTaskArtifactScope(ctx));
+  } else {
+    await ensureDir(OUTPUTS_DOCUMENTS_DIR);
   }
 }
 

@@ -49,6 +49,10 @@ import {
 import { inferenceActivity } from '../utils/inference-activity';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
 import { modelLoadCoordinator } from '../models/model-load-coordinator';
+import { prepareRunContext, createChatSessionRecord } from '../platform/prep/prepare-run-context';
+import { sessionRuntime } from '../platform/session/session-runtime';
+import type { AgentRunOptions } from '../agents/agent-run-options';
+import type { RunChannel } from '../platform/contracts';
 
 vramMonitor.startMonitoring();
 
@@ -139,7 +143,12 @@ async function emitTtsForAnswer(
     if (signal.aborted) return;
     sendSSE(res, { type: 'audio', data: audioBuffer.toString('base64') });
     if (i === 0) {
-      console.log(`[API] First TTS chunk ready in ${Date.now() - ttsStart}ms (${chunks[i].length} chars).`);
+      const msToFirstAudio = Date.now() - ttsStart;
+      console.log(`[API] First TTS chunk ready in ${msToFirstAudio}ms (${chunks[i].length} chars).`);
+      sendSSE(res, {
+        type: 'phase',
+        data: JSON.stringify({ phase: 'tts', msToFirstAudio }),
+      });
     }
   }
 }
@@ -148,7 +157,8 @@ async function handleStreamingChat(
   req: express.Request,
   res: express.Response,
   input: string | any,
-  chatId: string = 'default'
+  chatId: string = 'default',
+  runOptions?: AgentRunOptions,
 ) {
   vramMonitor.registerActivity();
   initSSE(res);
@@ -193,7 +203,7 @@ async function handleStreamingChat(
   const releaseInference = inferenceActivity.begin();
 
   try {
-    for await (const event of agent.processStream(input, chatId, controller.signal)) {
+    for await (const event of agent.processStream(input, chatId, controller.signal, runOptions)) {
       if (controller.signal.aborted) break;
 
       const rawAnswer = relayAgentStreamEvent(res, event, displayFilter);
@@ -253,7 +263,12 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
     }
 
     const originalName = req.file.originalname;
-    const chatId = req.body.chatId || 'default';
+    const sessionId = req.body.sessionId as string | undefined;
+    if (!sessionId) {
+      return res.status(400).json({ error: 'sessionId is required — create via POST /chats' });
+    }
+    const prepared = await prepareRunContext({ sessionId, channel: 'api' });
+    const chatId = prepared.chatId;
     const extension = originalName.includes('.')
       ? originalName.substring(originalName.lastIndexOf('.'))
       : '.wav';
@@ -273,7 +288,12 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
       ];
     } else {
       sendSSE(res, { type: 'thinking', data: 'Transcribing audio...' });
+      const sttStart = Date.now();
       textOrAudioPayload = await STTModule.transcribeBuffer(req.file.buffer, extension);
+      sendSSE(res, {
+        type: 'phase',
+        data: JSON.stringify({ phase: 'stt', ms: Date.now() - sttStart }),
+      });
       sendSSE(res, { type: 'transcription', data: textOrAudioPayload });
     }
 
@@ -300,7 +320,9 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
     const releaseInference = inferenceActivity.begin();
 
     try {
-      for await (const event of agent.processStream(textOrAudioPayload, chatId, controller.signal)) {
+      for await (const event of agent.processStream(textOrAudioPayload, chatId, controller.signal, {
+        runContext: prepared.runContext,
+      })) {
         if (controller.signal.aborted) break;
 
         const rawAnswer = relayAgentStreamEvent(res, event, displayFilter);
@@ -348,12 +370,16 @@ app.post('/chat/audio', upload.single('audio'), async (req, res) => {
 // 1.5. Text -> Think -> Speak Loop via SSE Stream
 app.post('/chat/text', async (req, res) => {
   try {
-    const { text, chatId = 'default' } = req.body;
+    const { text, sessionId } = req.body;
     if (!text) {
       return res.status(400).json({ error: 'Text input is required' });
     }
-
-    await handleStreamingChat(req, res, text, chatId);
+    if (!sessionId || typeof sessionId !== 'string') {
+      return res.status(400).json({ error: 'sessionId is required — create via POST /chats' });
+    }
+    const channel = (req.body.channel as RunChannel) || 'api';
+    const prepared = await prepareRunContext({ sessionId, channel });
+    await handleStreamingChat(req, res, text, prepared.chatId, { runContext: prepared.runContext });
 
   } catch (error: any) {
     console.error('[API] Error in /chat/text:', error);
@@ -630,6 +656,47 @@ app.delete('/workspace/files/:name', async (req, res) => {
 });
 
 // 6. Session Management
+app.post('/chats', async (_req, res) => {
+  try {
+    const chatId = typeof _req.body?.chatId === 'string' ? _req.body.chatId.trim() : undefined;
+    const session = await createChatSessionRecord(chatId);
+    res.status(201).json(session);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
+  }
+});
+
+app.get('/sessions/:sessionId/debug', async (req, res) => {
+  try {
+    const prepared = await prepareRunContext({ sessionId: req.params.sessionId, channel: 'api' });
+    const scopeId = prepared.runContext.scopeId;
+    const facts = await import('../platform/context/evidence-pipeline').then((m) => m.loadFacts(scopeId));
+    res.json({
+      sessionId: prepared.runContext.sessionId,
+      chatId: prepared.chatId,
+      scopeId,
+      factCount: facts.length,
+      flags: configManager.getConfig().agent?.context ?? {},
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: message });
+  }
+});
+
+app.post('/sessions/:sessionId/promote-ace', async (req, res) => {
+  try {
+    const prepared = await prepareRunContext({ sessionId: req.params.sessionId, channel: 'api' });
+    const { sessionContextService } = await import('../platform/context/session-context-service');
+    const aceDir = await sessionContextService.promoteToAce(prepared.runContext.scopeId);
+    res.json({ success: true, aceDir });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: message });
+  }
+});
+
 app.get('/chats', async (req, res) => {
 
   try {
@@ -773,6 +840,15 @@ app.get('/health', (_req, res) => {
       heapUsedMb: Math.round(mem.heapUsed / (1024 * 1024)),
       heapTotalMb: Math.round(mem.heapTotal / (1024 * 1024)),
     },
+  });
+});
+
+app.get('/health/models', (_req, res) => {
+  const master = modelRegistry.getMaster();
+  res.json({
+    masterModelId: master?.id ?? configManager.getConfig().llm.model,
+    warmOnStartup: configManager.getConfig().agent?.warmOnStartup !== false,
+    microRouterKeepAlive: configManager.getConfig().agent?.microRouter?.keepAlive !== false,
   });
 });
 
@@ -1271,7 +1347,17 @@ export const startServer = async (port: number = 3000) => {
 
   // Initialize local tools first
   await agent.initialize([fsServerPath, memoryServerPath, marketServerPath, chromaServerPath]);
+  await sessionRuntime.initialize();
   setSharedReactAgent(agent);
+  if (configManager.getConfig().agent?.warmOnStartup !== false) {
+    const { warmMicroRouterModel } = await import('../agents/micro-router-model');
+    void warmMicroRouterModel(true);
+    const master = modelRegistry.getMaster();
+    if (master?.id) {
+      void modelRouter.getModel().catch(() => {});
+    }
+    console.log('[API] warmOnStartup: micro-router + master model prefetch queued.');
+  }
   const masterAtStartup = modelRegistry.getMaster();
   if (masterAtStartup) {
     modelLoadCoordinator.markResidentFromStartup(masterAtStartup);
@@ -1395,10 +1481,11 @@ export const startServer = async (port: number = 3000) => {
           : '';
       prompt =
         `${context}${delegationHint}${answerDutyHint}\n\n` +
-        `Work on the assigned task. If requirements are unclear, call ask_parent_manager once, then wait for the answer (do not call it again). ` +
+        `Work on the assigned task. If requirements are unclear, call ask_parent_manager once (subtasks only) or ask_user for human approval — then wait for the answer (do not call again). ` +
         `If a sub-agent handoff is incomplete or structured output is invalid, do not delegate — use partial tool-trace data, a fallback skill, or ask the user. ` +
-        `If this requires your team to execute next steps, ` +
-        `you MUST call create_subtask for each direct report before finishing (do not only describe tasks in prose).`;
+        `If this requires your team to execute next steps, call delegate_from_workflow once (pipeline mode) or create_subtask per workflow phase — not one per direct report. ` +
+        `If market research is done and the user must pick a product, call ask_user with the top options before delegating Product Engineering / Creative / Creator. ` +
+        `If list_my_subtasks already shows all phases delegated, stop and do not create more subtasks.`;
     } else {
       prompt = `${context}\n\nCheck for any work that needs to be done and report status.`;
     }
@@ -1434,6 +1521,15 @@ export const startServer = async (port: number = 3000) => {
         pipelineMode: runPrep?.pipelineMode,
         blockersOpen: runPrep?.blockersOpen,
         userDecisionBound: !!runPrep?.userDecision,
+        runContext: task?.id
+          ? {
+              sessionId: `org-${task.id}`,
+              scopeId: `org:${task.rootTaskId ?? task.id}:${task.id}`,
+              channel: 'org',
+              orgTaskId: task.id,
+              rootTaskId: task.rootTaskId ?? task.id,
+            }
+          : undefined,
       })) {
         if (event.type === 'text_done') {
           output = event.data;
@@ -1505,6 +1601,7 @@ export const startServer = async (port: number = 3000) => {
 
   process.on('unhandledRejection', (reason: unknown) => {
     if (isPipeClosedError(reason)) return;
+    if (isInferenceInterruptError(reason)) return;
     const msg = reason instanceof Error ? reason.message : String(reason);
     console.error('[API] Unhandled rejection:', reason);
     agentEvents.log('error', `Unhandled rejection: ${msg}`);
@@ -1512,6 +1609,7 @@ export const startServer = async (port: number = 3000) => {
 
   process.on('uncaughtException', (error: unknown) => {
     if (isPipeClosedError(error)) return;
+    if (isInferenceInterruptError(error)) return;
     console.error('[API] Uncaught exception:', error);
     agentEvents.log('error', `Uncaught exception: ${error instanceof Error ? error.message : String(error)}`);
   });

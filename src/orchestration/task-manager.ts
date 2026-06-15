@@ -16,7 +16,7 @@ import {
   AWAITING_USER_LABEL,
   hasAwaitingUserLabel,
 } from './awaiting-user-input';
-import { normalizeBlockedByIds } from './orchestration-blocked-by';
+import { normalizeBlockedByIds, pruneStaleBlockedByIds } from './orchestration-blocked-by';
 import { ensureTaskArtifactDir } from './task-artifacts';
 import { saveUserDecision } from './pipeline-workflow';
 import type {
@@ -114,11 +114,12 @@ class TaskManager extends EventEmitter {
     for (const task of tasks) {
       if (!task.blockedBy?.length) continue;
       const normalized = normalizeBlockedByIds(task.blockedBy, tasks);
+      const pruned = pruneStaleBlockedByIds(normalized, tasks);
       const same =
-        normalized.length === task.blockedBy.length &&
-        normalized.every((id, i) => id === task.blockedBy![i]);
+        pruned.length === task.blockedBy.length &&
+        pruned.every((id, i) => id === task.blockedBy![i]);
       if (same) continue;
-      task.blockedBy = normalized;
+      task.blockedBy = pruned;
       changed = true;
       if (task.status === 'backlog' || task.status === 'todo') {
         const blockersOpen = await taskWorkflow.areBlockersSatisfied(task);
@@ -479,6 +480,24 @@ class TaskManager extends EventEmitter {
 
   async updateStatus(taskId: string, status: TaskStatus, actorId: string): Promise<Task | null> {
     return this.updateTask(taskId, { status }, actorId);
+  }
+
+  async bulkUpdateStatus(params: {
+    companyId?: string;
+    status: TaskStatus;
+    fromStatuses?: TaskStatus[];
+    actorId?: string;
+  }): Promise<{ updated: Task[]; count: number }> {
+    const actorId = params.actorId ?? 'admin';
+    const candidates = await this.listTasks(params.companyId);
+    const updated: Task[] = [];
+    for (const task of candidates) {
+      if (task.status === params.status) continue;
+      if (params.fromStatuses && !params.fromStatuses.includes(task.status)) continue;
+      const saved = await this.updateStatus(task.id, params.status, actorId);
+      if (saved) updated.push(saved);
+    }
+    return { updated, count: updated.length };
   }
 
   async updateTask(
@@ -1083,7 +1102,13 @@ class TaskManager extends EventEmitter {
   }
 
   async getDependencyContext(taskId: string): Promise<string> {
-    return taskWorkflow.buildDependencyContext(taskId);
+    try {
+      return await taskWorkflow.buildDependencyContext(taskId);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[TaskManager] Dependency context failed for ${taskId}: ${msg}`);
+      return '';
+    }
   }
 
   async getGoalHierarchy(taskId: string): Promise<{ task: Task; goal?: Goal; company?: any }> {
@@ -1098,7 +1123,16 @@ class TaskManager extends EventEmitter {
     const tasks = await orchestrationStore.load('tasks');
     const task = tasks.find(t => t.id === taskId);
     if (!task) return false;
-    const filtered = tasks.filter(t => t.id !== taskId);
+    const filtered = tasks
+      .filter(t => t.id !== taskId)
+      .map((t) => {
+        if (!t.blockedBy?.includes(taskId)) return t;
+        return {
+          ...t,
+          blockedBy: t.blockedBy.filter((id) => id !== taskId),
+          updatedAt: Date.now(),
+        };
+      });
     await orchestrationStore.save('tasks', filtered);
     await this.logActivity({
       companyId: task.companyId,

@@ -47,23 +47,37 @@ export function ChatDashboard({ onOpenPipelines }: { onOpenPipelines?: () => voi
           <div ref={chat.messagesEndRef} />
         </div>
 
-        {(chat.isProcessing || chat.statusText) && (
-          <div className="px-6 py-2 border-t border-border bg-card/40 flex items-center gap-3 text-sm">
-            {chat.isProcessing && (
-              <span className="w-3.5 h-3.5 rounded-full border-2 border-primary border-t-transparent animate-spin shrink-0" />
-            )}
-            {chat.statusText && (
-              <span className="text-muted-foreground italic truncate flex-1">{chat.statusText}</span>
-            )}
-            {chat.isProcessing && (
-              <button
-                type="button"
-                onClick={chat.stopProcessing}
-                className="flex items-center gap-1.5 text-destructive hover:opacity-80 text-sm shrink-0"
-              >
-                <StopCircle className="w-4 h-4" />
-                Stop
-              </button>
+        {(chat.isProcessing || chat.statusText || chat.phaseTimeline.length > 0) && (
+          <div className="px-6 py-2 border-t border-border bg-card/40 flex flex-col gap-1 text-sm">
+            <div className="flex items-center gap-3">
+              {chat.isProcessing && (
+                <span className="w-3.5 h-3.5 rounded-full border-2 border-primary border-t-transparent animate-spin shrink-0" />
+              )}
+              {chat.statusText && (
+                <span className="text-muted-foreground italic truncate flex-1">{chat.statusText}</span>
+              )}
+              {chat.isProcessing && (
+                <button
+                  type="button"
+                  onClick={chat.stopProcessing}
+                  className="flex items-center gap-1.5 text-destructive hover:opacity-80 text-sm shrink-0"
+                >
+                  <StopCircle className="w-4 h-4" />
+                  Stop
+                </button>
+              )}
+            </div>
+            {chat.phaseTimeline.length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                {chat.phaseTimeline.map((span, i) => (
+                  <span key={`${span.phase}-${i}`} className="rounded bg-secondary/60 px-2 py-0.5">
+                    {span.phase}
+                    {span.detail ? `: ${span.detail}` : ''}
+                    {span.ms != null ? ` (${span.ms}ms)` : ''}
+                    {span.msToFirstAudio != null ? ` (${span.msToFirstAudio}ms audio)` : ''}
+                  </span>
+                ))}
+              </div>
             )}
           </div>
         )}

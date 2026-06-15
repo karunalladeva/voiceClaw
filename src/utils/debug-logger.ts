@@ -12,7 +12,10 @@ interface LlmLogEntry {
   toolCalls?: string;
 }
 
-function messageToLogEntry(msg: BaseMessage): LlmLogEntry {
+function messageToLogEntry(msg: BaseMessage | null | undefined): LlmLogEntry {
+  if (msg == null) {
+    return { role: 'unknown', content: '[missing message]' };
+  }
   const role = typeof msg.getType === 'function' ? msg.getType() : msg.constructor?.name ?? 'unknown';
   let content = '';
   if (typeof msg.content === 'string') {
@@ -64,7 +67,8 @@ export function debugLog(category: string, message: string, extra?: Record<strin
 
 export function debugLogLlmRequest(label: string, messages: BaseMessage[], modelId?: string): void {
   if (!isLlmIoDebugEnabled()) return;
-  const entries = messages.map(messageToLogEntry);
+  const validMessages = messages.filter((msg): msg is BaseMessage => msg != null);
+  const entries = validMessages.map(messageToLogEntry);
   const preview = entries
     .map((entry) => {
       const body = truncate(entry.content, LLM_PREVIEW_CHARS);
@@ -72,12 +76,12 @@ export function debugLogLlmRequest(label: string, messages: BaseMessage[], model
       return `  [${entry.role}] ${body}${tools}`;
     })
     .join('\n');
-  const header = `[Debug:LLM:IN] ${label}${modelId ? ` model=${modelId}` : ''} (${messages.length} message(s))`;
+  const header = `[Debug:LLM:IN] ${label}${modelId ? ` model=${modelId}` : ''} (${validMessages.length} message(s))`;
   console.log(`${header}\n${preview}`);
   agentEvents.emit('debug:llm_request', {
     label,
     modelId,
-    messageCount: messages.length,
+    messageCount: validMessages.length,
     messages: entries.map((entry) => ({
       role: entry.role,
       content: truncate(entry.content, LLM_EVENT_CHARS),
@@ -88,6 +92,10 @@ export function debugLogLlmRequest(label: string, messages: BaseMessage[], model
 
 export function debugLogLlmResponse(label: string, response: BaseMessage, modelId?: string): void {
   if (!isLlmIoDebugEnabled()) return;
+  if (response == null) {
+    console.log(`[Debug:LLM:OUT] ${label}${modelId ? ` model=${modelId}` : ''}\n  [unknown] [missing response]`);
+    return;
+  }
   const entry = messageToLogEntry(response);
   const body = truncate(entry.content, LLM_PREVIEW_CHARS);
   const tools = entry.toolCalls ? `\n  tool_calls: ${entry.toolCalls}` : '';

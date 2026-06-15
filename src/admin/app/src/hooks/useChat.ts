@@ -5,6 +5,7 @@ import {
   loadChatMessages,
   streamAudioChat,
   streamTextChat,
+  createChatSession,
   type ChatSummary,
   type SSEEvent,
 } from '@/lib/chatApi'
@@ -20,6 +21,15 @@ export interface ChatMessage {
   isSummarized?: boolean
   /** Rolled-up summary block (from summaries[]), shown in UI only */
   isSummaryBlock?: boolean
+  /** Evidence/citation facts from SSE */
+  citations?: Array<{ claim: string; source: string; verified?: boolean }>
+}
+
+export interface PhaseSpan {
+  phase: string
+  detail?: string
+  ms?: number
+  msToFirstAudio?: number
 }
 
 const VAD_SILENCE_MS = 1800
@@ -35,6 +45,8 @@ export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [chatList, setChatList] = useState<ChatSummary[]>([])
   const [currentChatId, setCurrentChatId] = useState('default')
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
+  const [phaseTimeline, setPhaseTimeline] = useState<PhaseSpan[]>([])
   const [statusText, setStatusText] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
@@ -122,9 +134,55 @@ export function useChat() {
     })
   }, [])
 
+  const ensureSession = useCallback(async (chatId?: string): Promise<string> => {
+    const session = await createChatSession(chatId)
+    setCurrentSessionId(session.sessionId)
+    if (session.chatId) setCurrentChatId(session.chatId)
+    return session.sessionId
+  }, [])
+
+  useEffect(() => {
+    void ensureSession('default').catch(() => {})
+  }, [ensureSession])
+
   const handleSSEEvent = useCallback(
     async (event: SSEEvent, state: { agentText: string; agentMsgAdded: boolean }) => {
       switch (event.type) {
+        case 'phase':
+          try {
+            const span = JSON.parse(event.data) as PhaseSpan
+            setPhaseTimeline((prev) => [...prev, span])
+            if (span.phase === 'router' && span.detail) {
+              setStatusText(`Router: ${span.detail}`)
+            }
+          } catch {
+            /* ignore malformed phase */
+          }
+          break
+        case 'pointer':
+          setStatusText(`Pointer registered: ${event.data.slice(0, 80)}…`)
+          break
+        case 'citations':
+          try {
+            const payload = JSON.parse(event.data) as {
+              facts?: Array<{ claim: string; source: string; verified?: boolean }>
+            }
+            if (payload.facts?.length) {
+              setMessages((prev) => {
+                const next = [...prev]
+                for (let i = next.length - 1; i >= 0; i--) {
+                  if (next[i].sender === 'Agent') {
+                    next[i] = { ...next[i], citations: payload.facts }
+                    break
+                  }
+                }
+                return next
+              })
+            }
+          } catch {
+            /* ignore */
+          }
+          break
         case 'transcription':
           addMessage('User', event.data)
           break
@@ -190,6 +248,7 @@ export function useChat() {
       abortRef.current = controller
       audioPlayerRef.current.reset()
       setIsProcessing(true)
+      setPhaseTimeline([])
 
       const sseState = { agentText: '', agentMsgAdded: false }
 
@@ -225,21 +284,23 @@ export function useChat() {
       setInputText('')
       addMessage('User', trimmed)
 
+      const sessionId = currentSessionId ?? (await ensureSession(currentChatId))
       await runStream((signal, onEvent) =>
-        streamTextChat(trimmed, currentChatId, signal, onEvent)
+        streamTextChat(trimmed, sessionId, signal, onEvent)
       )
     },
-    [addMessage, currentChatId, isProcessing, runStream]
+    [addMessage, currentChatId, currentSessionId, ensureSession, isProcessing, runStream]
   )
 
   const sendAudioBlob = useCallback(
     async (blob: Blob) => {
       addMessage('User', '(Voice Message)')
+      const sessionId = currentSessionId ?? (await ensureSession(currentChatId))
       await runStream((signal, onEvent) =>
-        streamAudioChat(blob, currentChatId, signal, onEvent)
+        streamAudioChat(blob, sessionId, signal, onEvent)
       )
     },
-    [addMessage, currentChatId, runStream]
+    [addMessage, currentChatId, currentSessionId, ensureSession, runStream]
   )
 
   const stopRecording = useCallback(async () => {
@@ -307,7 +368,14 @@ export function useChat() {
       if (isProcessing) stopProcessing()
       setCurrentChatId(id)
       setMessages([])
+      setPhaseTimeline([])
       setStatusText('Loading chat…')
+      try {
+        const session = await createChatSession(id)
+        setCurrentSessionId(session.sessionId)
+      } catch {
+        setCurrentSessionId(null)
+      }
 
       const { messages: history, summaries } = await loadChatMessages(id)
       const summaryBlocks: ChatMessage[] = summaries.map((s) => ({
@@ -328,10 +396,13 @@ export function useChat() {
     [isProcessing, stopProcessing]
   )
 
-  const createNewChat = useCallback(() => {
+  const createNewChat = useCallback(async () => {
     if (isProcessing) stopProcessing()
-    setCurrentChatId(String(Date.now()))
+    const session = await createChatSession(String(Date.now()))
+    setCurrentChatId(session.chatId)
+    setCurrentSessionId(session.sessionId)
     setMessages([])
+    setPhaseTimeline([])
     setStatusText('')
     void refreshChatList()
   }, [isProcessing, refreshChatList, stopProcessing])
@@ -390,6 +461,7 @@ export function useChat() {
     inputText,
     setInputText,
     messagesEndRef,
+    phaseTimeline,
     sendText,
     stopProcessing,
     toggleRecording,

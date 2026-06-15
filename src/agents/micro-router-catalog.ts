@@ -57,6 +57,11 @@ export function isGeneralLane(lane: MicroRouteLane): boolean {
   return lane === GENERAL_LANE;
 }
 
+/** Lanes where trading-* skill catalog belongs in the system prompt. */
+export function isTradingLane(lane: MicroRouteLane): boolean {
+  return lane === 'markets' || lane === 'trading';
+}
+
 export function slugLane(value: string): MicroRouteLane {
   const slug = value
     .trim()

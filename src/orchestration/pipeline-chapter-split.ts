@@ -4,6 +4,7 @@ import { companyManager } from './company-manager';
 import { hasPipelineModeLabel } from './orchestration-labels';
 import { taskManager } from './task-manager';
 import { getRootArtifactAbsDir, getTaskArtifactAbsDir } from './task-artifacts';
+import { OUTPUTS_DOCUMENTS_DIR } from '../utils/workspace-dirs';
 import type { ApprovalRequest, Task } from './types';
 
 function isCreatedTask(value: Task | ApprovalRequest): value is Task {
@@ -60,7 +61,7 @@ export async function resolveChapterTitles(rootTaskId: string, task: Task): Prom
   const tocCandidates = [
     path.join(getTaskArtifactAbsDir({ id: task.id, rootTaskId }), 'TOC.md'),
     path.join(getRootArtifactAbsDir(rootTaskId), 'TOC.md'),
-    path.join(process.cwd(), 'workspace', 'outputs', 'documents', 'TOC.md'),
+    path.join(OUTPUTS_DOCUMENTS_DIR, 'TOC.md'),
   ];
   for (const absPath of tocCandidates) {
     const content = await readTextIfExists(absPath);

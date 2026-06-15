@@ -9,6 +9,8 @@ import { packMarkdownForQuery, queryFromTitle } from '../utils/query-aware-trunc
 import { configManager } from '../config/index';
 import { isNavigationShellContent } from './web-heuristics';
 import { expandRankingQuery, marketplaceHintTokens } from '../utils/query-expansion';
+import { getRunContext } from '../platform/session/run-context-storage';
+import { isSessionDedupEnabled, sessionToolCache } from '../agents/session-tool-cache';
 
 const WEB_FETCH_TOOL_TIMEOUT_MS = 90_000;
 const WEB_FETCH_CACHE_TTL_MS = 15 * 60 * 1000;
@@ -64,18 +66,39 @@ function fetchDedupeKey(url: string, part: number, focus?: string, query?: strin
 }
 
 function registerFetchDedupe(url: string, part: number, focus?: string, query?: string): string | null {
-  const runCtx = getAgentRunContext();
-  if (!runCtx?.orgTaskId) return null;
   const key = fetchDedupeKey(url, part, focus, query);
-  if (!runCtx.webFetchKeys) runCtx.webFetchKeys = new Set();
-  if (runCtx.webFetchKeys.has(key)) {
-    return (
-      `Duplicate web_fetch skipped for this task (already ran): ${url} part=${part}. ` +
-      'Use a different part, focus, query, or URL from web_search.'
-    );
+  const runCtx = getAgentRunContext();
+  if (runCtx?.orgTaskId) {
+    if (!runCtx.webFetchKeys) runCtx.webFetchKeys = new Set();
+    if (runCtx.webFetchKeys.has(key)) {
+      return (
+        `Duplicate web_fetch skipped for this task (already ran): ${url} part=${part}. ` +
+        'Use a different part, focus, query, or URL from web_search.'
+      );
+    }
+    runCtx.webFetchKeys.add(key);
+    return null;
   }
-  runCtx.webFetchKeys.add(key);
+  if (isSessionDedupEnabled()) {
+    const chatId = getRunContext()?.chatId;
+    if (chatId) {
+      const cached = sessionToolCache.getWebFetch(chatId, key);
+      if (cached) {
+        return (
+          `Duplicate web_fetch skipped for this session (already ran): ${url} part=${part}. ` +
+          'Use a different part, focus, query, or URL from web_search.'
+        );
+      }
+    }
+  }
   return null;
+}
+
+function rememberSessionFetch(url: string, part: number, focus: string | undefined, query: string | undefined, result: string): void {
+  if (!isSessionDedupEnabled()) return;
+  const chatId = getRunContext()?.chatId;
+  if (!chatId) return;
+  sessionToolCache.setWebFetch(chatId, fetchDedupeKey(url, part, focus, query), result);
 }
 
 function formatFetchOutput(
@@ -233,6 +256,7 @@ export const webFetchTool = tool(
           ),
         ),
       ]);
+      rememberSessionFetch(url, part, focus, query, result);
       return result;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);

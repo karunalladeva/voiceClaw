@@ -5,9 +5,12 @@
   "main": "index.js",
   "scripts": {
     "dev": "ts-node src/index.ts",
+    "dev:with-admin": "npm run admin:build && npm run dev",
     "onboard": "ts-node scripts/onboard.ts",
     "generate-skill": "ts-node scripts/generate-skill.ts",
     "build": "tsc",
+    "eval:gate:mock": "ts-node tests/eval/gate-mock.ts",
+    "eval:gate:live": "ts-node tests/eval/gate-live.ts",
     "admin:dev": "npm run dev --prefix src/admin/app",
     "admin:build": "npm run build --prefix src/admin/app"
   },

@@ -139,6 +139,17 @@ class HeartbeatScheduler extends EventEmitter {
     const triggerForTask = async (task: Task, assigneeId?: string) => {
       const targetId = assigneeId ?? task.assigneeId ?? task.reviewerId;
       if (!targetId) return;
+      if (task.parentTaskId) {
+        const parent = await taskManager.getTaskById(task.parentTaskId);
+        const parentAssignee = parent?.assigneeId;
+        if (parentAssignee && this.runningHeartbeats.has(parentAssignee)) {
+          console.log(
+            `[Orchestration] Deferring assignee heartbeat for "${task.title}" — parent manager still delegating`,
+          );
+          this.scheduleDebouncedHeartbeat(targetId, 'parent_delegating', 8000);
+          return;
+        }
+      }
       console.log(`[Orchestration] Auto-triggering heartbeat for: ${task.title}`);
       try {
         await this.triggerHeartbeat(targetId);

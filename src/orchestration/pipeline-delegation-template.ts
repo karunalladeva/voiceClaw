@@ -48,6 +48,7 @@ export async function buildSpawnInputsFromWorkflow(
       description,
       assigneeId,
       blockedBy,
+      phaseId: phase.id,
       priority: parentTask.priority,
     });
   }

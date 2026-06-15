@@ -6,6 +6,7 @@ import { comfyuiListWorkflowsTool, comfyuiGenerateTool, comfyuiCheckJobTool } fr
 import { pdfGenerateTool, pdfMergeFilesTool, pdfMergePipelineTool } from '../tools/pdf';
 import { deliverToChannelTool, listChannelsTool } from '../tools/channel';
 import { listFilesTool, readFileTool, writeFileTool } from './file-manager';
+import { softenTools } from '../utils/soften-tool-schema';
 
 const toolRegistry: Record<string, DynamicStructuredTool> = {
   web_search: webSearchTool,
@@ -29,6 +30,6 @@ const toolRegistry: Record<string, DynamicStructuredTool> = {
 
 export function resolveToolsByIds(ids: string[] = []): DynamicStructuredTool[] {
   const unique = Array.from(new Set(ids));
-  return unique.map((id: string) => toolRegistry[id]).filter(Boolean);
+  return softenTools(unique.map((id: string) => toolRegistry[id]).filter(Boolean));
 }
 

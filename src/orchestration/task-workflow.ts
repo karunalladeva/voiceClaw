@@ -17,6 +17,14 @@ import { materializeWorkProductChapters } from './work-product-materializer';
 import { agentRegistry } from './agent-registry';
 import { companyManager } from './company-manager';
 import { normalizeTask, normalizeTasks } from './task-normalizer';
+import { configManager } from '../config/index';
+import { buildOrgScopeId } from '../platform/session/scope-id';
+import { sessionContextService } from '../platform/context/session-context-service';
+import {
+  mergeUpstreamRegistryEntry,
+  formatUpstreamRegistryForPrompt,
+} from '../platform/context/upstream-registry';
+import type { UpstreamRegistryEntry } from '../platform/contracts';
 import type {
   OrgAgent,
   Task,
@@ -163,6 +171,14 @@ class TaskWorkflowEngine extends EventEmitter {
     return normalizeTask(task);
   }
 
+  private async tryLoadTask(taskId: string): Promise<Task | null> {
+    try {
+      return await this.loadTask(taskId);
+    } catch {
+      return null;
+    }
+  }
+
   private async saveTask(updated: Task): Promise<Task> {
     return orchestrationStore.mutateTasks((tasks) => {
       const index = tasks.findIndex((t) => t.id === updated.id);
@@ -303,7 +319,13 @@ class TaskWorkflowEngine extends EventEmitter {
     const visit = async (blockerId: string): Promise<void> => {
       if (seen.has(blockerId)) return;
       seen.add(blockerId);
-      const blocker = await this.loadTask(blockerId);
+      const blocker = await this.tryLoadTask(blockerId);
+      if (!blocker) {
+        console.warn(
+          `[TaskWorkflow] Skipping missing blocker ${blockerId} while resolving dependencies for ${taskId}`,
+        );
+        return;
+      }
       for (const upstreamId of blocker.blockedBy ?? []) {
         await visit(upstreamId);
       }
@@ -345,9 +367,43 @@ class TaskWorkflowEngine extends EventEmitter {
   async buildDependencyContext(taskId: string): Promise<string> {
     const blockerIds = await this.collectTransitiveBlockerIds(taskId);
     if (blockerIds.length === 0) return '';
+    const task = await this.loadTask(taskId);
+    const rootId = task.rootTaskId ?? task.id;
+    const useRegistry =
+      configManager.getConfig().agent?.context?.orgLifecycleContext?.enabled !== false;
+    if (useRegistry) {
+      const scopeId = buildOrgScopeId(rootId, taskId);
+      for (const blockerId of blockerIds) {
+        const blocker = await this.tryLoadTask(blockerId);
+        if (!blocker) continue;
+        const wp = await this.getLatestWorkProduct(blockerId);
+        const body = this.formatBlockerOutputSection(blocker, wp);
+        const pointer = await sessionContextService.registerPayload(scopeId, body, {
+          kind: 'artifact',
+          title: blocker.title.slice(0, 120),
+          summary: (wp?.content?.trim() || body).slice(0, 2000),
+        });
+        const entry: UpstreamRegistryEntry = {
+          blockerTaskId: blockerId,
+          pointerId: pointer.id,
+          title: blocker.title,
+          summary: pointer.summary,
+          status: blocker.status === 'review' ? 'review' : 'done',
+        };
+        await mergeUpstreamRegistryEntry(scopeId, rootId, taskId, entry);
+      }
+      const registry = await sessionContextService.loadUpstreamRegistry(scopeId, taskId);
+      if (registry && registry.entries.length > 0) {
+        return (
+          `Upstream outputs are registered as pointers — call \`read_pointer\` for full payloads.\n\n` +
+          formatUpstreamRegistryForPrompt(registry)
+        );
+      }
+    }
     const parts: string[] = [];
     for (const blockerId of blockerIds) {
-      const blocker = await this.loadTask(blockerId);
+      const blocker = await this.tryLoadTask(blockerId);
+      if (!blocker) continue;
       const wp = await this.getLatestWorkProduct(blockerId);
       parts.push(this.formatBlockerOutputSection(blocker, wp));
     }

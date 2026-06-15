@@ -20,6 +20,24 @@ export interface ChatHistoryMessage {
   isSummarized?: boolean
 }
 
+export interface ChatSession {
+  sessionId: string
+  chatId: string
+}
+
+export async function createChatSession(chatId?: string): Promise<ChatSession> {
+  const res = await fetch('/chats', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(chatId ? { chatId } : {}),
+  })
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string }
+    throw new Error(err.error || `Failed to create session (${res.status})`)
+  }
+  return (await res.json()) as ChatSession
+}
+
 export async function fetchChats(): Promise<ChatSummary[]> {
   try {
     const res = await fetch('/chats')
@@ -82,7 +100,7 @@ export async function clearAllChatHistory(): Promise<{ deleted: number; message:
 
 export async function streamTextChat(
   text: string,
-  chatId: string,
+  sessionId: string,
   signal: AbortSignal,
   onEvent: (event: SSEEvent) => void
 ): Promise<void> {
@@ -92,7 +110,7 @@ export async function streamTextChat(
       'Content-Type': 'application/json',
       Accept: 'text/event-stream',
     },
-    body: JSON.stringify({ text, chatId }),
+    body: JSON.stringify({ text, sessionId, channel: 'admin' }),
     signal,
   })
 

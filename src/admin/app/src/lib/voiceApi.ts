@@ -56,14 +56,14 @@ export async function* parseSSEStream(
 
 export async function streamAudioChat(
   audioBlob: Blob,
-  chatId: string,
+  sessionId: string,
   signal: AbortSignal,
   onEvent: (event: SSEEvent) => void
 ): Promise<void> {
   const extension = audioBlob.type.includes('webm') ? '.webm' : '.wav'
   const formData = new FormData()
   formData.append('audio', audioBlob, `recording${extension}`)
-  formData.append('chatId', chatId)
+  formData.append('sessionId', sessionId)
 
   const response = await fetch('/chat/audio', {
     method: 'POST',

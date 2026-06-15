@@ -184,9 +184,10 @@ export function isFollowUpOverProvidedHistory(query: string, historyText: string
   return true;
 }
 
-export function shouldUseSynthesisMode(query: string, historyText?: string): boolean {
+export function shouldUseSynthesisMode(query: string, historyText?: string, sessionRagHint?: boolean): boolean {
   if (isSynthesisOverProvidedData(query)) return true;
   if (historyText && isFollowUpOverProvidedHistory(query, historyText)) return true;
+  if (sessionRagHint && hasPresentationIntent(query)) return true;
   return false;
 }
 
@@ -194,5 +195,18 @@ export function shouldUseSynthesisMode(query: string, historyText?: string): boo
 export function failsCricketSanityCheck(response: string): boolean {
   const oversLeft = response.match(/(\d+(?:\.\d+)?)\s*overs?\s*(left|remaining|to go|to bat)/i);
   if (oversLeft && parseFloat(oversLeft[1]) > 20) return true;
+  return false;
+}
+
+const MEMORY_RECALL_SIGNAL =
+  /\b(remember|recall|what did i tell you|my preference|my timezone|my location|you know my|stored memory|save this|list memories|search memory)\b/i;
+
+/** Skip vector memory injection for specialist non-trading lanes (KDP, ComfyUI, etc.). */
+export function shouldInjectMemoryForQuery(query: string, microRouteLane?: string): boolean {
+  if (isCasualMessage(query)) return false;
+  if (MEMORY_RECALL_SIGNAL.test(query)) return true;
+  if (!microRouteLane || microRouteLane === 'general') return true;
+  if (microRouteLane === 'markets' || microRouteLane === 'trading') return true;
+  if (isTradingRelatedQuery(query)) return true;
   return false;
 }

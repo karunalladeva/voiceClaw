@@ -409,6 +409,45 @@ router.post('/tasks', async (req, res) => {
   }
 });
 
+router.post('/tasks/bulk-status', async (req, res) => {
+  try {
+    const { companyId, status, fromStatuses, actorId } = req.body as {
+      companyId?: string;
+      status?: import('./types').TaskStatus;
+      fromStatuses?: import('./types').TaskStatus[];
+      actorId?: string;
+    };
+    if (!status) return res.status(400).json({ error: 'status required' });
+    const validStatuses: import('./types').TaskStatus[] = [
+      'backlog',
+      'todo',
+      'in_progress',
+      'blocked',
+      'review',
+      'done',
+      'cancelled',
+    ];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: `Invalid status: ${status}` });
+    }
+    const filteredFrom =
+      Array.isArray(fromStatuses) && fromStatuses.length > 0
+        ? fromStatuses.filter((s): s is import('./types').TaskStatus =>
+            validStatuses.includes(s as import('./types').TaskStatus),
+          )
+        : undefined;
+    const result = await taskManager.bulkUpdateStatus({
+      companyId: typeof companyId === 'string' ? companyId : undefined,
+      status,
+      fromStatuses: filteredFrom,
+      actorId: typeof actorId === 'string' ? actorId : 'admin',
+    });
+    res.json({ success: true, ...result });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/tasks/:id', async (req, res) => {
   try {
     const task = await taskManager.getTaskById(req.params.id);

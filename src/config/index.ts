@@ -57,8 +57,31 @@ export interface AppConfig {
     allowUpstreamArtifactReads?: boolean;
     /** Pipeline-mode: manager must write pipeline/workflow.json before delegate. */
     requirePipelineWorkflow?: boolean;
+    /** Auto-create default pipeline/workflow.json when manager has none (avoids empty write_file loops). */
+    autoBootstrapPipelineWorkflow?: boolean;
     /** Verify-act read-back after write_file during org tasks. */
     verifyActWrite?: boolean;
+    /** Warm master + micro-router models on server boot. */
+    warmOnStartup?: boolean;
+    /** Reserved skill slot for interactive chat while org runs. */
+    interactiveReserved?: number;
+    /** Max stacked tool message chars before governor swaps to pointers. */
+    turnToolBudgetChars?: number;
+    /** Context platform feature flags (Speed + Accuracy architecture). */
+    context?: {
+      sessionStoreTtlDays?: number;
+      readPointerRatePerMin?: number;
+      pointers?: { enabled?: boolean };
+      governor?: { enabled?: boolean };
+      historyPrune?: { enabled?: boolean };
+      sessionRag?: { enabled?: boolean };
+      mapReduce?: { enabled?: boolean };
+      evidencePipeline?: { enabled?: boolean };
+      tieredRouting?: { enabled?: boolean };
+      dedup?: { enabled?: boolean };
+      orgLifecycleContext?: { enabled?: boolean };
+      ace?: { enabled?: boolean };
+    };
   };
   pipeline: {
     /** Max chars of research context passed into summarize / synthesis human message. */
@@ -218,7 +241,25 @@ const DEFAULT_CONFIG: AppConfig = {
     artifactOnlyIo: true,
     allowUpstreamArtifactReads: true,
     requirePipelineWorkflow: true,
+    autoBootstrapPipelineWorkflow: true,
     verifyActWrite: true,
+    warmOnStartup: true,
+    interactiveReserved: 1,
+    turnToolBudgetChars: 24_000,
+    context: {
+      sessionStoreTtlDays: 30,
+      readPointerRatePerMin: 20,
+      pointers: { enabled: true },
+      governor: { enabled: true },
+      historyPrune: { enabled: true },
+      sessionRag: { enabled: true },
+      mapReduce: { enabled: true },
+      evidencePipeline: { enabled: true },
+      tieredRouting: { enabled: true },
+      dedup: { enabled: true },
+      orgLifecycleContext: { enabled: true },
+      ace: { enabled: false },
+    },
   },
   pipeline: {
     contextMaxChars: 15_000,
@@ -554,6 +595,54 @@ class ConfigManager extends EventEmitter {
               historyContext: {
                 ...this.currentConfig.agent?.historyContext,
                 ...(newSettings.agent?.historyContext || {}),
+              },
+            }
+          : {}),
+        ...(newSettings.agent?.context || this.currentConfig.agent?.context
+          ? {
+              context: {
+                ...this.currentConfig.agent?.context,
+                ...(newSettings.agent?.context || {}),
+                pointers: {
+                  ...this.currentConfig.agent?.context?.pointers,
+                  ...(newSettings.agent?.context?.pointers || {}),
+                },
+                governor: {
+                  ...this.currentConfig.agent?.context?.governor,
+                  ...(newSettings.agent?.context?.governor || {}),
+                },
+                historyPrune: {
+                  ...this.currentConfig.agent?.context?.historyPrune,
+                  ...(newSettings.agent?.context?.historyPrune || {}),
+                },
+                sessionRag: {
+                  ...this.currentConfig.agent?.context?.sessionRag,
+                  ...(newSettings.agent?.context?.sessionRag || {}),
+                },
+                mapReduce: {
+                  ...this.currentConfig.agent?.context?.mapReduce,
+                  ...(newSettings.agent?.context?.mapReduce || {}),
+                },
+                evidencePipeline: {
+                  ...this.currentConfig.agent?.context?.evidencePipeline,
+                  ...(newSettings.agent?.context?.evidencePipeline || {}),
+                },
+                tieredRouting: {
+                  ...this.currentConfig.agent?.context?.tieredRouting,
+                  ...(newSettings.agent?.context?.tieredRouting || {}),
+                },
+                dedup: {
+                  ...this.currentConfig.agent?.context?.dedup,
+                  ...(newSettings.agent?.context?.dedup || {}),
+                },
+                orgLifecycleContext: {
+                  ...this.currentConfig.agent?.context?.orgLifecycleContext,
+                  ...(newSettings.agent?.context?.orgLifecycleContext || {}),
+                },
+                ace: {
+                  ...this.currentConfig.agent?.context?.ace,
+                  ...(newSettings.agent?.context?.ace || {}),
+                },
               },
             }
           : {}),

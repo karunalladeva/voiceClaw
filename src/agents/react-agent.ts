@@ -5,9 +5,8 @@ import { StateGraph, MessagesAnnotation } from '@langchain/langgraph';
 import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-
-// @ts-ignore
-import { ToolNode } from '@langchain/langgraph/prebuilt';
+import { invokeSafeToolNode } from './graph/safe-tool-node';
+import { softenTools } from '../utils/soften-tool-schema';
 import { MCPClientManager } from './mcp-client';
 import { AgentFactory, extractToolOutputFromEvent, SKILL_RUN_INCOMPLETE_MARKER } from './agent-factory';
 import {
@@ -46,6 +45,7 @@ import {
   toolTraceHasAdequateLiveData,
   failsCricketSanityCheck,
   shouldUseSynthesisMode,
+  shouldInjectMemoryForQuery,
   type LiveLookupDomain,
 } from './prompt-context';
 import {
@@ -64,11 +64,36 @@ import { persistTaskResponse } from '../orchestration/task-response-store';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
 import { truncateToolOutput } from '../utils/tool-output-truncate';
 import { removeSpokenSummaryBlock } from '../utils/speech-for-tts';
+import { buildPlatformTools } from '../platform/tools/platform-tools';
+import { buildChatScopeId, buildOrgScopeId } from '../platform/session/scope-id';
+import { sessionContextService } from '../platform/context/session-context-service';
+import { runGroundingCheck } from '../platform/context/grounding-check';
+import { buildEvidenceBundle } from '../platform/context/evidence-pipeline';
+import { sessionRagIndex } from '../platform/context/session-rag';
+import { getRunContextStorage, getRunContext } from '../platform/session/run-context-storage';
+import type { RunContext } from '../platform/contracts';
+import { processToolMessages } from './graph/process-tool-messages';
+import { trimMessagesForModel, isPreModelTrimEnabled } from './graph/pre-model-trim';
+import { closeGraphStream, consumeGraphStreamEvents } from './graph/safe-graph-stream';
+import { decideRoutingTier } from './tiered-routing';
+import { isPointersEnabled, registerToolOutputAsPointer, pointerToolMessageBody } from '../platform/context/tool-output-policy';
 
 export type { AgentRunOptions } from './agent-run-options';
 
 export interface StreamEvent {
-  type: 'transcription' | 'thinking' | 'tool_call' | 'token' | 'text_done' | 'audio_start' | 'audio' | 'error' | 'done';
+  type:
+    | 'transcription'
+    | 'thinking'
+    | 'tool_call'
+    | 'token'
+    | 'text_done'
+    | 'audio_start'
+    | 'audio'
+    | 'error'
+    | 'done'
+    | 'phase'
+    | 'pointer'
+    | 'citations';
   data: string;
 }
 
@@ -96,12 +121,20 @@ export class ReactAgent {
     signal?: AbortSignal;
     timeoutHandle: ReturnType<typeof setTimeout>;
   }> = [];
+  private activeRunContext?: RunContext;
+  private interactivePendingCount = 0;
+  private activeCancelSignal?: AbortSignal;
 
-  private getSkillConcurrencyConfig(): { maxParallelSkills: number; timeoutMs: number } {
-    const cfg = configManager.getConfig().agent || ({} as any);
+  private getSkillConcurrencyConfig(): {
+    maxParallelSkills: number;
+    timeoutMs: number;
+    interactiveReserved: number;
+  } {
+    const cfg = configManager.getConfig().agent;
     const maxParallelSkills = Math.max(1, Number(cfg.maxParallelSkills ?? 2));
     const timeoutMs = Math.max(1000, Number(cfg.skillQueueTimeoutMs ?? 30000));
-    return { maxParallelSkills, timeoutMs };
+    const interactiveReserved = Math.max(0, Number(cfg.interactiveReserved ?? 1));
+    return { maxParallelSkills, timeoutMs, interactiveReserved };
   }
 
   private mapSkillPriority(priority?: 'background' | 'normal' | 'interactive'): number {
@@ -138,10 +171,18 @@ export class ReactAgent {
     priority: 'background' | 'normal' | 'interactive' = 'normal',
     signal?: AbortSignal,
   ): Promise<() => void> {
-    const { maxParallelSkills, timeoutMs } = this.getSkillConcurrencyConfig();
-    if (this.activeSkillExecutions < maxParallelSkills && this.skillQueue.length === 0) {
+    const { maxParallelSkills, timeoutMs, interactiveReserved } = this.getSkillConcurrencyConfig();
+    if (priority === 'interactive') this.interactivePendingCount += 1;
+    const effectiveMax =
+      priority !== 'interactive' && this.interactivePendingCount > 0
+        ? Math.max(1, maxParallelSkills - interactiveReserved)
+        : maxParallelSkills;
+    if (this.activeSkillExecutions < effectiveMax && this.skillQueue.length === 0) {
       this.activeSkillExecutions += 1;
       return () => {
+        if (priority === 'interactive') {
+          this.interactivePendingCount = Math.max(0, this.interactivePendingCount - 1);
+        }
         this.activeSkillExecutions = Math.max(0, this.activeSkillExecutions - 1);
         this.drainSkillQueue();
       };
@@ -530,12 +571,21 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
             if (releaseSkillSlot) releaseSkillSlot();
           }
 
-          const handoffBody = capOrchestratorHandoff(
-            finalOutput || 'No text output produced.',
-          );
+          const handoffRaw = finalOutput || 'No text output produced.';
+          const scopeId = this.activeRunContext?.scopeId ?? buildChatScopeId(chatId);
+          if (isPointersEnabled()) {
+            const pointer = await registerToolOutputAsPointer(scopeId, 'route_to_skill', handoffRaw, {
+              kind: 'skill',
+              skillId: skill.id,
+              title: skill.name,
+            });
+            return `[Sub-Agent Result from ${skill.name}]:\n${pointerToolMessageBody(pointer)}`;
+          }
+          const handoffBody = capOrchestratorHandoff(handoffRaw);
           return `[Sub-Agent Result from ${skill.name}]:\n${handoffBody}`;
         }
-      })
+      }),
+      ...buildPlatformTools(() => this.activeRunContext ?? getRunContext()),
     ];
   }
 
@@ -554,7 +604,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     }
 
     const sysTools = this.getSystemTools(skillAllowlist);
-    const allTools = [...tools, ...sysTools];
+    const allTools = softenTools([...tools, ...sysTools]);
     const llmWithTools: any = allTools.length > 0 ? (llm as any).bindTools(allTools) : llm;
 
     const callModel = async (state: typeof MessagesAnnotation.State) => {
@@ -586,11 +636,27 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
         return msg;
       }).reverse();
 
+      const modelMessages = optimizedMessages.filter(
+        (msg): msg is BaseMessage => msg != null,
+      );
+      if (modelMessages.length !== optimizedMessages.length) {
+        console.warn(
+          `[ReAct Agent] Dropped ${optimizedMessages.length - modelMessages.length} undefined message(s) before model invoke`,
+        );
+      }
+      const trimmedMessages = isPreModelTrimEnabled()
+        ? (await trimMessagesForModel(modelMessages)).filter((msg): msg is BaseMessage => msg != null)
+        : modelMessages;
+
       const response = await invokeWithToolXmlFallback(
         llmWithTools,
         llm,
-        optimizedMessages,
-        { label: 'react-agent', modelId: this.activeModelId },
+        trimmedMessages,
+        {
+          label: 'react-agent',
+          modelId: this.activeModelId,
+          signal: this.activeCancelSignal,
+        },
       );
       return { messages: [response] };
     };
@@ -598,54 +664,11 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
     // ── Tool Node with Summarization (Noise Reduction) ────────────────────────
     // We pass allTools here so ToolNode knows how to execute route_to_skill natively!
     const toolNodeWithTruncation = async (state: typeof MessagesAnnotation.State) => {
-      const output = await new ToolNode(allTools).invoke(state);
-      // Prune massive tool results for the current turn to avoid single-turn overflow
-      for (const msg of output.messages) {
-        if (!msg.content || msg.content.length <= 12000) continue;
-        const contentStr = msg.content.toString();
-        if (contentStr.includes('[Sub-Agent Result from')) {
-          if (contentStr.length > ORCHESTRATOR_HANDOFF_MAX_CHARS) {
-            msg.content = capOrchestratorHandoff(contentStr);
-          }
-          continue;
-        }
-        if (msg instanceof ToolMessage && msg.name === 'web_fetch') {
-          console.warn(`[Agent: ReAct] Truncating web_fetch markdown (no LLM summarize)`);
-          msg.content = truncateToolOutput(
-            contentStr,
-            12000,
-          ).replace(
-            '[TRUNCATED for context window]',
-            '[TRUNCATED — use web_fetch with part=1,2,… or focus= subtopic. Do not invent missing facts.]',
-          );
-          continue;
-        }
-        if (hasVolatileNumericToolOutput(contentStr)) {
-          console.warn(`[Agent: ReAct] Preserving volatile numeric tool output via truncation (no LLM summarize)`);
-          msg.content =
-            contentStr.substring(0, 12000) +
-            '\n\n...[OUTPUT TRUNCATED — use web_fetch with part=1+ or focus to read more. Do not invent missing numbers.]...';
-          continue;
-        }
-        const modelId = this.activeModelId;
-        console.warn(`[Agent: ReAct] [Model: ${modelId}] Summarizing massive tool output: ${contentStr.substring(0, 50)}…`);
-        try {
-          const fastModel = await modelRouter.getModel('summarize');
-          const summary = await Promise.race([
-            (fastModel as any).invoke([
-              new SystemMessage("You are an expert at summarizing massive tool/command outputs. Summarize the following output accurately to retain all crucial details, keeping it under 2000 characters. Make the summary fast and concise."),
-              new HumanMessage({ content: contentStr.substring(0, 40000) }),
-            ]),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Summarization Timeout')), 60000)),
-          ]);
-          msg.content = `[Tool Output Summarized for Context Efficiency]:\n${(summary as any).content.toString()}`;
-        } catch (e) {
-          console.warn(`[Agent: ReAct] Summarizer failed or timed out, falling back to truncation:`, e);
-          msg.content = contentStr.substring(0, 12000) + '\n\n...[OUTPUT TRUNCATED FOR CONTEXT EFFICIENCY]...';
-        }
-      }
-
-      return output;
+      const output = await invokeSafeToolNode(allTools, state);
+      const scopeId = this.activeRunContext?.scopeId ?? buildChatScopeId('default');
+      const toolMsgs = output.messages.filter((m: BaseMessage): m is ToolMessage => m instanceof ToolMessage);
+      const processed = await processToolMessages(toolMsgs, scopeId);
+      return { messages: processed };
     };
 
     const shouldContinue = (state: typeof MessagesAnnotation.State) => {
@@ -753,7 +776,17 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
       return base + this.buildLiveDataRequiredBlock(domain) + this.buildTemporalMemoryGuard();
     }
     if (!this.isMemoryEnabled()) return base;
+    const scopeId = chatId ? buildChatScopeId(chatId) : undefined;
+    if (scopeId && configManager.getConfig().agent?.context?.historyPrune?.enabled) {
+      const memState = await sessionContextService.buildMemoryState(scopeId);
+      if (memState) {
+        base += `\n\n<memory_state>\n${memState}\n</memory_state>`;
+      }
+    }
     const isTimeSensitive = this.isTimeSensitiveQuery(query);
+    if (!shouldInjectMemoryForQuery(queryText, microRouteResult?.category)) {
+      return base;
+    }
     if (isCasualMessage(queryText)) {
       return base;
     }
@@ -860,6 +893,11 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
   ): Promise<BaseMessage[]> {
     const maxTotal = configManager.getConfig().agent.maxPromptChars ?? 30_000;
     const budget = Math.max(2000, maxTotal - reservedChars);
+    const cfg = configManager.getConfig().agent?.context;
+    if (cfg?.historyPrune?.enabled) {
+      const minTurns = configManager.getConfig().agent.historyContext?.minRecentTurns ?? 5;
+      return historyManager.buildPrunedContextMessages(chatId, budget, query, minTurns);
+    }
     return historyManager.buildLlmContextMessages(chatId, budget, query);
   }
 
@@ -1031,13 +1069,39 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     signal?: AbortSignal,
     options?: AgentRunOptions,
   ): AsyncGenerator<StreamEvent> {
-    if (options) {
+    if (options?.orgTaskId) {
       yield* this.processOrchestrationStream(input, chatId, signal, options);
       return;
     }
+    const runContext: RunContext =
+      options?.runContext ?? {
+        sessionId: chatId,
+        scopeId: buildChatScopeId(chatId),
+        channel: 'api',
+        chatId,
+      };
+    this.activeRunContext = runContext;
+    this.activeCancelSignal = signal;
+    try {
+      yield* this.processChatStreamInner(input, chatId, signal, runContext);
+    } finally {
+      this.activeRunContext = undefined;
+      this.activeCancelSignal = undefined;
+    }
+  }
+
+  private async *processChatStreamInner(
+    input: string | any,
+    chatId: string,
+    signal?: AbortSignal,
+    runContext?: RunContext,
+  ): AsyncGenerator<StreamEvent> {
     const agentId = `${chatId}-${Date.now()}`;
     const startTime = Date.now();
     const inputStr = typeof input === 'string' ? input : '[audio/multimodal input]';
+    if (runContext) {
+      getRunContextStorage().enterWith(runContext);
+    }
     
     agentEvents.emit('agent:started', {
       chatId,
@@ -1047,9 +1111,19 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     });
 
     const queryText = extractUserQueryText(input);
+    const tier = await decideRoutingTier(queryText);
+    if (tier.skipMaster && typeof input === 'string' && (tier.reason === 'greeting' || tier.reason === 'datetime rule' || tier.reason.startsWith('macro:'))) {
+      yield { type: 'phase', data: JSON.stringify({ phase: 'router', detail: tier.reason }) };
+    }
     await historyManager.loadChat(chatId);
     const historyText = extractHistoryText(historyManager.getThread(chatId));
-    const synthesisInput = shouldUseSynthesisMode(queryText, historyText);
+    const scopeId = runContext?.scopeId ?? buildChatScopeId(chatId);
+    let sessionRagHint = false;
+    if (runContext && configManager.getConfig().agent?.context?.sessionRag?.enabled) {
+      const ragHits = await sessionRagIndex.search(scopeId, queryText, 1);
+      sessionRagHint = ragHits.length > 0;
+    }
+    const synthesisInput = shouldUseSynthesisMode(queryText, historyText, sessionRagHint);
     const needsLive = requiresLiveLookup(queryText) && !synthesisInput;
     const liveDomain = getLiveLookupDomain(queryText);
 
@@ -1126,6 +1200,7 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     let liveToolRetryDone = false;
     let synthesisRetryDone = false;
     let sanityRetryDone = false;
+    let groundingRetryDone = false;
 
     const liveExtraSlots = needsLive ? 2 : 0;
     for (let attempt = 0; attempt <= maxRetries + liveExtraSlots; attempt++) {
@@ -1217,17 +1292,11 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
 
         debugLogPromptMessages('Input messages', inputMessages.messages);
         let toolWasCalled = false;
-        const stream = this.graph.streamEvents(inputMessages, { version: 'v2', signal, recursionLimit: 100 });
+        const stream = this.graph.streamEvents(inputMessages, { version: 'v2', recursionLimit: 100 });
 
         agentEvents.emit('model:inference_start', { chatId, agentId, modelId: this.activeModelId });
 
-        for await (const event of stream) {
-          if (signal?.aborted) {
-            console.log('[ReAct Agent] Stream aborted by client.');
-            agentEvents.emit('agent:error', { chatId, agentId, error: 'Aborted by client' });
-            return;
-          }
-
+        for await (const event of consumeGraphStreamEvents<{ event?: string; name?: string; data?: any }>(stream, { signal })) {
           if (event.event === 'on_chat_model_stream') {
             const chunk = event.data?.chunk;
 
@@ -1314,6 +1383,11 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
 
         }
 
+        if (signal?.aborted) {
+          console.log('[ReAct Agent] Stream cancelled by client.');
+          return;
+        }
+
         if (needsLive) {
           const adequate = toolTraceHasAdequateLiveData(toolTrace, liveDomain, queryText);
           const toolsListed = toolTrace.map((t) => t.tool).join(',') || 'none';
@@ -1389,6 +1463,30 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
 
         console.log(`[ReAct Agent] Stream complete: "${fullText.substring(0, 80)}…"`);
         agentEvents.emit('model:inference_end', { chatId, agentId, modelId: this.activeModelId });
+        if (
+          configManager.getConfig().agent?.context?.evidencePipeline?.enabled &&
+          fullText.trim()
+        ) {
+          const grounding = await runGroundingCheck(scopeId, fullText, queryText);
+          if (!grounding.ok && grounding.shouldRetry && !groundingRetryDone) {
+            groundingRetryDone = true;
+            pendingLiveRetryPrefix =
+              `\n\n[GROUNDING CHECK] Unverified claims: ${grounding.unverified.slice(0, 5).join('; ')}. Revise using only tool evidence.`;
+            yield {
+              type: 'phase',
+              data: JSON.stringify({ phase: 'grounding', detail: 'retry', count: grounding.unverified.length }),
+            };
+            yield { type: 'thinking', data: 'Verifying answer against evidence…' };
+            continue;
+          }
+          const bundle = await buildEvidenceBundle(scopeId);
+          if (bundle.facts.length > 0) {
+            yield {
+              type: 'citations',
+              data: JSON.stringify({ scopeId, facts: bundle.facts.slice(0, 24) }),
+            };
+          }
+        }
         agentEvents.emit('agent:completed', {
           chatId,
           agentId,
@@ -1420,10 +1518,39 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
                 console.error('[React Agent] Macro extraction failed:', e);
               });
             }
+            if (runContext && configManager.getConfig().agent?.context?.historyPrune?.enabled) {
+              try {
+                const fastModel = await modelRouter.getModel('summarize');
+                const humanContent =
+                  typeof input === 'string'
+                    ? input
+                    : Array.isArray(input)
+                      ? String((input as Array<{ text?: string }>).find((p) => p.text)?.text ?? '[audio]')
+                      : '[audio]';
+                const res = await fastModel.invoke([
+                  new SystemMessage(
+                    'Write one dense paragraph (max 800 chars) of session memory: facts, preferences, open threads.',
+                  ),
+                  new HumanMessage({
+                    content: `User: ${humanContent}\nAssistant: ${removeSpokenSummaryBlock(fullText)}`,
+                  }),
+                ]);
+                await sessionContextService.saveMemoryState(
+                  runContext.scopeId,
+                  res.content.toString().trim(),
+                );
+              } catch {
+                /* non-critical */
+              }
+            }
           })().catch((err) => console.warn('[ReAct Agent] Post-reply housekeeping failed:', err));
         }
         return;
       } catch (error: any) {
+        if (signal?.aborted || isInferenceInterruptError(error)) {
+          console.log('[ReAct Agent] Stream cancelled.');
+          return;
+        }
         agentEvents.emit('agent:error', {
           chatId,
           agentId,
@@ -1485,6 +1612,19 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
           userDecisionBound: options.userDecisionBound,
         }
       : undefined;
+    const platformRunCtx: RunContext | undefined = options.orgTaskId
+      ? (options.runContext ?? {
+          sessionId: `org-${options.orgTaskId}`,
+          scopeId: buildOrgScopeId(options.orgRootTaskId ?? options.orgTaskId, options.orgTaskId),
+          channel: 'org',
+          orgTaskId: options.orgTaskId,
+          rootTaskId: options.orgRootTaskId ?? options.orgTaskId,
+        })
+      : options.runContext;
+    if (platformRunCtx) {
+      this.activeRunContext = platformRunCtx;
+      getRunContextStorage().enterWith(platformRunCtx);
+    }
     let fullText = '';
     let orchestrationComplete = false;
     let skillRouteActive = false;
@@ -1541,33 +1681,11 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
       agentEvents.emit('model:inference_start', { chatId, agentId, modelId: resolvedModelId });
       const stream = runGraph.streamEvents(inputMessages, {
         version: 'v2',
-        signal,
         recursionLimit: 100,
       });
       const als = getAgentRunStorage();
-      async function* iterateStream(): AsyncGenerator<any> {
-        try {
-          for await (const event of stream) {
-            yield event;
-          }
-        } catch (streamInnerErr: unknown) {
-          if (!orchestrationComplete) throw streamInnerErr;
-        }
-      }
-      const streamIterator = iterateStream();
-      const closeOrchestrationStream = async (): Promise<void> => {
-        try {
-          if (runCtx) {
-            await als.run(runCtx, () => streamIterator.return(undefined));
-          } else {
-            await streamIterator.return(undefined);
-          }
-        } catch (closeErr: unknown) {
-          if (!isInferenceInterruptError(closeErr)) {
-            console.warn('[Orchestration] stream close:', closeErr);
-          }
-        }
-      };
+      const streamIterator = stream[Symbol.asyncIterator]();
+      try {
       let streamStep = runCtx
         ? await als.run(runCtx, () => streamIterator.next())
         : await streamIterator.next();
@@ -1586,12 +1704,6 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
           }
         } else if (event.event === 'on_tool_start' && options.orgTaskId) {
           const toolName = event.name || 'unknown';
-          if (toolName === 'web_search' || toolName === 'web_fetch') {
-            streamStep = runCtx
-              ? await als.run(runCtx, () => streamIterator.next())
-              : await streamIterator.next();
-            continue;
-          }
           if (toolName === 'route_to_skill') {
             skillRouteActive = true;
           }
@@ -1659,12 +1771,7 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
                 `[Orchestration] route_to_skill handoff (${toolOutput.length} chars) — ending run`,
               );
             }
-          } else if (
-            toolName !== 'web_search' &&
-            toolName !== 'web_fetch' &&
-            toolOutput &&
-            runCtx
-          ) {
+          } else if (toolOutput && runCtx) {
             persistTaskResponse({
               task: toTaskArtifactScope(runCtx),
               responderId: toolName,
@@ -1679,6 +1786,11 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
               toolName,
               toolResult: toolOutput.substring(0, 200),
             });
+            if (toolName === 'web_search' || toolName === 'web_fetch') {
+              console.log(
+                `[Orchestration] Saved ${toolName} output (${toolOutput.length} chars) to task artifacts`,
+              );
+            }
           }
         } else if (event.event === 'on_chain_end' && event.name === 'agent' && !skillRouteActive) {
           const messages = event.data?.output?.messages as Array<{ content?: unknown }> | undefined;
@@ -1701,7 +1813,6 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
           }
         }
         if (orchestrationComplete) {
-          await closeOrchestrationStream();
           break;
         }
         try {
@@ -1712,6 +1823,9 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
           if (orchestrationComplete || isInferenceInterruptError(streamErr)) break;
           throw streamErr;
         }
+      }
+      } finally {
+        await closeGraphStream(streamIterator);
       }
       agentEvents.emit('model:inference_end', { chatId, agentId, modelId: resolvedModelId });
       agentEvents.emit('agent:completed', {
@@ -1732,7 +1846,7 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
       }
       yield { type: 'text_done', data: fullText || 'No output produced.' };
     } catch (error: any) {
-      if (orchestrationComplete && fullText.trim()) {
+      if ((orchestrationComplete || isInferenceInterruptError(error)) && fullText.trim()) {
         agentEvents.emit('model:inference_end', { chatId, agentId, modelId: resolvedModelId });
         agentEvents.emit('agent:completed', {
           chatId,

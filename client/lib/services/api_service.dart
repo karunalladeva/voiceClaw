@@ -188,6 +188,35 @@ class ApiService {
 
   // ── Session API ────────────────────────────────────────────────────────────
 
+  String? _sessionId;
+
+  Future<Map<String, String>> createChatSession({String? chatId}) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl/chats'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(chatId != null ? {'chatId': chatId} : {}),
+          )
+          .timeout(const Duration(seconds: 5));
+      if (response.statusCode == 201 || response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        _sessionId = data['sessionId'] as String?;
+        return {
+          'sessionId': data['sessionId'] as String? ?? '',
+          'chatId': data['chatId'] as String? ?? chatId ?? 'default',
+        };
+      }
+    } catch (_) {}
+    throw Exception('Failed to create chat session');
+  }
+
+  Future<String> ensureSession({String? chatId}) async {
+    if (_sessionId != null && _sessionId!.isNotEmpty) return _sessionId!;
+    final row = await createChatSession(chatId: chatId);
+    return row['sessionId'] ?? '';
+  }
+
   Future<List<Map<String, dynamic>>> getChats() async {
     try {
       final response = await http.get(Uri.parse('$baseUrl/chats')).timeout(const Duration(seconds: 5));
@@ -239,6 +268,7 @@ class ApiService {
 
   /// Stream text chat via SSE. Yields SSEEvent objects as they arrive.
   Stream<SSEEvent> streamTextChat(String text, String chatId) async* {
+    final sessionId = await ensureSession(chatId: chatId);
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 30)
       ..idleTimeout = const Duration(seconds: 120);
@@ -247,7 +277,7 @@ class ApiService {
       final request = await client.postUrl(Uri.parse('$baseUrl/chat/text'));
       request.headers.set('Content-Type', 'application/json');
       request.headers.set('Accept', 'text/event-stream');
-      request.write(jsonEncode({'text': text, 'chatId': chatId}));
+      request.write(jsonEncode({'text': text, 'sessionId': sessionId, 'channel': 'flutter'}));
       final response = await request.close();
 
       yield* _parseSSEStream(response);
@@ -259,6 +289,7 @@ class ApiService {
 
   /// Stream audio chat via SSE. Yields SSEEvent objects as they arrive.
   Stream<SSEEvent> streamAudioChat(String filePath, String chatId) async* {
+    final sessionId = await ensureSession(chatId: chatId);
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 30)
       ..idleTimeout = const Duration(seconds: 120);
@@ -279,8 +310,8 @@ class ApiService {
       bodyParts.addAll(utf8.encode(header));
       bodyParts.addAll(fileBytes);
       
-      final chatHeader = '\r\n--$boundary\r\nContent-Disposition: form-data; name="chatId"\r\n\r\n$chatId';
-      bodyParts.addAll(utf8.encode(chatHeader));
+      final sessionHeader = '\r\n--$boundary\r\nContent-Disposition: form-data; name="sessionId"\r\n\r\n$sessionId';
+      bodyParts.addAll(utf8.encode(sessionHeader));
 
       bodyParts.addAll(utf8.encode('\r\n--$boundary--\r\n'));
 

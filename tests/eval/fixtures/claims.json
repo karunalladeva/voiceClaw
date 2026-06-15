@@ -1,0 +1,23 @@
+[
+  {
+    "id": "price-1",
+    "query": "What was the closing price?",
+    "answer": "AAPL closed at 189.50 today.",
+    "facts": [{ "claim": "AAPL closed at 189.50", "source": "yahoo_ohlcv" }],
+    "expectVerified": true
+  },
+  {
+    "id": "price-mismatch",
+    "query": "What was the closing price?",
+    "answer": "AAPL closed at 999.99 today.",
+    "facts": [{ "claim": "AAPL closed at 189.50", "source": "yahoo_ohlcv" }],
+    "expectVerified": false
+  },
+  {
+    "id": "no-numbers",
+    "query": "Summarize the article",
+    "answer": "The article discusses renewable energy trends.",
+    "facts": [{ "claim": "Renewable energy investment trends are discussed", "source": "web_fetch" }],
+    "expectVerified": true
+  }
+]

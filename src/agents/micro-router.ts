@@ -11,6 +11,7 @@ import {
   GENERAL_LANE,
   inferLaneFromMatches,
   isGeneralLane,
+  isTradingLane,
   rankCatalogMatches,
   slugLane,
   type CatalogMatch,
@@ -376,7 +377,7 @@ export async function classifyMicroRoute(
   return final;
 }
 
-export { GENERAL_LANE, isGeneralLane };
+export { GENERAL_LANE, isGeneralLane, isTradingLane };
 
 /** Clear in-memory route + catalog cache (tests / toolkit reload). */
 export function clearMicroRouteCache(): void {

@@ -70,6 +70,8 @@ export interface SpawnTaskInput {
   assigneeId: string;
   blockedBy?: string[];
   priority?: TaskPriority;
+  /** Workflow phase id (e.g. market-research) for blockedAfter resolution. */
+  phaseId?: string;
 }
 
 export interface ReviewDecisionPayload {

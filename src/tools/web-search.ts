@@ -16,6 +16,8 @@ import {
   searchSearxng,
   type SearxngSearchHit,
 } from './searxng-client';
+import { getRunContext } from '../platform/session/run-context-storage';
+import { isSessionDedupEnabled, sessionToolCache } from '../agents/session-tool-cache';
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const LIVE_CACHE_TTL_MS = 60 * 1000;
@@ -353,18 +355,39 @@ async function runWebSearch(query: string, timeRange?: string): Promise<string> 
 }
 
 function registerSearchDedupe(query: string): string | null {
-  const runCtx = getAgentRunContext();
-  if (!runCtx?.orgTaskId) return null;
   const key = normalizeSearchQueryKey(query);
-  if (!runCtx.webSearchKeys) runCtx.webSearchKeys = new Set();
-  if (runCtx.webSearchKeys.has(key)) {
-    return (
-      `Duplicate search skipped for this task (already ran): "${query}". ` +
-      'Use prior results or web_fetch on a URL from those results.'
-    );
+  const runCtx = getAgentRunContext();
+  if (runCtx?.orgTaskId) {
+    if (!runCtx.webSearchKeys) runCtx.webSearchKeys = new Set();
+    if (runCtx.webSearchKeys.has(key)) {
+      return (
+        `Duplicate search skipped for this task (already ran): "${query}". ` +
+        'Use prior results or web_fetch on a URL from those results.'
+      );
+    }
+    runCtx.webSearchKeys.add(key);
+    return null;
   }
-  runCtx.webSearchKeys.add(key);
+  if (isSessionDedupEnabled()) {
+    const chatId = getRunContext()?.chatId;
+    if (chatId) {
+      const cached = sessionToolCache.getWebSearch(chatId, key);
+      if (cached) {
+        return (
+          `Duplicate search skipped for this session (already ran): "${query}". ` +
+          'Use prior results or web_fetch on a URL from those results.'
+        );
+      }
+    }
+  }
   return null;
+}
+
+function rememberSessionSearch(query: string, result: string): void {
+  if (!isSessionDedupEnabled()) return;
+  const chatId = getRunContext()?.chatId;
+  if (!chatId) return;
+  sessionToolCache.setWebSearch(chatId, normalizeSearchQueryKey(query), result);
 }
 
 const timeRangeSchema = z.enum(['day', 'week', 'month', 'year']).optional();
@@ -407,6 +430,7 @@ export const webSearchTool = tool(
         ),
       ]);
       await cache.set(cacheKey, result, ttlMs);
+      rememberSessionSearch(query, result);
       return result;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);

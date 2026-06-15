@@ -1,4 +1,5 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import { createOllamaFetch } from '../utils/ollama-fetch';
 import { ModelConfig } from './types';
 
 /**
@@ -18,6 +19,7 @@ export async function createProvider(config: ModelConfig): Promise<BaseChatModel
         model,
         baseUrl: baseUrl || 'http://localhost:11434',
         keepAlive: -1,
+        fetch: createOllamaFetch(),
         ...(auth?.customHeaders ? { headers: auth.customHeaders } : {}),
       }) as unknown as BaseChatModel;
     }
