@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { systemMessage, userMessage } from '../runtime/messages';
 import { MCPClientManager } from './mcp-client';
 import { modelRouter } from '../models/model-router';
 import {
@@ -179,12 +179,15 @@ export class LearningEngine {
         `If YES, reply with JSON only: { "content": "...", "tags": ["tag1"] }\n\n` +
         `User: ${userInput}\nAgent: ${agentResponse.substring(0, 400)}`;
 
-      const result = await llm.invoke([
-        new SystemMessage('You extract important facts from conversations for long-term memory.'),
-        new HumanMessage(extractPrompt),
-      ]);
+      const result = await llm.complete({
+        messages: [
+          systemMessage('You extract important facts from conversations for long-term memory.'),
+          userMessage(extractPrompt),
+        ],
+        label: 'learning-engine:memory-extract',
+      });
 
-      const text = result.content.toString().trim();
+      const text = result.content.trim();
       if (text === 'NO_MEMORY') return;
 
       // Try to find JSON in the response
@@ -229,8 +232,11 @@ export class LearningEngine {
         `Generate a short, concise, unique kebab-case slug for this macro shortcut (e.g., "open-calculator", "mute-volume").\n` +
         `Return ONLY the exact slug string and absolutely nothing else.`;
 
-      const result = await llm.invoke([new HumanMessage(prompt)]);
-      let slug = result.content.toString().trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+      const result = await llm.complete({
+        messages: [userMessage(prompt)],
+        label: 'learning-engine:macro-slug',
+      });
+      let slug = result.content.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
       if (!slug) slug = 'macro-' + Date.now();
 
       const macro: Macro = {
@@ -312,12 +318,17 @@ export class LearningEngine {
         `## Key notes\n` +
         `<any important constraints or caveats>`;
 
-      const result = await llm.invoke([
-        new SystemMessage('You create SKILL.md knowledge documents to help the agent learn from failures. You prevent duplicates by updating existing skills if the core purpose overlaps.'),
-        new HumanMessage(prompt),
-      ]);
+      const result = await llm.complete({
+        messages: [
+          systemMessage(
+            'You create SKILL.md knowledge documents to help the agent learn from failures. You prevent duplicates by updating existing skills if the core purpose overlaps.',
+          ),
+          userMessage(prompt),
+        ],
+        label: 'learning-engine:skill-draft',
+      });
 
-      const skillContent = result.content.toString().trim();
+      const skillContent = result.content.trim();
 
       // Parse the name from frontmatter
       const nameMatch = skillContent.match(/^---\s*\nname:\s*(.+)/m);

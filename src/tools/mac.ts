@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import { spawn, exec } from 'child_process';
 import * as path from 'path';
@@ -47,40 +47,42 @@ function runOsascript(script: string, timeoutMs: number = 10000, isJavaScript: b
   });
 }
 
-export const macOpenAppTool = tool(
-  async ({ appName }) => {
+export const macOpenAppTool = defineTool({
+  name: 'mac_open_app',
+    description: 'Open an application or URL on macOS (e.g. "Google Chrome", "Notes", "https://gmail.com").',
+    schema: z.object({
+      appName: z.string().describe('Name of the Mac app or a URL to open'),
+    }),
+  execute: async ({ appName }) => {
     // If it's an http/https URL, open will automatically use the default browser.
     const cmd = appName.startsWith('http') ? `open "${appName}"` : `open -a "${appName}"`;
     const res = await runCommand(cmd, 10000);
     return res.startsWith('Error') ? res : `Successfully launched ${appName}`;
   },
-  {
-    name: 'mac_open_app',
-    description: 'Open an application or URL on macOS (e.g. "Google Chrome", "Notes", "https://gmail.com").',
-    schema: z.object({
-      appName: z.string().describe('Name of the Mac app or a URL to open'),
-    }),
-  }
-);
+});
 
-export const macTypeTool = tool(
-  async ({ text }) => {
+export const macTypeTool = defineTool({
+  name: 'mac_type_text',
+  description: 'Type plain text exactly as provided. Use this for typing emails, URLs, or messages.',
+  schema: z.object({
+    text: z.string().describe('The precise text to type'),
+  }),
+  execute: async ({ text }) => {
     // Escape quotes and backslashes for AppleScript
     const escapedText = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const script = `tell application "System Events" to keystroke "${escapedText}"`;
     return await runOsascript(script, 10000);
   },
-  {
-    name: 'mac_type_text',
-    description: 'Type plain text exactly as provided. Use this for typing emails, URLs, or messages.',
-    schema: z.object({
-      text: z.string().describe('The precise text to type'),
-    }),
-  }
-);
+});
 
-export const macPressKeyTool = tool(
-  async ({ key, modifiers }) => {
+export const macPressKeyTool = defineTool({
+  name: 'mac_press_key',
+  description: 'Simulate pressing a key or keyboard shortcut on macOS. Key can be a letter or special key (return, tab, space, delete, escape, up, down, left, right).',
+  schema: z.object({
+    key: z.string().describe('The key to press (e.g. "c", "v", "return", "tab")'),
+    modifiers: z.array(z.enum(['command down', 'option down', 'control down', 'shift down'])).optional().describe('List of modifier keys to hold down'),
+  }),
+  execute: async ({ key, modifiers }) => {
     // Modifiers can be: command down, option down, control down, shift down
     let mods = '';
     if (modifiers && modifiers.length > 0) {
@@ -103,32 +105,25 @@ export const macPressKeyTool = tool(
     const script = `tell application "System Events" to ${action}${mods}`;
     return await runOsascript(script, 5000);
   },
-  {
-    name: 'mac_press_key',
-    description: 'Simulate pressing a key or keyboard shortcut on macOS. Key can be a letter or special key (return, tab, space, delete, escape, up, down, left, right).',
-    schema: z.object({
-      key: z.string().describe('The key to press (e.g. "c", "v", "return", "tab")'),
-      modifiers: z.array(z.enum(['command down', 'option down', 'control down', 'shift down'])).optional().describe('List of modifier keys to hold down'),
-    }),
-  }
-);
+});
 
-export const macTakeScreenshotTool = tool(
-  async () => {
+export const macTakeScreenshotTool = defineTool({
+  name: 'mac_take_screenshot',
+  description: 'Take a screenshot of the main Mac display and save it to the workspace directory.',
+  schema: z.object({}),
+  execute: async () => {
     const filename = `screenshot_${Date.now()}.png`;
     const filepath = path.join(WORKSPACE, filename);
     const res = await runCommand(`screencapture -x "${filepath}"`, 15000);
     return res.startsWith('Error') ? res : `Screenshot saved to ${filepath}`;
   },
-  {
-    name: 'mac_take_screenshot',
-    description: 'Take a screenshot of the main Mac display and save it to the workspace directory.',
-    schema: z.object({}),
-  }
-);
+});
 
-export const macGetActiveWindowTool = tool(
-  async () => {
+export const macGetActiveWindowTool = defineTool({
+  name: 'mac_get_active_window',
+  description: 'Get the name of the currently active app and its frontmost window title on macOS.',
+  schema: z.object({}),
+  execute: async () => {
     const script = `
       tell application "System Events"
         set frontApp to first application process whose frontmost is true
@@ -143,15 +138,15 @@ export const macGetActiveWindowTool = tool(
     `;
     return await runOsascript(script, 5000);
   },
-  {
-    name: 'mac_get_active_window',
-    description: 'Get the name of the currently active app and its frontmost window title on macOS.',
-    schema: z.object({}),
-  }
-);
+});
 
-export const macListDirectoryTool = tool(
-  async ({ dirPath }) => {
+export const macListDirectoryTool = defineTool({
+  name: 'mac_list_directory',
+  description: 'List all files and folders in a specific macOS directory (e.g. /Users/Name/Documents).',
+  schema: z.object({
+    dirPath: z.string().describe('Absolute path to the directory'),
+  }),
+  execute: async ({ dirPath }) => {
     try {
       const files = await fs.readdir(dirPath, { withFileTypes: true });
       if (files.length === 0) return 'Directory is empty.';
@@ -160,34 +155,31 @@ export const macListDirectoryTool = tool(
       return `Error listing directory: ${e.message}`;
     }
   },
-  {
-    name: 'mac_list_directory',
-    description: 'List all files and folders in a specific macOS directory (e.g. /Users/Name/Documents).',
-    schema: z.object({
-      dirPath: z.string().describe('Absolute path to the directory'),
-    }),
-  }
-);
+});
 
-export const macReadFileTool = tool(
-  async ({ filePath }) => {
+export const macReadFileTool = defineTool({
+  name: 'mac_read_file',
+  description: 'Read the contents of any file on the Mac file system.',
+  schema: z.object({
+    filePath: z.string().describe('Absolute path to the file to read'),
+  }),
+  execute: async ({ filePath }) => {
     try {
       return await fs.readFile(filePath, 'utf-8');
     } catch (e: any) {
       return `Error reading file: ${e.message}`;
     }
   },
-  {
-    name: 'mac_read_file',
-    description: 'Read the contents of any file on the Mac file system.',
-    schema: z.object({
-      filePath: z.string().describe('Absolute path to the file to read'),
-    }),
-  }
-);
+});
 
-export const macWriteFileTool = tool(
-  async ({ filePath, content }) => {
+export const macWriteFileTool = defineTool({
+  name: 'mac_write_file',
+  description: 'Write text content to any file on the Mac file system.',
+  schema: z.object({
+    filePath: z.string().describe('Absolute path to the file to write'),
+    content: z.string().describe('Text content to write into the file'),
+  }),
+  execute: async ({ filePath, content }) => {
     try {
       await ensureParentDir(filePath);
       await fs.writeFile(filePath, content, 'utf-8');
@@ -196,21 +188,19 @@ export const macWriteFileTool = tool(
       return `Error writing file: ${e.message}`;
     }
   },
-  {
-    name: 'mac_write_file',
-    description: 'Write text content to any file on the Mac file system.',
-    schema: z.object({
-      filePath: z.string().describe('Absolute path to the file to write'),
-      content: z.string().describe('Text content to write into the file'),
-    }),
-  }
-);
+});
 
 // Mac Mouse operations
 // macOS doesn't easily expose mouse clicking/moving without Objective-C or CoreGraphics.
 // We write a quick python script using PyObjC (often available) or fall back to AppleScript UI clicking if x,y isn't strict.
-export const macMouseMoveTool = tool(
-  async ({ x, y }) => {
+export const macMouseMoveTool = defineTool({
+  name: 'mac_mouse_move',
+  description: 'Move the mouse cursor to specific X and Y coordinates on macOS (Requires Python PyObjC OR cliclick installed).',
+  schema: z.object({
+    x: z.number().describe('X coordinate on screen'),
+    y: z.number().describe('Y coordinate on screen'),
+  }),
+  execute: async ({ x, y }) => {
     const pythonScript = `
 import sys
 try:
@@ -235,18 +225,18 @@ except ImportError:
       });
     });
   },
-  {
-    name: 'mac_mouse_move',
-    description: 'Move the mouse cursor to specific X and Y coordinates on macOS (Requires Python PyObjC OR cliclick installed).',
-    schema: z.object({
-      x: z.number().describe('X coordinate on screen'),
-      y: z.number().describe('Y coordinate on screen'),
-    }),
-  }
-);
+});
 
-export const macMouseClickTool = tool(
-  async ({ button, doubleClick, x, y }) => {
+export const macMouseClickTool = defineTool({
+  name: 'mac_mouse_click',
+  description: 'Click the mouse at its current location on macOS.',
+  schema: z.object({
+    button: z.enum(['left', 'right']).optional().default('left').describe('Which button to click'),
+    doubleClick: z.boolean().optional().default(false).describe('Whether to double click'),
+    x: z.number().optional().describe('X coordinate to click (optional. If omitted, clicks current location)'),
+    y: z.number().optional().describe('Y coordinate to click (optional)'),
+  }),
+  execute: async ({ button, doubleClick, x, y }) => {
     const clickType = button === 'right' ? 'Quartz.kCGMouseButtonRight' : 'Quartz.kCGMouseButtonLeft';
     const eventDown = button === 'right' ? 'Quartz.kCGEventRightMouseDown' : 'Quartz.kCGEventLeftMouseDown';
     const eventUp = button === 'right' ? 'Quartz.kCGEventRightMouseUp' : 'Quartz.kCGEventLeftMouseUp';
@@ -301,17 +291,7 @@ except ImportError:
       });
     });
   },
-  {
-    name: 'mac_mouse_click',
-    description: 'Click the mouse at its current location on macOS.',
-    schema: z.object({
-      button: z.enum(['left', 'right']).optional().default('left').describe('Which button to click'),
-      doubleClick: z.boolean().optional().default(false).describe('Whether to double click'),
-      x: z.number().optional().describe('X coordinate to click (optional. If omitted, clicks current location)'),
-      y: z.number().optional().describe('Y coordinate to click (optional)'),
-    }),
-  }
-);
+});
 
 export const allMacTools = [
   macOpenAppTool,

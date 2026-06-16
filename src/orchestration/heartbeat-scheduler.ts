@@ -598,6 +598,8 @@ class HeartbeatScheduler extends EventEmitter {
         `\nFile I/O rules:\n` +
           `- Artifact folder already exists on disk — do NOT loop mkdir/shell to create it.\n` +
           `- Use direct \`read_file\`, \`write_file\`, \`list_files\` tools (fast). Do NOT route_to_skill file-manager for simple reads or saves.\n` +
+          `- For \`pipeline/workflow.json\`, use \`save_default_pipeline_workflow {}\` — never write_file with raw JSON (breaks Ollama tool parsing).\n` +
+          `- For JSON or brace-heavy files, use \`write_file\` with \`contentBase64\` instead of \`content\`.\n` +
           `- Shell cwd is \`workspace/\` (not repo root). From shell use \`orchestration/artifacts/...\` OR absolute \`${artifactAbs}/\`.\n` +
           `- Never use bash \`mkdir -p\` on Windows; use write_file or one PowerShell mkdir if required.`,
       );

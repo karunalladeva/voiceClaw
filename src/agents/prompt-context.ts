@@ -1,4 +1,5 @@
-import type { BaseMessage } from '@langchain/core/messages';
+import type { Message } from '../runtime/messages';
+import { messageContentToString } from '../runtime/messages';
 import { extractStockSymbols } from '../utils/stock-tickers';
 
 /** Extract plain text from string or multimodal user input. */
@@ -167,9 +168,9 @@ export function hasPresentationIntent(query: string): boolean {
   return PRESENTATION_INTENT.test(query.trim());
 }
 
-export function extractHistoryText(messages: BaseMessage[]): string {
+export function extractHistoryText(messages: Message[]): string {
   return messages
-    .map((m) => m.content?.toString?.() ?? '')
+    .map((m) => messageContentToString(m.content))
     .filter(Boolean)
     .join('\n');
 }

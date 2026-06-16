@@ -14,13 +14,13 @@ async function main(): Promise<void> {
   ];
   for (const query of queries) {
     console.log(`--- ${query} ---`);
-    const result = await webSearchTool.invoke({ query });
+    const result = await webSearchTool.execute({ query });
     console.log(String(result).slice(0, 600));
     console.log(`\nlength: ${String(result).length}\n`);
   }
 
   console.log('=== web_fetch (Impit + Readability) ===\n');
-  const fetchOut = await webFetchTool.invoke({
+  const fetchOut = await webFetchTool.execute({
     url: 'https://github.com/topics/voice-assistant',
     part: 0,
   });

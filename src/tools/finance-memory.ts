@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -57,8 +57,20 @@ async function callChromaTool(name: string, args: Record<string, unknown>, timeo
   }
 }
 
-export const financeStoreMarketMemoryTool = tool(
-  async ({
+export const financeStoreMarketMemoryTool = defineTool({
+  name: 'finance_store_market_memory',
+    description:
+      'Store a finance market-analysis snapshot into ChromaDB memory. Use only when Chroma MCP is active; otherwise this tool returns a skipped status.',
+    schema: z.object({
+      symbol: z.string().describe('Ticker symbol, e.g. AAPL, TSLA, ^GSPC.'),
+      interval: z.string().optional().default('1h').describe('Analysis interval, e.g. 15m, 1h, 1d.'),
+      sentimentScore: z.number().optional().describe('News sentiment score between -1 and +1 if available.'),
+      signal: z.string().optional().describe('Generated trading signal/action.'),
+      regime: z.string().optional().describe('Market regime, e.g. Trending or Range-bound.'),
+      keyLevels: z.string().optional().describe('Support/Resistance summary string.'),
+      summary: z.string().describe('Concise analysis summary to persist.'),
+    }),
+  execute: async ({
     symbol,
     interval = '1h',
     sentimentScore,
@@ -115,24 +127,20 @@ export const financeStoreMarketMemoryTool = tool(
       analyzedAt: nowIso,
     });
   },
-  {
-    name: 'finance_store_market_memory',
+});
+
+export const financeRecallMarketMemoryTool = defineTool({
+  name: 'finance_recall_market_memory',
     description:
-      'Store a finance market-analysis snapshot into ChromaDB memory. Use only when Chroma MCP is active; otherwise this tool returns a skipped status.',
+      'Recall relevant past market-analysis memory for a symbol from ChromaDB. Filters by symbol (and optional interval), and keeps only recent records by maxAgeDays.',
     schema: z.object({
       symbol: z.string().describe('Ticker symbol, e.g. AAPL, TSLA, ^GSPC.'),
-      interval: z.string().optional().default('1h').describe('Analysis interval, e.g. 15m, 1h, 1d.'),
-      sentimentScore: z.number().optional().describe('News sentiment score between -1 and +1 if available.'),
-      signal: z.string().optional().describe('Generated trading signal/action.'),
-      regime: z.string().optional().describe('Market regime, e.g. Trending or Range-bound.'),
-      keyLevels: z.string().optional().describe('Support/Resistance summary string.'),
-      summary: z.string().describe('Concise analysis summary to persist.'),
+      interval: z.string().optional().describe('Optional interval filter, e.g. 1h or 1d.'),
+      query: z.string().optional().describe('Optional retrieval query to focus memory relevance.'),
+      maxAgeDays: z.number().int().min(1).max(365).optional().default(30).describe('Maximum age in days for recalled memory.'),
+      topK: z.number().int().min(1).max(20).optional().default(5).describe('Maximum number of candidates to retrieve before filtering.'),
     }),
-  },
-);
-
-export const financeRecallMarketMemoryTool = tool(
-  async ({ symbol, interval, query, maxAgeDays = 30, topK = 5 }) => {
+  execute: async ({ symbol, interval, query, maxAgeDays = 30, topK = 5 }) => {
     const normalizedSymbol = symbol.trim().toUpperCase();
     const payload = await callChromaTool('chroma_query', {
       collection: FINANCE_COLLECTION,
@@ -183,17 +191,5 @@ export const financeRecallMarketMemoryTool = tool(
       note: relevantItems.length === 0 ? 'No relevant past market memory found.' : undefined,
     });
   },
-  {
-    name: 'finance_recall_market_memory',
-    description:
-      'Recall relevant past market-analysis memory for a symbol from ChromaDB. Filters by symbol (and optional interval), and keeps only recent records by maxAgeDays.',
-    schema: z.object({
-      symbol: z.string().describe('Ticker symbol, e.g. AAPL, TSLA, ^GSPC.'),
-      interval: z.string().optional().describe('Optional interval filter, e.g. 1h or 1d.'),
-      query: z.string().optional().describe('Optional retrieval query to focus memory relevance.'),
-      maxAgeDays: z.number().int().min(1).max(365).optional().default(30).describe('Maximum age in days for recalled memory.'),
-      topK: z.number().int().min(1).max(20).optional().default(5).describe('Maximum number of candidates to retrieve before filtering.'),
-    }),
-  },
-);
+});
 

@@ -31,22 +31,20 @@ async function main() {
   const trigger = await askQuestion('Trigger Description (When should the router use this?): ');
 
   const template = `import { BaseSkill, SkillDefinition } from './base-skill';
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 
 // TODO: Define your specific tools here
-const exampleTool = tool(
-  async ({ input }) => {
+const exampleTool = defineTool({
+  name: '${id.replace(/-/g, '_')}_tool',
+  description: 'An example tool for the ${name} skill.',
+  schema: z.object({
+    input: z.string().describe('Input string from the user'),
+  }),
+  async execute({ input }) {
     return \`Processed: \${input}\`;
   },
-  {
-    name: '${id.replace(/-/g, '_')}_tool',
-    description: 'An example tool for the ${name} skill.',
-    schema: z.object({
-      input: z.string().describe('Input string from the user')
-    })
-  }
-);
+});
 
 export default class ${className} extends BaseSkill {
   async define(): Promise<SkillDefinition> {

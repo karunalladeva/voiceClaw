@@ -1,4 +1,4 @@
-import type { BaseMessage } from '@langchain/core/messages';
+import type { Message } from '../runtime/messages';
 import { configManager } from '../config/index';
 import { bm25RankIndices } from '../utils/bm25';
 import { rankTextsByEmbedding } from '../utils/embedding-rank';
@@ -7,7 +7,7 @@ export type HistoryContextRanking = 'recency' | 'bm25' | 'embedding';
 
 export interface HistoryCandidate {
   index: number;
-  message: BaseMessage;
+  message: Message;
   text: string;
   chars: number;
 }

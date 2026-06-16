@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import { configManager } from '../config';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -63,8 +63,27 @@ async function callMarketTool(name: string, args: Record<string, unknown>): Prom
   }
 }
 
-export const yahooOhlcvTool = tool(
-  async ({
+export const yahooOhlcvTool = defineTool({
+  name: 'yahoo_ohlcv',
+    description:
+      'Fetch OHLCV candles from Yahoo Finance through the local MCP market server. Use for stocks, ETFs, indices, and funds before technical analysis.',
+    schema: z.object({
+      symbol: z.string().describe('Ticker symbol, e.g. AAPL, TSLA, ^GSPC, SPY.'),
+      interval: z
+        .enum(['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo'])
+        .optional()
+        .default('1h')
+        .describe('Candle interval.'),
+      period: z
+        .string()
+        .optional()
+        .default('5d')
+        .describe('Lookback period when start/end is not supplied, e.g. 1d, 5d, 1mo, 6mo, 1y.'),
+      start: z.string().optional().describe('Optional ISO date/time start.'),
+      end: z.string().optional().describe('Optional ISO date/time end.'),
+      limit: z.number().int().min(1).max(1000).optional().default(120).describe('Maximum returned candles.'),
+    }),
+  execute: async ({
     symbol,
     interval = '1h',
     period = '5d',
@@ -91,31 +110,17 @@ export const yahooOhlcvTool = tool(
     }
     return JSON.stringify(payload.data);
   },
-  {
-    name: 'yahoo_ohlcv',
-    description:
-      'Fetch OHLCV candles from Yahoo Finance through the local MCP market server. Use for stocks, ETFs, indices, and funds before technical analysis.',
-    schema: z.object({
-      symbol: z.string().describe('Ticker symbol, e.g. AAPL, TSLA, ^GSPC, SPY.'),
-      interval: z
-        .enum(['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo'])
-        .optional()
-        .default('1h')
-        .describe('Candle interval.'),
-      period: z
-        .string()
-        .optional()
-        .default('5d')
-        .describe('Lookback period when start/end is not supplied, e.g. 1d, 5d, 1mo, 6mo, 1y.'),
-      start: z.string().optional().describe('Optional ISO date/time start.'),
-      end: z.string().optional().describe('Optional ISO date/time end.'),
-      limit: z.number().int().min(1).max(1000).optional().default(120).describe('Maximum returned candles.'),
-    }),
-  },
-);
+});
 
-export const yahooNewsTool = tool(
-  async ({ symbol, limit = 10 }) => {
+export const yahooNewsTool = defineTool({
+  name: 'yahoo_news',
+    description:
+      'Fetch latest Yahoo Finance news headlines for a symbol through the local MCP market server. Returns "No recent news found." when no news is available.',
+    schema: z.object({
+      symbol: z.string().describe('Ticker symbol, e.g. AAPL, TSLA, ^GSPC, BTC-USD.'),
+      limit: z.number().int().min(1).max(50).optional().default(10).describe('Maximum number of headlines to return.'),
+    }),
+  execute: async ({ symbol, limit = 10 }) => {
     const payload = await callMarketTool('yahoo_news', {
       symbol,
       limit,
@@ -141,13 +146,4 @@ export const yahooNewsTool = tool(
       items,
     });
   },
-  {
-    name: 'yahoo_news',
-    description:
-      'Fetch latest Yahoo Finance news headlines for a symbol through the local MCP market server. Returns "No recent news found." when no news is available.',
-    schema: z.object({
-      symbol: z.string().describe('Ticker symbol, e.g. AAPL, TSLA, ^GSPC, BTC-USD.'),
-      limit: z.number().int().min(1).max(50).optional().default(10).describe('Maximum number of headlines to return.'),
-    }),
-  },
-);
+});

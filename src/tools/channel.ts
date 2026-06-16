@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import {
   deliverToChannel,
@@ -16,14 +16,8 @@ const channelTypeSchema = z.enum([
   'push',
 ]);
 
-export const deliverToChannelTool = tool(
-  async ({ channel, message, settings }) => {
-    console.log(`[Tool: Channel] Delivering to ${channel}`);
-    const result = await deliverToChannel(channel, message, settings);
-    return result;
-  },
-  {
-    name: 'deliver_to_channel',
+export const deliverToChannelTool = defineTool({
+  name: 'deliver_to_channel',
     description:
       'Send a message (and optional file attachments) to a configured delivery channel. ' +
       'Supported: discord, telegram, whatsapp, email, slack, history, push. ' +
@@ -39,11 +33,18 @@ export const deliverToChannelTool = tool(
           'Optional per-send overrides (e.g. chat_id, title). Merged with saved channel config.',
         ),
     }),
+  execute: async ({ channel, message, settings }) => {
+    console.log(`[Tool: Channel] Delivering to ${channel}`);
+    const result = await deliverToChannel(channel, message, settings);
+    return result;
   },
-);
+});
 
-export const listChannelsTool = tool(
-  async () => {
+export const listChannelsTool = defineTool({
+  name: 'list_channels',
+    description: 'List configured delivery channels and their settings keys.',
+    schema: z.object({}),
+  execute: async () => {
     const channels = await loadChannels();
     if (channels.length === 0) {
       return `No channels configured.\nSupported: ${getSupportedChannels().join(', ')}`;
@@ -55,11 +56,6 @@ export const listChannelsTool = tool(
       )
       .join('\n');
   },
-  {
-    name: 'list_channels',
-    description: 'List configured delivery channels and their settings keys.',
-    schema: z.object({}),
-  },
-);
+});
 
 export const allChannelTools = [deliverToChannelTool, listChannelsTool];

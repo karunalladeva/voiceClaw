@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 
 let Adb: any = null;
@@ -33,8 +33,11 @@ async function getDevice(serial?: string) {
   return adb.getDevice(devices[0].id);
 }
 
-export const adbListDevicesTool = tool(
-  async () => {
+export const adbListDevicesTool = defineTool({
+  name: 'adb_list_devices',
+    description: 'List all connected Android devices.',
+    schema: z.object({}),
+  execute: async () => {
     try {
       const adb = await getClient();
       const devices = await adb.listDevices();
@@ -44,15 +47,16 @@ export const adbListDevicesTool = tool(
       return `Error: ${e.message}. Make sure ADB is installed and in PATH.`;
     }
   },
-  {
-    name: 'adb_list_devices',
-    description: 'List all connected Android devices.',
-    schema: z.object({}),
-  }
-);
+});
 
-export const adbShellTool = tool(
-  async ({ command, serial }) => {
+export const adbShellTool = defineTool({
+  name: 'adb_shell',
+    description: 'Run a shell command on the Android device. Use for any ADB shell operation.',
+    schema: z.object({
+      command: z.string().describe('Shell command to run on the device'),
+      serial: z.string().optional().describe('Device serial (optional, uses first device if omitted)'),
+    }),
+  execute: async ({ command, serial }) => {
     try {
       const device = await getDevice(serial);
       const output = await device.shell(command);
@@ -63,18 +67,17 @@ export const adbShellTool = tool(
       return `Error: ${e.message}`;
     }
   },
-  {
-    name: 'adb_shell',
-    description: 'Run a shell command on the Android device. Use for any ADB shell operation.',
-    schema: z.object({
-      command: z.string().describe('Shell command to run on the device'),
-      serial: z.string().optional().describe('Device serial (optional, uses first device if omitted)'),
-    }),
-  }
-);
+});
 
-export const adbTapTool = tool(
-  async ({ x, y, serial }) => {
+export const adbTapTool = defineTool({
+  name: 'adb_tap',
+    description: 'Tap on a specific screen coordinate on the Android device.',
+    schema: z.object({
+      x: z.number().describe('X coordinate'),
+      y: z.number().describe('Y coordinate'),
+      serial: z.string().optional().describe('Device serial'),
+    }),
+  execute: async ({ x, y, serial }) => {
     try {
       const device = await getDevice(serial);
       await device.shell(`input tap ${x} ${y}`);
@@ -83,30 +86,10 @@ export const adbTapTool = tool(
       return `Error: ${e.message}`;
     }
   },
-  {
-    name: 'adb_tap',
-    description: 'Tap on a specific screen coordinate on the Android device.',
-    schema: z.object({
-      x: z.number().describe('X coordinate'),
-      y: z.number().describe('Y coordinate'),
-      serial: z.string().optional().describe('Device serial'),
-    }),
-  }
-);
+});
 
-export const adbSwipeTool = tool(
-  async ({ x1, y1, x2, y2, duration, serial }) => {
-    try {
-      const device = await getDevice(serial);
-      const dur = duration || 300;
-      await device.shell(`input swipe ${x1} ${y1} ${x2} ${y2} ${dur}`);
-      return `Swiped from (${x1},${y1}) to (${x2},${y2}) over ${dur}ms`;
-    } catch (e: any) {
-      return `Error: ${e.message}`;
-    }
-  },
-  {
-    name: 'adb_swipe',
+export const adbSwipeTool = defineTool({
+  name: 'adb_swipe',
     description: 'Swipe on the Android device screen from one point to another.',
     schema: z.object({
       x1: z.number().describe('Start X'),
@@ -116,11 +99,26 @@ export const adbSwipeTool = tool(
       duration: z.number().optional().describe('Swipe duration in ms (default 300)'),
       serial: z.string().optional().describe('Device serial'),
     }),
-  }
-);
+  execute: async ({ x1, y1, x2, y2, duration, serial }) => {
+    try {
+      const device = await getDevice(serial);
+      const dur = duration || 300;
+      await device.shell(`input swipe ${x1} ${y1} ${x2} ${y2} ${dur}`);
+      return `Swiped from (${x1},${y1}) to (${x2},${y2}) over ${dur}ms`;
+    } catch (e: any) {
+      return `Error: ${e.message}`;
+    }
+  },
+});
 
-export const adbInputTextTool = tool(
-  async ({ text, serial }) => {
+export const adbInputTextTool = defineTool({
+  name: 'adb_input_text',
+  description: 'Type text into the currently focused input field on the Android device.',
+  schema: z.object({
+    text: z.string().describe('Text to type'),
+    serial: z.string().optional().describe('Device serial'),
+  }),
+  execute: async ({ text, serial }) => {
     try {
       const device = await getDevice(serial);
       const escaped = text.replace(/ /g, '%s').replace(/'/g, "\\'");
@@ -130,18 +128,16 @@ export const adbInputTextTool = tool(
       return `Error: ${e.message}`;
     }
   },
-  {
-    name: 'adb_input_text',
-    description: 'Type text into the currently focused input field on the Android device.',
-    schema: z.object({
-      text: z.string().describe('Text to type'),
-      serial: z.string().optional().describe('Device serial'),
-    }),
-  }
-);
+});
 
-export const adbKeyEventTool = tool(
-  async ({ keycode, serial }) => {
+export const adbKeyEventTool = defineTool({
+  name: 'adb_key_event',
+  description: 'Send a key event to the Android device. Common keycodes: KEYCODE_HOME (3), KEYCODE_BACK (4), KEYCODE_POWER (26), KEYCODE_ENTER (66), KEYCODE_VOLUME_UP (24), KEYCODE_VOLUME_DOWN (25).',
+  schema: z.object({
+    keycode: z.union([z.string(), z.number()]).describe('Android keycode number or name'),
+    serial: z.string().optional().describe('Device serial'),
+  }),
+  execute: async ({ keycode, serial }) => {
     try {
       const device = await getDevice(serial);
       await device.shell(`input keyevent ${keycode}`);
@@ -150,18 +146,16 @@ export const adbKeyEventTool = tool(
       return `Error: ${e.message}`;
     }
   },
-  {
-    name: 'adb_key_event',
-    description: 'Send a key event to the Android device. Common keycodes: KEYCODE_HOME (3), KEYCODE_BACK (4), KEYCODE_POWER (26), KEYCODE_ENTER (66), KEYCODE_VOLUME_UP (24), KEYCODE_VOLUME_DOWN (25).',
-    schema: z.object({
-      keycode: z.union([z.string(), z.number()]).describe('Android keycode number or name'),
-      serial: z.string().optional().describe('Device serial'),
-    }),
-  }
-);
+});
 
-export const adbOpenAppTool = tool(
-  async ({ packageName, serial }) => {
+export const adbOpenAppTool = defineTool({
+  name: 'adb_open_app',
+  description: 'Open/launch an app on the Android device by package name (e.g. com.whatsapp, com.android.chrome).',
+  schema: z.object({
+    packageName: z.string().describe('Android package name of the app to open'),
+    serial: z.string().optional().describe('Device serial'),
+  }),
+  execute: async ({ packageName, serial }) => {
     try {
       const device = await getDevice(serial);
       const output = await device.shell(`monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`);
@@ -172,18 +166,16 @@ export const adbOpenAppTool = tool(
       return `Error: ${e.message}`;
     }
   },
-  {
-    name: 'adb_open_app',
-    description: 'Open/launch an app on the Android device by package name (e.g. com.whatsapp, com.android.chrome).',
-    schema: z.object({
-      packageName: z.string().describe('Android package name of the app to open'),
-      serial: z.string().optional().describe('Device serial'),
-    }),
-  }
-);
+});
 
-export const adbListAppsTool = tool(
-  async ({ filter, serial }) => {
+export const adbListAppsTool = defineTool({
+  name: 'adb_list_apps',
+  description: 'List installed apps on the Android device.',
+  schema: z.object({
+    filter: z.enum(['all', 'third-party', 'system']).optional().describe('Filter type (default: third-party)'),
+    serial: z.string().optional().describe('Device serial'),
+  }),
+  execute: async ({ filter, serial }) => {
     try {
       const device = await getDevice(serial);
       const cmd = filter === 'system' ? 'pm list packages -s' :
@@ -200,18 +192,15 @@ export const adbListAppsTool = tool(
       return `Error: ${e.message}`;
     }
   },
-  {
-    name: 'adb_list_apps',
-    description: 'List installed apps on the Android device.',
-    schema: z.object({
-      filter: z.enum(['all', 'third-party', 'system']).optional().describe('Filter type (default: third-party)'),
-      serial: z.string().optional().describe('Device serial'),
-    }),
-  }
-);
+});
 
-export const adbScreenshotTool = tool(
-  async ({ serial }) => {
+export const adbScreenshotTool = defineTool({
+  name: 'adb_screenshot',
+  description: 'Take a screenshot of the Android device screen and save it to the workspace.',
+  schema: z.object({
+    serial: z.string().optional().describe('Device serial'),
+  }),
+  execute: async ({ serial }) => {
     try {
       const device = await getDevice(serial);
       const output = await device.shell('screencap -p /sdcard/screenshot_tmp.png');
@@ -239,17 +228,15 @@ export const adbScreenshotTool = tool(
       return `Error: ${e.message}`;
     }
   },
-  {
-    name: 'adb_screenshot',
-    description: 'Take a screenshot of the Android device screen and save it to the workspace.',
-    schema: z.object({
-      serial: z.string().optional().describe('Device serial'),
-    }),
-  }
-);
+});
 
-export const adbGetScreenInfoTool = tool(
-  async ({ serial }) => {
+export const adbGetScreenInfoTool = defineTool({
+  name: 'adb_screen_info',
+  description: 'Get screen resolution, density, and current foreground activity of the Android device.',
+  schema: z.object({
+    serial: z.string().optional().describe('Device serial'),
+  }),
+  execute: async ({ serial }) => {
     try {
       const device = await getDevice(serial);
       const adbLib = await getAdb();
@@ -268,17 +255,16 @@ export const adbGetScreenInfoTool = tool(
       return `Error: ${e.message}`;
     }
   },
-  {
-    name: 'adb_screen_info',
-    description: 'Get screen resolution, density, and current foreground activity of the Android device.',
-    schema: z.object({
-      serial: z.string().optional().describe('Device serial'),
-    }),
-  }
-);
+});
 
-export const adbUiAutomatorDumpTool = tool(
-  async ({ summarize, serial }) => {
+export const adbUiAutomatorDumpTool = defineTool({
+  name: 'adb_uiautomator_dump',
+  description: 'Extract the complete structural XML tree of the current Android screen. If summarize=true, it returns a hyper-compact list of clickable bounds and text designed exactly for precise LLM tapping.',
+  schema: z.object({
+    summarize: z.boolean().optional().default(true).describe('If true, filters the XML down to only clickable targets and their [X,Y] bounds to save context tokens.'),
+    serial: z.string().optional().describe('Device serial'),
+  }),
+  execute: async ({ summarize, serial }) => {
     try {
       const device = await getDevice(serial);
       await device.shell('uiautomator dump /sdcard/window_dump.xml');
@@ -315,15 +301,7 @@ export const adbUiAutomatorDumpTool = tool(
       return `Error generating UI Automator Dump: ${e.message}`;
     }
   },
-  {
-    name: 'adb_uiautomator_dump',
-    description: 'Extract the complete structural XML tree of the current Android screen. If summarize=true, it returns a hyper-compact list of clickable bounds and text designed exactly for precise LLM tapping.',
-    schema: z.object({
-      summarize: z.boolean().optional().default(true).describe('If true, filters the XML down to only clickable targets and their [X,Y] bounds to save context tokens.'),
-      serial: z.string().optional().describe('Device serial'),
-    }),
-  }
-);
+});
 
 export const allAdbTools = [
   adbListDevicesTool,

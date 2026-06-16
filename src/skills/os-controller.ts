@@ -1,6 +1,6 @@
 import * as os from 'os';
 import { BaseSkill, SkillDefinition } from './base-skill';
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import { defineTool, type ToolDefinition } from '../runtime/tools';
 import { allWindowsTools } from '../tools/windows';
 import { allMacTools } from '../tools/mac';
 import { shellExecTool } from '../tools/shell';
@@ -11,7 +11,7 @@ export default class OsControllerSkill extends BaseSkill {
     const isWin = os.platform() === 'win32';
     
     // Always include the shell tool for lower-level fallback
-    let tools: DynamicStructuredTool[] = [shellExecTool];
+    let tools: ToolDefinition[] = [shellExecTool];
     let osName: string = os.platform();
     let promptExtras = '';
 

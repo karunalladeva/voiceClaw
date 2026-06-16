@@ -1,5 +1,5 @@
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import { systemMessage, userMessage } from '../runtime/messages';
+import type { ToolDefinition } from '../runtime/tools';
 import { configManager } from '../config/index';
 import { modelRouter } from '../models/model-router';
 import { SkillDefinition } from '../skills/base-skill';
@@ -45,7 +45,7 @@ export interface MicroRouteMatch {
 
 export interface MicroRouterContext {
   skills: SkillDefinition[];
-  tools: DynamicStructuredTool[];
+  tools: ToolDefinition[];
 }
 
 export interface MicroRouteResult {
@@ -258,17 +258,20 @@ async function llmClassify(
             .join('\n')
         : '(no catalog matches)';
 
-    const response = await llm.invoke([
-      new SystemMessage(
-        'You are a receptionist router. Pick EXACTLY ONE lane id from the catalog list below. ' +
-          'Reply with ONLY that lane id on a single line — no punctuation, no explanation.\n\n' +
-          `Available lanes (from live skills, tools, MCP):\n${laneLines}\n\n` +
-          `Top catalog matches:\n${matchLines}`,
-      ),
-      new HumanMessage(query.slice(0, 2000)),
-    ]);
+    const response = await llm.complete({
+      messages: [
+        systemMessage(
+          'You are a receptionist router. Pick EXACTLY ONE lane id from the catalog list below. ' +
+            'Reply with ONLY that lane id on a single line — no punctuation, no explanation.\n\n' +
+            `Available lanes (from live skills, tools, MCP):\n${laneLines}\n\n` +
+            `Top catalog matches:\n${matchLines}`,
+        ),
+        userMessage(query.slice(0, 2000)),
+      ],
+      label: 'micro-router:llm-fallback',
+    });
 
-    const parsed = parseLlmLane(String(response.content ?? ''), allowedLanes);
+    const parsed = parseLlmLane(response.content ?? '', allowedLanes);
     if (!parsed) return null;
     return {
       category: parsed,

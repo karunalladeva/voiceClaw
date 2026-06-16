@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import { BaseSkill, SkillDefinition } from './base-skill';
 import * as fs from 'fs/promises';
@@ -163,8 +163,16 @@ function formatReadFileError(filename: string, err: unknown): string {
   return `Error reading file: ${message}`;
 }
 
-export const readFileTool = tool(
-  async ({ filename }) => {
+export const readFileTool = defineTool({
+  name: 'read_file',
+    description:
+      'Read a file from the workspace. During org tasks, paths resolve under the task artifact folder ' +
+      '(basename, subpath like chapter-01.md or pipeline/workflow.json, or full workspace/orchestration/artifacts/... path). ' +
+      'For workflow.json use pipeline/workflow.json or the full path with both root and task ids.',
+    schema: z.object({
+      filename: z.string().describe('File name, subpath under task artifacts, or workspace/... path'),
+    }),
+  execute: async ({ filename }) => {
     try {
       const { absPath: safePath, resolvedVia } = await resolveReadTargetWithFallback(filename);
       const stat = await fs.stat(safePath);
@@ -194,22 +202,32 @@ export const readFileTool = tool(
       return formatReadFileError(filename, e);
     }
   },
-  {
-    name: 'read_file',
-    description:
-      'Read a file from the workspace. During org tasks, paths resolve under the task artifact folder ' +
-      '(basename, subpath like chapter-01.md or pipeline/workflow.json, or full workspace/orchestration/artifacts/... path). ' +
-      'For workflow.json use pipeline/workflow.json or the full path with both root and task ids.',
-    schema: z.object({
-      filename: z.string().describe('File name, subpath under task artifacts, or workspace/... path'),
-    }),
-  }
-);
+});
 
-export const writeFileTool = tool(
-  async ({ filename, content }) => {
+export const writeFileTool = defineTool({
+  name: 'write_file',
+    description:
+      'Write content to disk. During org tasks, saves under workspace/orchestration/artifacts/{rootTaskId}/{taskId}/. ' +
+      'Otherwise workspace/outputs/documents/. Pass filename plus content OR contentBase64 (preferred for JSON/brace-heavy text on local models). ' +
+      'For pipeline/workflow.json use save_default_pipeline_workflow instead of embedding JSON here.',
+    schema: z.object({
+      filename: z.string().describe('Name of file to write (e.g. chapter-01.md, cover.png as base64)'),
+      content: z.string().optional().describe('Plain UTF-8 file body'),
+      contentBase64: z
+        .string()
+        .optional()
+        .describe('Base64-encoded file body — use for JSON or text containing { } characters'),
+    }),
+  execute: async ({ filename, content, contentBase64 }) => {
     try {
-      const byteLen = Buffer.byteLength(content, 'utf-8');
+      let body = content ?? '';
+      if (contentBase64?.trim()) {
+        body = Buffer.from(contentBase64.trim(), 'base64').toString('utf-8');
+      }
+      if (!body) {
+        return 'Error writing file: provide content or contentBase64 (non-empty).';
+      }
+      const byteLen = Buffer.byteLength(body, 'utf-8');
       if (byteLen > MAX_WRITE_BYTES) {
         return `Error writing file: content too large (${byteLen} bytes; max ${MAX_WRITE_BYTES}). Split into smaller chapter files.`;
       }
@@ -221,15 +239,15 @@ export const writeFileTool = tool(
       }
       const { absPath, relPath } = resolveWriteTarget(filename);
       await ensureParentDir(absPath);
-      await fs.writeFile(absPath, content, 'utf-8');
+      await fs.writeFile(absPath, body, 'utf-8');
 
       const cfg = configManager.getConfig();
       const ctx = getAgentRunContext();
       if (scope && cfg.agent.verifyActWrite !== false) {
         const readBack = await fs.readFile(absPath, 'utf-8');
-        const expectedHash = crypto.createHash('sha256').update(content, 'utf-8').digest('hex');
+        const expectedHash = crypto.createHash('sha256').update(body, 'utf-8').digest('hex');
         const actualHash = crypto.createHash('sha256').update(readBack, 'utf-8').digest('hex');
-        if (expectedHash !== actualHash || readBack.length !== content.length) {
+        if (expectedHash !== actualHash || readBack.length !== body.length) {
           return `Error writing file: verify-act failed (read-back mismatch for ${relPath})`;
         }
       }
@@ -243,20 +261,14 @@ export const writeFileTool = tool(
       return `Error writing file: ${e.message}`;
     }
   },
-  {
-    name: 'write_file',
-    description:
-      'Write content to disk. During org tasks, saves under workspace/orchestration/artifacts/{rootTaskId}/{taskId}/. ' +
-      'Otherwise workspace/outputs/documents/. Always pass filename AND content as JSON strings.',
-    schema: z.object({
-      filename: z.string().describe('Name of file to write (e.g. pipeline/workflow.json, chapter-01.md)'),
-      content: z.string().describe('Full file body to write (required — do not call with empty args)'),
-    }),
-  }
-);
+});
 
-export const listFilesTool = tool(
-  async () => {
+export const listFilesTool = defineTool({
+  name: 'list_files',
+    description:
+      'List files. During org tasks, lists deliverables in the current task artifact folder; otherwise workspace root.',
+    schema: z.object({}),
+  execute: async () => {
     try {
       const scope = resolveOrgTaskScope();
       if (scope) {
@@ -278,13 +290,7 @@ export const listFilesTool = tool(
       return `Error listing files: ${e.message}`;
     }
   },
-  {
-    name: 'list_files',
-    description:
-      'List files. During org tasks, lists deliverables in the current task artifact folder; otherwise workspace root.',
-    schema: z.object({}),
-  }
-);
+});
 
 export default class FileManagerSkill extends BaseSkill {
   async define(): Promise<SkillDefinition> {

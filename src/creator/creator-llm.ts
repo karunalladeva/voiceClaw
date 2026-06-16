@@ -1,4 +1,4 @@
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { systemMessage, userMessage } from '../runtime/messages';
 import { modelRouter } from '../models/model-router';
 import { modelRegistry } from '../models/model-registry';
 import type { CreatorItemType } from './workspace-creator';
@@ -166,10 +166,13 @@ function enforcePolicy(type: CreatorItemType, prompt: string, content: string): 
 async function invokeCreatorModel(type: CreatorItemType, prompt: string, currentContent?: string): Promise<CreatorLlmResult> {
   const llm = await modelRouter.getModel('code');
   const modelId = getModelIdForAudit();
-  const response = await llm.invoke([
-    new SystemMessage(getSystemPrompt(type, Boolean(currentContent))),
-    new HumanMessage(prompt),
-  ]);
+  const response = await llm.complete({
+    messages: [
+      systemMessage(getSystemPrompt(type, Boolean(currentContent))),
+      userMessage(prompt),
+    ],
+    label: `creator:${type}`,
+  });
   const content = String(response.content ?? '').trim();
   if (!content) {
     throw new CreatorValidationError('LLM returned empty content.');

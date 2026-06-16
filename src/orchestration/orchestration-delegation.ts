@@ -1,4 +1,4 @@
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { systemMessage, userMessage } from '../runtime/messages';
 import { modelRouter } from '../models/model-router';
 import { agentRegistry } from './agent-registry';
 import { taskManager } from './task-manager';
@@ -258,39 +258,27 @@ export async function generateSpawnTasksWithLlm(
   }));
 
   const llm = await modelRouter.getMasterModel();
-  const response = await llm.invoke([
-    new SystemMessage(
-      'You assign work to direct reports. Reply with ONLY valid JSON, no markdown. ' +
-        'Schema: {"spawnTasks":[{"title":"string","description":"string","assigneeId":"from roster","priority":"low|medium|high|critical","blockedBy":["parent|previous|sibling task title"],"blockedAfter":"sibling task title"}]}. ' +
-        'Use blockedBy/blockedAfter for sequential work: e.g. requirements first, then design blockedAfter "Requirements gathering". ' +
-        'Omit blockedBy on the first task (starts when the epic is active). Use blockedAfter or blockedBy with a prior subtask title for sequential phases.',
-    ),
-    new HumanMessage(
-      `Manager: ${manager.name}\n` +
-        `Parent task: ${parentTask.title}\n${parentTask.description}\n\n` +
-        `Manager analysis / notes:\n${output.slice(0, 14000)}\n\n` +
-        `Create one subtask per team member when their skills apply. Split requirements clearly.\n` +
-        `Order sequential phases: research/requirements before engineering/design (use blockedAfter on the later task).\n` +
-        `Roster (use exact assigneeId):\n${JSON.stringify(roster, null, 2)}`,
-    ),
-  ]);
+  const response = await llm.complete({
+    messages: [
+      systemMessage(
+        'You assign work to direct reports. Reply with ONLY valid JSON, no markdown. ' +
+          'Schema: {"spawnTasks":[{"title":"string","description":"string","assigneeId":"from roster","priority":"low|medium|high|critical","blockedBy":["parent|previous|sibling task title"],"blockedAfter":"sibling task title"}]}. ' +
+          'Use blockedBy/blockedAfter for sequential work: e.g. requirements first, then design blockedAfter "Requirements gathering". ' +
+          'Omit blockedBy on the first task (starts when the epic is active). Use blockedAfter or blockedBy with a prior subtask title for sequential phases.',
+      ),
+      userMessage(
+        `Manager: ${manager.name}\n` +
+          `Parent task: ${parentTask.title}\n${parentTask.description}\n\n` +
+          `Manager analysis / notes:\n${output.slice(0, 14000)}\n\n` +
+          `Create one subtask per team member when their skills apply. Split requirements clearly.\n` +
+          `Order sequential phases: research/requirements before engineering/design (use blockedAfter on the later task).\n` +
+          `Roster (use exact assigneeId):\n${JSON.stringify(roster, null, 2)}`,
+      ),
+    ],
+    label: 'orchestration:spawn-tasks',
+  });
 
-  let text = '';
-  if (typeof response.content === 'string') {
-    text = response.content;
-  } else if (Array.isArray(response.content)) {
-    text = response.content
-      .map((block) => {
-        if (typeof block === 'string') return block;
-        if (block && typeof block === 'object' && 'text' in block) {
-          return String((block as { text?: string }).text ?? '');
-        }
-        return '';
-      })
-      .join('');
-  } else {
-    text = String(response.content ?? '');
-  }
+  const text = response.content ?? '';
 
   const parsed = parseSpawnTasksFromOutput(text);
   return resolveSpawnInputs(manager, parsed);

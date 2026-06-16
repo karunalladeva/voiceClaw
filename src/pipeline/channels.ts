@@ -14,6 +14,7 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import { historyManager } from '../agents/agent-history';
+import { systemMessage } from '../runtime/messages';
 import { agentEvents } from '../admin/agent-events';
 import { buildChannelReplyFn, type ChannelReplyFn } from './channel-reply';
 import { extractMediaAttachments, type MediaAttachment } from '../utils/media-attachments';
@@ -600,9 +601,8 @@ class HistoryProvider implements IChannelProvider {
     const chatId = settings.chat_id || 'execution-pipeline';
     // Use pipeline name + date for title, with fallback
     const chatTitle = settings.chat_title || `Pipeline Execution - ${new Date().toISOString().split('T')[0]}`;
-    const { SystemMessage } = await import('@langchain/core/messages');
     const thread = historyManager.getThread(chatId);
-    thread.push(new SystemMessage({ content: `[Pipeline Output] ${message}` }));
+    thread.push(systemMessage(`[Pipeline Output] ${message}`));
     historyManager.setThread(chatId, thread);
     await historyManager.saveChat(chatId, chatTitle);
     return `✅ Saved to chat history (${chatId}).`;

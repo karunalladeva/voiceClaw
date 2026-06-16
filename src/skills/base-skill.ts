@@ -1,4 +1,4 @@
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import { defineTool, type ToolDefinition } from '../runtime/tools';
 import type { StructuredOutputConfig } from './structured-output-types';
 
 export type SkillToolLimits = {
@@ -17,7 +17,7 @@ export interface SkillDefinition {
   /** When the main agent should route to this skill (used by the router LLM) */
   triggerDescription: string;
   /** Tools this skill's agent needs */
-  tools: DynamicStructuredTool[];
+  tools: ToolDefinition[];
   /** Whether this skill is enabled */
   enabled: boolean;
   /** Optional LLM model override for this skill */

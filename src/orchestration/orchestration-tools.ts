@@ -1,4 +1,4 @@
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import { defineTool, type ToolDefinition } from '../runtime/tools';
 
 import { z } from 'zod';
 
@@ -15,6 +15,7 @@ import {
 import { isAwaitingParentAnswer } from './orchestration-parent-clarification';
 import { hasPipelineModeLabel } from './orchestration-labels';
 import { loadPipelineWorkflow } from './pipeline-workflow';
+import { ensureDefaultPipelineWorkflow } from './pipeline-workflow';
 import { configManager } from '../config/index';
 
 import { getOpenParentQuestion } from './orchestration-parent-clarification';
@@ -38,11 +39,11 @@ export async function buildOrchestrationTools(
 
   ctx: OrchestrationToolContext,
 
-): Promise<DynamicStructuredTool[]> {
+): Promise<ToolDefinition[]> {
 
-  const tools: DynamicStructuredTool[] = [
+  const tools: ToolDefinition[] = [
 
-    new DynamicStructuredTool({
+    defineTool({
 
       name: 'ask_user',
 
@@ -68,7 +69,7 @@ export async function buildOrchestrationTools(
 
       }),
 
-      func: async ({ question, summary }) => {
+      execute: async ({ question, summary }) => {
 
         if (!ctx.taskId) return 'No active task context.';
 
@@ -110,7 +111,7 @@ export async function buildOrchestrationTools(
 
     }),
 
-    new DynamicStructuredTool({
+    defineTool({
 
       name: 'ask_parent_manager',
 
@@ -126,7 +127,7 @@ export async function buildOrchestrationTools(
 
       }),
 
-      func: async ({ question }) => {
+      execute: async ({ question }) => {
         if (!ctx.taskId) return 'No active task context.';
         try {
           const comments = await taskManager.getComments(ctx.taskId);
@@ -167,7 +168,45 @@ export async function buildOrchestrationTools(
 
     tools.push(
 
-      new DynamicStructuredTool({
+      defineTool({
+
+        name: 'save_default_pipeline_workflow',
+
+        description:
+
+          'Write the default pipeline/workflow.json to your task artifact folder (empty args {}). ' +
+
+          'Use this instead of write_file when creating workflow.json — avoids Ollama JSON parse errors.',
+
+        schema: z.object({}),
+
+        execute: async () => {
+
+          if (!ctx.taskId) return 'No active task context.';
+
+          const parent = await taskManager.getTaskById(ctx.taskId);
+
+          if (!parent) return `Task not found: ${ctx.taskId}`;
+
+          const rootId = parent.rootTaskId ?? parent.id;
+
+          const scope = { id: parent.id, rootTaskId: rootId };
+
+          const workflow = await ensureDefaultPipelineWorkflow(scope, ctx.agentId);
+
+          return (
+
+            `Saved default pipeline/workflow.json (${workflow.phases.length} phases). ` +
+
+            `Next: call delegate_from_workflow with empty args {} to spawn subtasks.`
+
+          );
+
+        },
+
+      }),
+
+      defineTool({
 
         name: 'delegate_from_workflow',
 
@@ -179,7 +218,7 @@ export async function buildOrchestrationTools(
 
         schema: z.object({}),
 
-        func: async () => {
+        execute: async () => {
 
           if (!ctx.taskId) {
 
@@ -207,7 +246,7 @@ export async function buildOrchestrationTools(
 
       }),
 
-      new DynamicStructuredTool({
+      defineTool({
 
         name: 'list_team_members',
 
@@ -217,7 +256,7 @@ export async function buildOrchestrationTools(
 
         schema: z.object({}),
 
-        func: async () => {
+        execute: async () => {
 
           const manager = await agentRegistry.getById(ctx.agentId);
 
@@ -245,7 +284,7 @@ export async function buildOrchestrationTools(
 
       }),
 
-      new DynamicStructuredTool({
+      defineTool({
 
         name: 'create_subtask',
 
@@ -297,7 +336,7 @@ export async function buildOrchestrationTools(
 
         }),
 
-        func: async ({ title, description, assigneeId, assigneeName, priority, blockedBy }) => {
+        execute: async ({ title, description, assigneeId, assigneeName, priority, blockedBy }) => {
 
           if (!ctx.taskId) {
 
@@ -418,7 +457,7 @@ export async function buildOrchestrationTools(
 
       }),
 
-      new DynamicStructuredTool({
+      defineTool({
 
         name: 'cancel_subtask',
 
@@ -440,7 +479,7 @@ export async function buildOrchestrationTools(
 
         }),
 
-        func: async ({ subtaskId, titleFragment }) => {
+        execute: async ({ subtaskId, titleFragment }) => {
 
           if (!ctx.taskId) return 'No active task context.';
 
@@ -488,7 +527,7 @@ export async function buildOrchestrationTools(
 
       }),
 
-      new DynamicStructuredTool({
+      defineTool({
 
         name: 'list_my_subtasks',
 
@@ -496,7 +535,7 @@ export async function buildOrchestrationTools(
 
         schema: z.object({}),
 
-        func: async () => {
+        execute: async () => {
 
           if (!ctx.taskId) return 'No active task context.';
 
@@ -520,7 +559,7 @@ export async function buildOrchestrationTools(
 
       }),
 
-      new DynamicStructuredTool({
+      defineTool({
 
         name: 'list_pending_subtask_questions',
 
@@ -530,7 +569,7 @@ export async function buildOrchestrationTools(
 
         schema: z.object({}),
 
-        func: async () => {
+        execute: async () => {
 
           if (!ctx.taskId) return 'No active task context.';
 
@@ -554,7 +593,7 @@ export async function buildOrchestrationTools(
 
       }),
 
-      new DynamicStructuredTool({
+      defineTool({
 
         name: 'reply_to_subtask_question',
 
@@ -570,7 +609,7 @@ export async function buildOrchestrationTools(
 
         }),
 
-        func: async ({ subtaskId, answer }) => {
+        execute: async ({ subtaskId, answer }) => {
 
           try {
 

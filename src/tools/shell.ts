@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import { spawn } from 'child_process';
 import * as path from 'path';
@@ -74,8 +74,18 @@ function runCommand(command: string, workdir: string, timeoutMs: number): Promis
   });
 }
 
-export const shellExecTool = tool(
-  async ({ command, workdir, timeout }) => {
+export const shellExecTool = defineTool({
+  name: 'shell_exec',
+    description:
+      'Execute a shell command on the local machine. Use for running scripts, ' +
+      'checking system info, installing packages, git operations, file management, etc. ' +
+      'Commands run in the workspace directory by default.',
+    schema: z.object({
+      command: z.string().describe('The shell command to execute'),
+      workdir: z.string().optional().describe('Working directory (defaults to workspace)'),
+      timeout: z.number().optional().describe('Timeout in seconds (default 30, max 300)'),
+    }),
+  execute: async ({ command, workdir, timeout }) => {
     console.log(`[Tool: Shell] Executing: "${command}" in ${workdir || WORKSPACE}`);
 
     if (isBlocked(command)) {
@@ -99,16 +109,4 @@ export const shellExecTool = tool(
 
     return output;
   },
-  {
-    name: 'shell_exec',
-    description:
-      'Execute a shell command on the local machine. Use for running scripts, ' +
-      'checking system info, installing packages, git operations, file management, etc. ' +
-      'Commands run in the workspace directory by default.',
-    schema: z.object({
-      command: z.string().describe('The shell command to execute'),
-      workdir: z.string().optional().describe('Working directory (defaults to workspace)'),
-      timeout: z.number().optional().describe('Timeout in seconds (default 30, max 300)'),
-    }),
-  }
-);
+});

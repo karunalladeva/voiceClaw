@@ -1,4 +1,4 @@
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import type { ToolDefinition } from '../runtime/tools';
 import { webSearchTool, webFetchTool } from '../tools/search';
 import { yahooNewsTool, yahooOhlcvTool } from '../tools/market-data';
 import { financeRecallMarketMemoryTool, financeStoreMarketMemoryTool } from '../tools/finance-memory';
@@ -8,7 +8,7 @@ import { deliverToChannelTool, listChannelsTool } from '../tools/channel';
 import { listFilesTool, readFileTool, writeFileTool } from './file-manager';
 import { softenTools } from '../utils/soften-tool-schema';
 
-const toolRegistry: Record<string, DynamicStructuredTool> = {
+const toolRegistry: Record<string, ToolDefinition> = {
   web_search: webSearchTool,
   web_fetch: webFetchTool,
   yahoo_news: yahooNewsTool,
@@ -28,7 +28,7 @@ const toolRegistry: Record<string, DynamicStructuredTool> = {
   list_channels: listChannelsTool,
 };
 
-export function resolveToolsByIds(ids: string[] = []): DynamicStructuredTool[] {
+export function resolveToolsByIds(ids: string[] = []): ToolDefinition[] {
   const unique = Array.from(new Set(ids));
   return softenTools(unique.map((id: string) => toolRegistry[id]).filter(Boolean));
 }

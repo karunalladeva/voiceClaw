@@ -1,4 +1,4 @@
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import { defineTool, type ToolDefinition } from '../runtime/tools';
 import { SkillDefinition } from '../skills/base-skill';
 import { bm25RankIndices, tokenize } from '../utils/bm25';
 
@@ -163,7 +163,7 @@ function skillDocument(skill: SkillDefinition): string {
 
 export function buildRoutableCatalog(
   skills: SkillDefinition[],
-  tools: DynamicStructuredTool[],
+  tools: ToolDefinition[],
 ): RoutableEntry[] {
   const entries: RoutableEntry[] = [];
   const seenToolNames = new Set<string>();
@@ -346,7 +346,7 @@ export function extractRankedIds(matches: CatalogMatch[]): {
   return { rankedSkillIds, rankedToolNames };
 }
 
-export function catalogFingerprint(skills: SkillDefinition[], tools: DynamicStructuredTool[]): string {
+export function catalogFingerprint(skills: SkillDefinition[], tools: ToolDefinition[]): string {
   const skillIds = skills
     .filter((s) => s.enabled)
     .map((s) => s.id)

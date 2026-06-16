@@ -1,30 +1,23 @@
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { StateGraph, MessagesAnnotation } from '@langchain/langgraph';
-// @ts-ignore
-// @ts-ignore
-import { ToolNode } from '@langchain/langgraph/prebuilt';
-import { invokeSafeToolNode } from './graph/safe-tool-node';
-import { softenTools } from '../utils/soften-tool-schema';
 import { SkillDefinition, SkillToolLimits } from '../skills/base-skill';
 import { StreamEvent } from './react-agent';
 import { modelRegistry } from '../models/model-registry';
 import { modelRouter } from '../models/model-router';
-import { truncateToolMessages, truncateToolOutput } from '../utils/tool-output-truncate';
-import { invokeWithToolXmlFallback } from '../utils/ollama-tool-call';
-import { createOllamaFetch } from '../utils/ollama-fetch';
+import type { LlmClient } from '../llm/types';
+import { truncateToolOutput } from '../utils/tool-output-truncate';
 import { invokeLlmWithDebug } from '../utils/debug-logger';
 import { getAgentRunContext, toTaskArtifactScope } from './agent-run-context';
 import { persistTaskResponse } from '../orchestration/task-response-store';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
-import { closeGraphStream } from './graph/safe-graph-stream';
+import { softenTools } from '../utils/soften-tool-schema';
+import { streamTaoLoop, DEFAULT_TAO_MAX_TURNS } from '../runtime/tao-loop';
+import { systemMessage, userMessage } from '../runtime/messages';
+import { createOllamaClient } from '../llm/providers/ollama';
 import {
   assessStructuredOutput,
   enrichHandoffWithStructuredOutput,
 } from './skill-structured-output';
 import {
   composeSkillHandoff,
-  extractToolOutputFromEvent,
   SKILL_RUN_INCOMPLETE_MARKER,
   type SkillToolTrace,
 } from './skill-handoff';
@@ -34,9 +27,6 @@ export {
   extractToolOutputFromEvent,
 } from './skill-handoff';
 
-/** Match main ReAct agent — room for many tool rounds without GraphRecursionError. */
-const SKILL_RECURSION_LIMIT = 100;
-/** Skills may queue several Playwright fetches after web_search (lock + browser launch). */
 const SKILL_RUN_TIMEOUT_MS = 300_000;
 const DEFAULT_SKILL_TOOL_LIMITS: Required<SkillToolLimits> = {
   maxWebSearch: 6,
@@ -52,94 +42,38 @@ function resolveSkillToolLimits(skill: SkillDefinition): Required<SkillToolLimit
   };
 }
 
-function isGraphRecursionError(err: unknown): boolean {
-  const e = err as { name?: string; message?: string; lc_error_code?: string };
-  return (
-    e?.name === 'GraphRecursionError' ||
-    e?.lc_error_code === 'GRAPH_RECURSION_LIMIT' ||
-    /recursion limit of \d+ reached/i.test(e?.message ?? '')
-  );
-}
-
-function messageContentToString(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content.map((block: { text?: string }) => block?.text ?? '').join('');
-  }
-  return content == null ? '' : String(content);
-}
-
 export class AgentFactory {
-  private cache: Map<string, any> = new Map();
+  private llmCache: Map<string, LlmClient> = new Map();
 
-  private async resolveSkillLlm(skill: SkillDefinition): Promise<BaseChatModel> {
+  private async resolveSkillLlm(skill: SkillDefinition): Promise<LlmClient> {
+    if (this.llmCache.has(skill.id)) {
+      return this.llmCache.get(skill.id)!;
+    }
+    let llm: LlmClient;
     if (skill.model) {
       const byId = modelRegistry.getById(skill.model);
       if (byId) {
-        return (await modelRouter.getById(skill.model))!;
+        llm = (await modelRouter.getById(skill.model))!;
+      } else {
+        llm = createOllamaClient({
+          id: skill.model,
+          name: skill.model,
+          role: 'general',
+          provider: 'ollama',
+          model: skill.model,
+          enabled: true,
+          isMaster: false,
+        });
       }
-      const { ChatOllama } = await import('@langchain/ollama');
-      return new ChatOllama({
-        model: skill.model,
-        temperature: skill.temperature ?? 0.2,
-        keepAlive: -1,
-        fetch: createOllamaFetch(),
-      }) as unknown as BaseChatModel;
+    } else {
+      llm = await modelRouter.getMasterModel();
     }
-    return modelRouter.getMasterModel();
+    this.llmCache.set(skill.id, llm);
+    return llm;
   }
 
-  async getAgentAsync(skill: SkillDefinition): Promise<any> {
-    if (this.cache.has(skill.id)) return this.cache.get(skill.id)!;
-
-    const llm = await this.resolveSkillLlm(skill);
-    const compiled = this.buildGraph(llm, skill);
-    this.cache.set(skill.id, compiled);
-    console.log(`[AgentFactory] Built agent for skill: ${skill.name}`);
-    return compiled;
-  }
-
-  getAgent(skill: SkillDefinition): any {
-    if (this.cache.has(skill.id)) return this.cache.get(skill.id)!;
-    this.getAgentAsync(skill).catch((err) =>
-      console.error(`[AgentFactory] Async build failed for ${skill.id}:`, err)
-    );
-    return this.cache.get(skill.id) ?? null;
-  }
-
-  private buildGraph(llm: BaseChatModel, skill: SkillDefinition): any {
-    const tools = softenTools(skill.tools);
-    const llmWithTools: any = tools.length > 0 ? (llm as any).bindTools(tools) : llm;
-
-    const callModel = async (state: typeof MessagesAnnotation.State) => {
-      const response = await invokeWithToolXmlFallback(
-        llmWithTools,
-        llm,
-        state.messages,
-        { label: `skill:${skill.name}` },
-      );
-      return { messages: [response] };
-    };
-
-    const toolNode = async (state: typeof MessagesAnnotation.State) => {
-      const output = await invokeSafeToolNode(tools, state);
-      truncateToolMessages(output.messages);
-      return output;
-    };
-
-    const shouldContinue = (state: typeof MessagesAnnotation.State) => {
-      const last = state.messages[state.messages.length - 1] as any;
-      return last.tool_calls?.length ? 'tools' : '__end__';
-    };
-
-    const workflow = new StateGraph(MessagesAnnotation)
-      .addNode('agent', callModel)
-      .addNode('tools', toolNode)
-      .addEdge('__start__', 'agent')
-      .addConditionalEdges('agent', shouldContinue)
-      .addEdge('tools', 'agent');
-
-    return workflow.compile();
+  clearCache() {
+    this.llmCache.clear();
   }
 
   private async runGraceSynthesis(
@@ -164,15 +98,13 @@ export class AgentFactory {
       const response = await invokeLlmWithDebug(
         llm,
         [
-          new SystemMessage(skill.systemPrompt),
-          new HumanMessage({ content: query }),
-          new HumanMessage({
-            content: `${instruction}\n\n--- Collected tool output ---\n\n${appendix}`,
-          }),
+          systemMessage(skill.systemPrompt),
+          userMessage(query),
+          userMessage(`${instruction}\n\n--- Collected tool output ---\n\n${appendix}`),
         ],
         { label: `skill-grace:${skill.name}` },
       );
-      return messageContentToString(response.content).trim();
+      return response.content.trim();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[AgentFactory] Grace synthesis failed for "${skill.name}": ${msg}`);
@@ -190,18 +122,8 @@ export class AgentFactory {
     console.log(`[AgentFactory] Running skill "${skill.name}" for: "${query.substring(0, 60)}…"`);
     yield { type: 'thinking', data: `Using skill: ${skill.name}…` };
 
-    const graph = await this.getAgentAsync(skill);
-    if (!graph) {
-      yield { type: 'error', data: `Skill ${skill.name} agent not ready yet. Please retry.` };
-      return;
-    }
-
-    const inputMessages = {
-      messages: [
-        new SystemMessage(skill.systemPrompt),
-        new HumanMessage({ content: query }),
-      ],
-    };
+    const llm = await this.resolveSkillLlm(skill);
+    const tools = softenTools(skill.tools);
 
     let fullText = '';
     const toolTraces: SkillToolTrace[] = [];
@@ -211,6 +133,7 @@ export class AgentFactory {
     let skillEndedEarly = false;
     let earlyStopReason = 'tool budget or timeout';
     const deadline = Date.now() + SKILL_RUN_TIMEOUT_MS;
+    const abortController = new AbortController();
     const runCtxAtStart = getAgentRunContext();
     if (runCtxAtStart) {
       runCtxAtStart.skillRunCancelled = false;
@@ -219,45 +142,34 @@ export class AgentFactory {
     }
 
     try {
-      const stream = graph.streamEvents(inputMessages, {
-        version: 'v2',
-        recursionLimit: SKILL_RECURSION_LIMIT,
-      });
-      const streamIterator = stream[Symbol.asyncIterator]();
-
-      try {
-        while (true) {
-          let step: IteratorResult<unknown>;
-          try {
-            step = await streamIterator.next();
-          } catch (streamErr: unknown) {
-            if (isGraphRecursionError(streamErr)) {
-              console.warn(
-                `[AgentFactory] Skill "${skill.name}" hit LangGraph recursion limit (${SKILL_RECURSION_LIMIT}) — stopping with partial output`,
-              );
-              skillEndedEarly = true;
-              earlyStopReason = 'recursion limit';
-              break;
-            }
-            if (skillEndedEarly || isInferenceInterruptError(streamErr)) break;
-            throw streamErr;
+      for await (const event of streamTaoLoop({
+        client: llm,
+        plainClient: llm,
+        tools,
+        messages: [systemMessage(skill.systemPrompt), userMessage(query)],
+        label: `skill:${skill.name}`,
+        modelId: llm.modelId,
+        signal: abortController.signal,
+        maxTurns: DEFAULT_TAO_MAX_TURNS,
+      })) {
+        if (Date.now() > deadline) {
+          skillEndedEarly = true;
+          earlyStopReason = 'timeout';
+          abortController.abort();
+          break;
+        }
+        if (event.type === 'thinking') {
+          if (event.data !== 'Processing…') {
+            yield { type: 'thinking', data: event.data };
           }
-          if (step.done) break;
-          const event = step.value as {
-            event?: string;
-            name?: string;
-            data?: {
-              chunk?: { content?: unknown; tool_call_chunks?: unknown[] };
-              output?: { messages?: Array<{ content?: unknown }> };
-            };
-          };
-
-          if (Date.now() > deadline) {
-            skillEndedEarly = true;
-            earlyStopReason = 'timeout';
-            break;
-          }
-          if (event.event === 'on_tool_start' && event.name === 'web_search') {
+        } else if (event.type === 'token') {
+          fullText += event.data;
+          yield { type: 'token', data: event.data };
+        } else if (event.type === 'tool_call') {
+          const toolName = event.data;
+          console.log(`[AgentFactory] Skill "${skill.name}" tool: ${toolName}`);
+          yield { type: 'tool_call', data: toolName };
+          if (toolName === 'web_search') {
             webSearchCount += 1;
             if (webSearchCount > maxWebSearch) {
               console.warn(
@@ -265,10 +177,11 @@ export class AgentFactory {
               );
               skillEndedEarly = true;
               earlyStopReason = 'web_search limit';
+              abortController.abort();
               break;
             }
           }
-          if (event.event === 'on_tool_start' && event.name === 'web_fetch' && maxWebFetch > 0) {
+          if (toolName === 'web_fetch' && maxWebFetch > 0) {
             webFetchCount += 1;
             if (webFetchCount > maxWebFetch) {
               console.warn(
@@ -276,59 +189,47 @@ export class AgentFactory {
               );
               skillEndedEarly = true;
               earlyStopReason = 'web_fetch limit';
+              abortController.abort();
               break;
             }
           }
-          if (event.event === 'on_chat_model_stream') {
-            const chunk = event.data?.chunk;
-            const hasToolCallChunks = (chunk?.tool_call_chunks?.length ?? 0) > 0;
-            if (chunk?.content && !hasToolCallChunks) {
-              const token = chunk.content.toString();
-              if (token) {
-                fullText += token;
-                yield { type: 'token', data: token };
-              }
-            }
-          } else if (event.event === 'on_tool_start') {
-            console.log(`[AgentFactory] Skill "${skill.name}" tool: ${event.name || 'unknown'}`);
-            yield { type: 'tool_call', data: event.name || 'unknown' };
-          } else if (event.event === 'on_tool_end') {
-            const toolName = event.name || 'unknown';
-            const toolOutput = extractToolOutputFromEvent(event.data).trim();
-            console.log(`[AgentFactory] Skill "${skill.name}" tool done: ${toolName}`);
-            if (toolOutput) {
-              toolTraces.push({ name: toolName, output: toolOutput });
-              const runCtx = getAgentRunContext();
-              if (runCtx) {
-                persistTaskResponse({
-                  task: toTaskArtifactScope(runCtx),
-                  responderId: toolName,
-                  responderType: 'tool',
-                  content: toolOutput,
-                  agentId: runCtx.orgAgentId,
-                  success: true,
-                });
-              }
-            }
-          } else if (event.event === 'on_chain_end' && event.name === 'agent') {
-            const messages = event.data?.output?.messages as Array<{ content?: unknown }> | undefined;
-            if (messages?.length) {
-              for (let i = messages.length - 1; i >= 0; i--) {
-                const text = messageContentToString(messages[i]?.content);
-                if (text.trim()) {
-                  fullText = text;
-                  break;
-                }
-              }
+        } else if (event.type === 'tool_result') {
+          const toolName = event.data.name;
+          const toolOutput = event.data.output.trim();
+          console.log(`[AgentFactory] Skill "${skill.name}" tool done: ${toolName}`);
+          if (toolOutput) {
+            toolTraces.push({ name: toolName, output: toolOutput });
+            const runCtx = getAgentRunContext();
+            if (runCtx) {
+              persistTaskResponse({
+                task: toTaskArtifactScope(runCtx),
+                responderId: toolName,
+                responderType: 'tool',
+                content: toolOutput,
+                agentId: runCtx.orgAgentId,
+                success: true,
+              });
             }
           }
+        } else if (event.type === 'done') {
+          if (event.data.finalText.trim()) {
+            fullText = event.data.finalText;
+          }
+          if (event.data.endedReason === 'max_turns') {
+            skillEndedEarly = true;
+            earlyStopReason = 'recursion limit';
+            console.warn(
+              `[AgentFactory] Skill "${skill.name}" hit TAO max turns (${DEFAULT_TAO_MAX_TURNS}) — stopping with partial output`,
+            );
+          }
+        } else if (event.type === 'error') {
+          throw new Error(event.data);
         }
-      } finally {
-        const runCtx = getAgentRunContext();
-        if (runCtx && skillEndedEarly) {
-          runCtx.skillRunCancelled = true;
-        }
-        await closeGraphStream(streamIterator);
+      }
+
+      const runCtx = getAgentRunContext();
+      if (runCtx && skillEndedEarly) {
+        runCtx.skillRunCancelled = true;
       }
 
       if (this.needsGraceSynthesis(fullText, skillEndedEarly, toolTraces)) {
@@ -383,13 +284,10 @@ export class AgentFactory {
       }
       yield { type: 'text_done', data: handoff };
     } catch (error: unknown) {
-      if (isGraphRecursionError(error)) {
-        skillEndedEarly = true;
-        console.warn(
-          `[AgentFactory] Skill "${skill.name}" GraphRecursionError — returning partial handoff`,
-        );
-      } else if (!isInferenceInterruptError(error)) {
+      if (!isInferenceInterruptError(error)) {
         console.error(`[AgentFactory] Skill "${skill.name}" stream error:`, error);
+      } else {
+        skillEndedEarly = true;
       }
       let partial = composeSkillHandoff(fullText, toolTraces, true, skill.id, query);
       if (skill.structuredOutput) {
@@ -408,9 +306,5 @@ export class AgentFactory {
       console.error(`[AgentFactory] Skill "${skill.name}" failed:`, errMsg);
       yield { type: 'error', data: `Skill ${skill.name} failed: ${errMsg}` };
     }
-  }
-
-  clearCache() {
-    this.cache.clear();
   }
 }

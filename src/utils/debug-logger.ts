@@ -1,5 +1,7 @@
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { BaseMessage } from '@langchain/core/messages';
+import type { Message } from '../runtime/messages';
+import { messageContentToString } from '../runtime/messages';
+import type { LlmClient } from '../llm/types';
+import type { LlmCompleteResponse } from '../llm/types';
 import { configManager } from '../config/index';
 import { agentEvents } from '../admin/agent-events';
 
@@ -12,29 +14,15 @@ interface LlmLogEntry {
   toolCalls?: string;
 }
 
-function messageToLogEntry(msg: BaseMessage | null | undefined): LlmLogEntry {
+function messageToLogEntry(msg: Message | null | undefined): LlmLogEntry {
   if (msg == null) {
     return { role: 'unknown', content: '[missing message]' };
   }
-  const role = typeof msg.getType === 'function' ? msg.getType() : msg.constructor?.name ?? 'unknown';
-  let content = '';
-  if (typeof msg.content === 'string') {
-    content = msg.content;
-  } else if (Array.isArray(msg.content)) {
-    content = msg.content
-      .map((block: { text?: string; type?: string }) => {
-        if (block?.text) return block.text;
-        if (block?.type === 'image_url') return '[image]';
-        return JSON.stringify(block);
-      })
-      .join('\n');
-  } else if (msg.content != null) {
-    content = String(msg.content);
-  }
+  const role = msg.role;
+  const content = messageContentToString(msg.content);
   const entry: LlmLogEntry = { role, content };
-  const toolCalls = (msg as { tool_calls?: unknown[] }).tool_calls;
-  if (toolCalls?.length) {
-    entry.toolCalls = JSON.stringify(toolCalls, null, 2);
+  if (msg.toolCalls?.length) {
+    entry.toolCalls = JSON.stringify(msg.toolCalls, null, 2);
   }
   return entry;
 }
@@ -65,9 +53,9 @@ export function debugLog(category: string, message: string, extra?: Record<strin
   agentEvents.emit('system:log', { level: 'debug', message: line, ...extra });
 }
 
-export function debugLogLlmRequest(label: string, messages: BaseMessage[], modelId?: string): void {
+export function debugLogLlmRequest(label: string, messages: Message[], modelId?: string): void {
   if (!isLlmIoDebugEnabled()) return;
-  const validMessages = messages.filter((msg): msg is BaseMessage => msg != null);
+  const validMessages = messages.filter((msg): msg is Message => msg != null);
   const entries = validMessages.map(messageToLogEntry);
   const preview = entries
     .map((entry) => {
@@ -90,13 +78,25 @@ export function debugLogLlmRequest(label: string, messages: BaseMessage[], model
   });
 }
 
-export function debugLogLlmResponse(label: string, response: BaseMessage, modelId?: string): void {
+export function debugLogLlmResponse(
+  label: string,
+  response: Message | LlmCompleteResponse | { content: string; toolCalls?: unknown },
+  modelId?: string,
+): void {
   if (!isLlmIoDebugEnabled()) return;
   if (response == null) {
     console.log(`[Debug:LLM:OUT] ${label}${modelId ? ` model=${modelId}` : ''}\n  [unknown] [missing response]`);
     return;
   }
-  const entry = messageToLogEntry(response);
+  const asMessage: Message =
+    'role' in response && response.role
+      ? (response as Message)
+      : {
+          role: 'assistant',
+          content: response.content ?? '',
+          toolCalls: 'toolCalls' in response ? (response.toolCalls as Message['toolCalls']) : undefined,
+        };
+  const entry = messageToLogEntry(asMessage);
   const body = truncate(entry.content, LLM_PREVIEW_CHARS);
   const tools = entry.toolCalls ? `\n  tool_calls: ${entry.toolCalls}` : '';
   const header = `[Debug:LLM:OUT] ${label}${modelId ? ` model=${modelId}` : ''}`;
@@ -111,13 +111,13 @@ export function debugLogLlmResponse(label: string, response: BaseMessage, modelI
 }
 
 export async function invokeLlmWithDebug(
-  llm: BaseChatModel,
-  messages: BaseMessage[],
+  client: LlmClient,
+  messages: Message[],
   meta?: { label?: string; modelId?: string },
-): Promise<BaseMessage> {
+): Promise<LlmCompleteResponse> {
   const label = meta?.label ?? 'invoke';
   debugLogLlmRequest(label, messages, meta?.modelId);
-  const response = (await llm.invoke(messages)) as BaseMessage;
+  const response = await client.complete({ messages, label });
   debugLogLlmResponse(label, response, meta?.modelId);
   return response;
 }

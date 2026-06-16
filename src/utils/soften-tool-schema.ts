@@ -1,10 +1,14 @@
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import type { Message } from '../runtime/messages';
+import { messageContentToString } from '../runtime/messages';
 import { z } from 'zod';
+import type { ToolDefinition } from '../runtime/tools';
 
 const TOOL_ARG_HINTS: Record<string, string> = {
   write_file:
-    'Required JSON args: {"filename":"pipeline/workflow.json","content":"{\\"version\\":1,...}"}. ' +
-    'Both filename and content must be non-empty strings.',
+    'Required: filename. Provide content (plain text) OR contentBase64 (for JSON/brace-heavy text). ' +
+    'Do NOT use write_file for pipeline/workflow.json — use save_default_pipeline_workflow {} instead.',
+  save_default_pipeline_workflow:
+    'Call with empty args {} to write default pipeline/workflow.json. Then delegate_from_workflow {}.',
   read_file: 'Required JSON args: {"filename":"pipeline/workflow.json"}.',
   read_pointer:
     'Required: pointerId (UUID from pointer:… in context). Optional: maxChars (defaults to 120000).',
@@ -26,7 +30,7 @@ export function formatMissingToolArgs(toolName: string, missing: string[]): stri
 
 function isMissingValue(value: unknown, fieldName: string): boolean {
   if (value === undefined || value === null) return true;
-  if (typeof value === 'string' && fieldName !== 'content' && !value.trim()) return true;
+  if (typeof value === 'string' && fieldName !== 'content' && fieldName !== 'contentBase64' && !value.trim()) return true;
   if (Array.isArray(value) && value.length === 0) return true;
   return false;
 }
@@ -41,7 +45,7 @@ function getRequiredKeys(shape: Record<string, z.ZodTypeAny>): string[] {
  * Relax required Zod fields so empty/malformed model tool calls reach func with a clear error
  * instead of LangChain schema exceptions that small models retry blindly.
  */
-export function softenTool(tool: DynamicStructuredTool): DynamicStructuredTool {
+export function softenTool(tool: ToolDefinition): ToolDefinition {
   const schema = tool.schema;
   if (!(schema instanceof z.ZodObject)) {
     return tool;
@@ -56,21 +60,22 @@ export function softenTool(tool: DynamicStructuredTool): DynamicStructuredTool {
     optionalShape[key] = shape[key].optional();
   }
   const relaxed = z.object(optionalShape);
-  const originalFunc = tool.func.bind(tool);
-  return new DynamicStructuredTool({
+  const originalExecute = tool.execute.bind(tool);
+  return {
     name: tool.name,
     description: tool.description,
     schema: relaxed,
-    func: async (input: Record<string, unknown>) => {
-      const missing = requiredKeys.filter((k) => isMissingValue(input[k], k));
+    execute: async (input) => {
+      const record = input;
+      const missing = requiredKeys.filter((k) => isMissingValue(record[k], k));
       if (missing.length > 0) {
         return formatMissingToolArgs(tool.name, missing);
       }
-      return originalFunc(input);
+      return originalExecute(record);
     },
-  });
+  };
 }
 
-export function softenTools(tools: DynamicStructuredTool[]): DynamicStructuredTool[] {
-  return tools.map(softenTool);
+export function softenTools(tools: ToolDefinition[]): ToolDefinition[] {
+  return tools.map((t) => softenTool(t));
 }

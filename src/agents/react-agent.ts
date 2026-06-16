@@ -1,20 +1,24 @@
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { HumanMessage, AIMessage, SystemMessage, BaseMessage, ToolMessage } from '@langchain/core/messages';
-import { DynamicStructuredTool } from '@langchain/core/tools';
-import { StateGraph, MessagesAnnotation } from '@langchain/langgraph';
 import { z } from 'zod';
+import type { LlmClient } from '../llm/types';
+import { streamTaoLoop, runTaoLoop } from '../runtime/tao-loop';
+import {
+  systemMessage,
+  userMessage,
+  messageContentToString,
+  userContentFromInput,
+  type Message,
+} from '../runtime/messages';
+import type { ToolDefinition } from '../runtime/tools';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { invokeSafeToolNode } from './graph/safe-tool-node';
 import { softenTools } from '../utils/soften-tool-schema';
 import { MCPClientManager } from './mcp-client';
-import { AgentFactory, extractToolOutputFromEvent, SKILL_RUN_INCOMPLETE_MARKER } from './agent-factory';
+import { AgentFactory, SKILL_RUN_INCOMPLETE_MARKER } from './agent-factory';
 import {
   capOrchestratorHandoff,
   ORCHESTRATOR_HANDOFF_MAX_CHARS,
   parseIncompleteSkillId,
 } from './skill-handoff';
-import { invokeWithToolXmlFallback } from '../utils/ollama-tool-call';
 import {
   buildBlockedSkillRouteResult,
   registerBlockedSkill,
@@ -50,7 +54,7 @@ import {
 } from './prompt-context';
 import {
   capUserInputForInference,
-  debugLogPromptMessages,
+  debugPromptDumpEnabled,
   logPromptSizes,
   marketSymbolStatsFromHumanInput,
   sumMessagesChars,
@@ -62,7 +66,6 @@ import { DEFAULT_ORG_MODEL_ID } from '../orchestration/agent-normalizer';
 import { getAgentRunContext, getAgentRunStorage, toTaskArtifactScope, type AgentRunContext } from './agent-run-context';
 import { persistTaskResponse } from '../orchestration/task-response-store';
 import { isInferenceInterruptError } from '../utils/inference-interrupt';
-import { truncateToolOutput } from '../utils/tool-output-truncate';
 import { removeSpokenSummaryBlock } from '../utils/speech-for-tts';
 import { buildPlatformTools } from '../platform/tools/platform-tools';
 import { buildChatScopeId, buildOrgScopeId } from '../platform/session/scope-id';
@@ -72,13 +75,16 @@ import { buildEvidenceBundle } from '../platform/context/evidence-pipeline';
 import { sessionRagIndex } from '../platform/context/session-rag';
 import { getRunContextStorage, getRunContext } from '../platform/session/run-context-storage';
 import type { RunContext } from '../platform/contracts';
-import { processToolMessages } from './graph/process-tool-messages';
-import { trimMessagesForModel, isPreModelTrimEnabled } from './graph/pre-model-trim';
-import { closeGraphStream, consumeGraphStreamEvents } from './graph/safe-graph-stream';
 import { decideRoutingTier } from './tiered-routing';
 import { isPointersEnabled, registerToolOutputAsPointer, pointerToolMessageBody } from '../platform/context/tool-output-policy';
 
 export type { AgentRunOptions } from './agent-run-options';
+
+function historyTextFromMessages(msgs: Message[]): string {
+  return msgs
+    .map((m) => `${m.role.toUpperCase()}: ${messageContentToString(m.content)}`)
+    .join('\n');
+}
 
 export interface StreamEvent {
   type:
@@ -98,10 +104,10 @@ export interface StreamEvent {
 }
 
 export class ReactAgent {
-  private llm: BaseChatModel | null = null;
+  private llm: LlmClient | null = null;
   private mcpManager: MCPClientManager;
-  private graph: any;
-  private lastTools: DynamicStructuredTool[] = [];
+  private runtimeTools: ToolDefinition[] = [];
+  private lastTools: ToolDefinition[] = [];
   private skillRegistry: SkillRegistry;
   private agentFactory: AgentFactory;
   private activeModelId: string = 'unknown';
@@ -315,7 +321,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           }
           this.llm = llm;
           this.agentFactory.clearCache();
-          this.compileGraph(this.lastTools);
+          this.refreshRuntimeTools(this.lastTools);
           void import('./micro-router-model').then(({ invalidateMicroRouterModelWarm, warmMicroRouterModel }) => {
             invalidateMicroRouterModelWarm();
             void warmMicroRouterModel(true);
@@ -346,8 +352,8 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           }
           this.llm = llm;
           this.agentFactory.clearCache();
-          if (this.lastTools.length > 0 || this.graph) {
-            this.compileGraph(this.lastTools);
+          if (this.lastTools.length > 0 || this.runtimeTools.length > 0) {
+            this.refreshRuntimeTools(this.lastTools);
           }
           const { warmMicroRouterModel } = await import('./micro-router-model');
           await warmMicroRouterModel(true);
@@ -400,7 +406,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
 
       // 6. Finalize tool set and compile the graph now that skills exist
       this.lastTools = tools;
-      this.compileGraph(tools);
+      this.refreshRuntimeTools(tools);
 
       const allCoreTools = [...tools, ...this.getSystemTools()];
       console.log(`[ReAct Agent] Master Toolkit dynamically initialized with ${allCoreTools.length} tools:`, allCoreTools.map((t) => t.name).join(', '));
@@ -416,7 +422,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       const modelId = this.activeModelId;
       console.error(`[Agent: ReAct] [Model: ${modelId}] Initialization failed. Running in graceful fallback mode.`, err);
       this.lastTools = [];
-      this.compileGraph([]);
+      this.runtimeTools = [];
     }
 
   }
@@ -428,7 +434,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       const { modelLoadCoordinator } = await import('../models/model-load-coordinator');
       await modelLoadCoordinator.prepareForLocalModelLoad();
       console.log(`[Agent: ReAct] [Model: ${modelId}] Warming up model (cold-start pre-load)…`);
-      await (this.llm as any).invoke([new HumanMessage({ content: 'hi' })]);
+      await this.llm.complete({ messages: [userMessage('hi')], label: 'react-agent:warmup' });
       console.log(`[Agent: ReAct] [Model: ${modelId}] Model warm-up complete. (Ollama keep_alive=-1: model stays loaded indefinitely)`);
     } catch {
       const modelId = this.activeModelId;
@@ -438,7 +444,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
   }
 
 
-  private getSystemTools(skillAllowlist?: string[]): DynamicStructuredTool[] {
+  private getSystemTools(skillAllowlist?: string[]): ToolDefinition[] {
     let enabled = this.skillRegistry.getEnabledSkills();
     if (skillAllowlist && skillAllowlist.length > 0) {
       const allow = new Set(skillAllowlist);
@@ -450,7 +456,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
       .join(', ');
 
     return [
-      new DynamicStructuredTool({
+      {
         name: 'route_to_skill',
         description:
           `CRITICAL: Call directly — do NOT use shell_exec. Routes to a sub-agent. Core skillIds: ${coreSkillIds}. Trading skills use prefix trading-* (see system <skills> catalog). Default market analyst: voiceclaw-financial-analyst.`,
@@ -459,31 +465,35 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           query: z.string().describe('The specific natural language instruction for the skill'),
           priority: z.enum(['background', 'normal', 'interactive']).optional().describe('Queue priority for skill execution.'),
         }),
-        func: async ({ skillId, query, priority }, runManager, config) => {
-          if (skillAllowlist && skillAllowlist.length > 0 && !skillAllowlist.includes(skillId)) {
-            return `Skill ${skillId} is not allowed for this agent run.`;
+        execute: async ({ skillId, query, priority }) => {
+          const skillIdStr = String(skillId ?? '');
+          const queryStr = String(query ?? '');
+          const priorityVal = priority as 'background' | 'normal' | 'interactive' | undefined;
+          if (skillAllowlist && skillAllowlist.length > 0 && !skillAllowlist.includes(skillIdStr)) {
+            return `Skill ${skillIdStr} is not allowed for this agent run.`;
           }
-          const skill = this.skillRegistry.getSkill(skillId);
-          if (!skill || !skill.enabled) return `Skill ${skillId} not found or disabled.`;
+          const skill = this.skillRegistry.getSkill(skillIdStr);
+          if (!skill || !skill.enabled) return `Skill ${skillIdStr} not found or disabled.`;
 
-          const denial = await resolveSkillRouteDenial(skillId);
+          const denial = await resolveSkillRouteDenial(skillIdStr);
           if (denial) {
-            console.warn(`[route_to_skill] Denied: "${skillId}" — ${denial}`);
-            return buildDeniedSkillRouteResult(skill.name, skillId, denial);
+            console.warn(`[route_to_skill] Denied: "${skillIdStr}" — ${denial}`);
+            return buildDeniedSkillRouteResult(skill.name, skillIdStr, denial);
           }
 
           const blocked = await resolveBlockedSkillIdsForRun();
-          if (blocked.has(skillId)) {
+          if (blocked.has(skillIdStr)) {
             const taskId = getAgentRunContext()?.orgTaskId ?? 'n/a';
             console.warn(
-              `[route_to_skill] Hard block: "${skillId}" already incomplete on task ${taskId}`,
+              `[route_to_skill] Hard block: "${skillIdStr}" already incomplete on task ${taskId}`,
             );
-            return buildBlockedSkillRouteResult(skill.name, skillId);
+            return buildBlockedSkillRouteResult(skill.name, skillIdStr);
           }
 
           const subAgentId = `skill-${skill.id}-${Date.now()}`;
-          const parentAgentId = (config as any)?.agentId || 'main';
-          const chatId = (config as any)?.chatId || 'default';
+          const runCtx = getRunContext();
+          const chatId = runCtx?.chatId ?? runCtx?.sessionId ?? 'default';
+          const parentAgentId = getAgentRunContext()?.orgAgentId ?? 'main';
 
           console.log(`[Agent: Skill (${skill.name})] Executing nested sub-graph logic...`);
           
@@ -493,16 +503,16 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
             chatId,
             skillId: skill.id,
             skillName: skill.name,
-            input: query.substring(0, 100),
+            input: queryStr.substring(0, 100),
           });
 
           let finalOutput = '';
           let releaseSkillSlot: (() => void) | null = null;
-          const signal = (config as any)?.signal as AbortSignal | undefined;
+          const signal = this.activeCancelSignal;
 
           try {
             const queuePriority =
-              priority || (skill.id === 'screen-reader' ? 'interactive' : 'normal');
+              priorityVal || (skill.id === 'screen-reader' ? 'interactive' : 'normal');
             releaseSkillSlot = await this.acquireSkillSlot(queuePriority, signal);
             agentEvents.emit('skill:started', {
               agentId: subAgentId,
@@ -512,7 +522,7 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
             });
 
             let skillFailed = false;
-            for await (const skillEvent of this.agentFactory.runStream(skill, query)) {
+            for await (const skillEvent of this.agentFactory.runStream(skill, queryStr)) {
               if (skillEvent.type === 'text_done') {
                 finalOutput = skillEvent.data;
                 if (finalOutput.includes(SKILL_RUN_INCOMPLETE_MARKER)) {
@@ -538,27 +548,27 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
               skillName: skill.name,
               output: finalOutput.substring(0, 200),
             });
-            const runCtx = getAgentRunContext();
-            if (runCtx && finalOutput.trim()) {
+            const agentRunCtx = getAgentRunContext();
+            if (agentRunCtx && finalOutput.trim()) {
               persistTaskResponse({
-                task: toTaskArtifactScope(runCtx),
+                task: toTaskArtifactScope(agentRunCtx),
                 responderId: skill.id,
                 responderType: 'skill',
                 content: finalOutput,
-                agentId: runCtx.orgAgentId,
+                agentId: agentRunCtx.orgAgentId,
                 success: !skillFailed,
               });
             }
           } catch (e: any) {
             finalOutput = `Skill crashed: ${e.message}`;
-            const runCtx = getAgentRunContext();
-            if (runCtx) {
+            const agentRunCtx = getAgentRunContext();
+            if (agentRunCtx) {
               persistTaskResponse({
-                task: toTaskArtifactScope(runCtx),
+                task: toTaskArtifactScope(agentRunCtx),
                 responderId: skill.id,
                 responderType: 'skill',
                 content: finalOutput,
-                agentId: runCtx.orgAgentId,
+                agentId: agentRunCtx.orgAgentId,
                 success: false,
               });
             }
@@ -583,122 +593,38 @@ Do not add this block for raw tool dumps, JSON-only results, or when the entire 
           }
           const handoffBody = capOrchestratorHandoff(handoffRaw);
           return `[Sub-Agent Result from ${skill.name}]:\n${handoffBody}`;
-        }
-      }),
+        },
+      },
       ...buildPlatformTools(() => this.activeRunContext ?? getRunContext()),
     ];
   }
 
 
-  // ── Graph compilation ──────────────────────────────────────────────────────
-
-  private compileGraph(
-    tools: DynamicStructuredTool[],
-    llmOverride?: BaseChatModel,
+  private refreshRuntimeTools(
+    tools: ToolDefinition[],
     skillAllowlist?: string[],
-  ): any {
-    const llm = llmOverride ?? this.llm;
-    if (!llm) {
-      console.warn('[ReAct Agent] compileGraph called before LLM is ready — skipping.');
-      return null;
+  ): ToolDefinition[] {
+    if (!this.llm) {
+      console.warn('[ReAct Agent] refreshRuntimeTools called before LLM is ready — skipping.');
+      this.runtimeTools = [];
+      return this.runtimeTools;
     }
-
     const sysTools = this.getSystemTools(skillAllowlist);
-    const allTools = softenTools([...tools, ...sysTools]);
-    const llmWithTools: any = allTools.length > 0 ? (llm as any).bindTools(allTools) : llm;
+    this.runtimeTools = softenTools([
+      ...tools,
+      ...sysTools,
+    ]);
+    return this.runtimeTools;
+  }
 
-    const callModel = async (state: typeof MessagesAnnotation.State) => {
-      // ── Phase 2: Rolling Vision Context Manager ──
-      // Prevent OOM by ensuring only the single most recent screenshot is sent to the local LLM per turn.
-      let hasRetainedImage = false;
-
-      const optimizedMessages = [...state.messages].reverse().map((msg: any) => {
-        if (Array.isArray(msg.content)) {
-          let modified = false;
-          const optimizedContent = msg.content.map((block: any) => {
-            if (block.type === 'image_url') {
-              if (!hasRetainedImage) {
-                hasRetainedImage = true;
-                return block; // Keep the newest
-              } else {
-                modified = true;
-                return { type: 'text', text: '\n[System: Prior screenshot automatically evicted from context window to preserve VRAM]\n' };
-              }
-            }
-            return block;
-          });
-
-          if (modified) {
-            const Ctor = msg.constructor;
-            return new Ctor({ ...msg, content: optimizedContent });
-          }
-        }
-        return msg;
-      }).reverse();
-
-      const modelMessages = optimizedMessages.filter(
-        (msg): msg is BaseMessage => msg != null,
-      );
-      if (modelMessages.length !== optimizedMessages.length) {
-        console.warn(
-          `[ReAct Agent] Dropped ${optimizedMessages.length - modelMessages.length} undefined message(s) before model invoke`,
-        );
-      }
-      const trimmedMessages = isPreModelTrimEnabled()
-        ? (await trimMessagesForModel(modelMessages)).filter((msg): msg is BaseMessage => msg != null)
-        : modelMessages;
-
-      const response = await invokeWithToolXmlFallback(
-        llmWithTools,
-        llm,
-        trimmedMessages,
-        {
-          label: 'react-agent',
-          modelId: this.activeModelId,
-          signal: this.activeCancelSignal,
-        },
-      );
-      return { messages: [response] };
-    };
-
-    // ── Tool Node with Summarization (Noise Reduction) ────────────────────────
-    // We pass allTools here so ToolNode knows how to execute route_to_skill natively!
-    const toolNodeWithTruncation = async (state: typeof MessagesAnnotation.State) => {
-      const output = await invokeSafeToolNode(allTools, state);
-      const scopeId = this.activeRunContext?.scopeId ?? buildChatScopeId('default');
-      const toolMsgs = output.messages.filter((m: BaseMessage): m is ToolMessage => m instanceof ToolMessage);
-      const processed = await processToolMessages(toolMsgs, scopeId);
-      return { messages: processed };
-    };
-
-    const shouldContinue = (state: typeof MessagesAnnotation.State) => {
-      const lastMessage = state.messages[state.messages.length - 1] as any;
-      if (
-        lastMessage instanceof ToolMessage &&
-        lastMessage.name === 'route_to_skill' &&
-        String(lastMessage.content ?? '').includes('[Sub-Agent Result from') &&
-        getAgentRunContext()?.orgTaskId
-      ) {
-        return '__end__';
-      }
-      if (lastMessage.tool_calls?.length) return 'tools';
-      return '__end__';
-    };
-
-    const workflow = new StateGraph(MessagesAnnotation)
-      .addNode('agent', callModel)
-      .addNode('tools', toolNodeWithTruncation)
-      .addEdge('__start__', 'agent')
-      .addConditionalEdges('agent', shouldContinue)
-      .addEdge('tools', 'agent');
-
-
-
-    const compiled = workflow.compile();
-    if (!llmOverride) {
-      this.graph = compiled;
-    }
-    return compiled;
+  private buildRunTools(
+    extraTools: ToolDefinition[],
+    skillAllowlist?: string[],
+  ): ToolDefinition[] {
+    return softenTools([
+      ...[...this.lastTools, ...extraTools],
+      ...this.getSystemTools(skillAllowlist),
+    ]);
   }
 
   // ── System prompt / memory ─────────────────────────────────────────────────
@@ -842,9 +768,7 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     }
 
     const thread = await historyManager.loadChat(chatId);
-    thread.push(new HumanMessage({ content: humanContent }));
-    thread.push(new AIMessage({ content: removeSpokenSummaryBlock(aiResponse) }));
-    historyManager.syncMessageMeta(chatId);
+    historyManager.appendTurn(chatId, humanContent, aiResponse);
 
     const maxMessages = ReactAgent.MAX_HISTORY_TURNS * 2;
     if (thread.length > maxMessages) {
@@ -854,9 +778,9 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
       for (let i = 0; i < thread.length && indicesToSummarize.length < overflowCount; i++) {
         if (historyManager.isMessageSummarized(chatId, i)) continue;
         const msg = thread[i];
-        if (msg.getType() === 'system') continue;
+        if (msg.role === 'system') continue;
         indicesToSummarize.push(i);
-        batchLines.push(`${msg.getType().toUpperCase()}: ${msg.content}`);
+        batchLines.push(`${msg.role.toUpperCase()}: ${messageContentToString(msg.content)}`);
       }
       if (indicesToSummarize.length > 0) {
         historyManager.markIndicesSummarized(chatId, indicesToSummarize);
@@ -864,18 +788,21 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
         const batchText = batchLines.join('\n');
         modelRouter.getModel('summarize').then((fastModel) => {
           console.log(`[ReAct Agent] Background summarization for ${indicesToSummarize.length} message(s) (kept in JSON, isSummarized=true)...`);
-          return fastModel.invoke([
-            new SystemMessage(
-              'Summarize conversation history briefly. Merge with any previous summaries so critical long-term context is retained. Be concise.',
-            ),
-            new HumanMessage({
-              content: previousSummaries
-                ? `Previous summaries:\n${previousSummaries}\n\nNew messages to fold in:\n${batchText}`
-                : `Messages to summarize:\n${batchText}`,
-            }),
-          ]);
+          return fastModel.complete({
+            messages: [
+              systemMessage(
+                'Summarize conversation history briefly. Merge with any previous summaries so critical long-term context is retained. Be concise.',
+              ),
+              userMessage(
+                previousSummaries
+                  ? `Previous summaries:\n${previousSummaries}\n\nNew messages to fold in:\n${batchText}`
+                  : `Messages to summarize:\n${batchText}`,
+              ),
+            ],
+            label: 'react-agent:history-summarize',
+          });
         }).then((res) => {
-          const summaryBody = res.content.toString().trim();
+          const summaryBody = res.content.trim();
           historyManager.appendSummary(chatId, summaryBody, indicesToSummarize.length);
           historyManager.saveChat(chatId);
           console.log(`[ReAct Agent] History summarization stored (summaries key, ${indicesToSummarize.length} messages marked).`);
@@ -890,23 +817,23 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     chatId: string,
     reservedChars: number,
     query?: string,
-  ): Promise<BaseMessage[]> {
+  ): Promise<Message[]> {
     const maxTotal = configManager.getConfig().agent.maxPromptChars ?? 30_000;
     const budget = Math.max(2000, maxTotal - reservedChars);
     const cfg = configManager.getConfig().agent?.context;
     if (cfg?.historyPrune?.enabled) {
       const minTurns = configManager.getConfig().agent.historyContext?.minRecentTurns ?? 5;
-      return historyManager.buildPrunedContextMessages(chatId, budget, query, minTurns);
+      return await historyManager.buildPrunedContextMessages(chatId, budget, query, minTurns);
     }
-    return historyManager.buildLlmContextMessages(chatId, budget, query);
+    return await historyManager.buildLlmContextMessages(chatId, budget, query);
   }
 
   /** Apply total prompt budget: shrink human input if system + history + human exceed cap. */
   private applyPromptBudget(
     systemPrompt: string,
     input: string | any,
-    contextMessages: BaseMessage[],
-  ): { systemPrompt: string; input: string | any; contextMessages: BaseMessage[] } {
+    contextMessages: Message[],
+  ): { systemPrompt: string; input: string | any; contextMessages: Message[] } {
     const maxTotal = configManager.getConfig().agent.maxPromptChars ?? 30_000;
     let sys = systemPrompt;
     let human = input;
@@ -920,9 +847,9 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
       return { systemPrompt: sys, input: human, contextMessages: ctx };
     }
 
-    if (shouldUseSynthesisMode(extractUserQueryText(human), extractHistoryText(ctx)) && sys.length > 8000) {
+    if (shouldUseSynthesisMode(extractUserQueryText(human), historyTextFromMessages(ctx)) && sys.length > 8000) {
       const queryText = extractUserQueryText(human);
-      sys = this.getSystemPrompt(queryText, undefined, 'synthesis', undefined, extractHistoryText(ctx));
+      sys = this.getSystemPrompt(queryText, undefined, 'synthesis', undefined, historyTextFromMessages(ctx));
       total = sys.length + humanLen + historyLen;
     }
 
@@ -962,7 +889,7 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     this.lastTools = tools;
     clearMicroRouteCache();
     if (this.llm) {
-      this.compileGraph(tools);
+      this.refreshRuntimeTools(tools);
     }
     console.log(`[ReAct Agent] Toolkit refreshed (${tools.length} tools).`);
   }
@@ -972,10 +899,16 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
   }
 
   /** Live skill + tool snapshot for gateway micro-router (admin classify / prompt prep). */
-  getMicroRouterContext(): { skills: ReturnType<SkillRegistry['getEnabledSkills']>; tools: DynamicStructuredTool[] } {
+  getMicroRouterContext(): {
+    skills: ReturnType<SkillRegistry['getEnabledSkills']>;
+    tools: import('./micro-router').MicroRouterContext['tools'];
+  } {
     return {
       skills: this.skillRegistry.getEnabledSkills(),
-      tools: [...this.lastTools, ...this.mcpManager.getTools()],
+      tools: [
+        ...this.runtimeTools.map((t) => ({ name: t.name, description: t.description })),
+        ...this.mcpManager.getTools(),
+      ] as import('./micro-router').MicroRouterContext['tools'],
     };
   }
 
@@ -983,7 +916,7 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     const count = await this.skillRegistry.reloadCreatorWorkspaceSkills();
     clearMicroRouteCache();
     if (this.llm && this.lastTools.length > 0) {
-      this.compileGraph(this.lastTools);
+      this.refreshRuntimeTools(this.lastTools);
     }
     console.log(`[ReAct Agent] Reloaded ${count} creator workspace skill(s).`);
     return count;
@@ -1023,29 +956,42 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
         symbolsInHuman: symStats.inHuman || undefined,
         symbolsRequested: symStats.requested || undefined,
       });
-      const result = await this.graph.invoke({
+      const result = await runTaoLoop({
+        client: this.llm!,
+        plainClient: this.llm!,
+        tools: this.runtimeTools,
         messages: [
-          new SystemMessage(systemPrompt),
+          systemMessage(systemPrompt),
           ...contextMessages,
-          new HumanMessage({ content: cappedInput }),
+          userMessage(userContentFromInput(cappedInput)),
         ],
-      }, { recursionLimit: 100 });
+        label: 'react-agent',
+        modelId: this.activeModelId,
+        scopeId: buildChatScopeId(chatId),
+      });
 
       const lastMessage = result.messages[result.messages.length - 1];
-      const content = lastMessage.content.toString();
+      const content = result.finalText || messageContentToString(lastMessage?.content);
 
-      // Check for tool calls (route_to_skill)
-      if (lastMessage.tool_calls?.length) {
-        for (const tc of lastMessage.tool_calls) {
+      if (result.endedReason === 'skill_handoff' || content.includes('[Sub-Agent Result from')) {
+        await this.appendToHistory(chatId, input, content);
+        return content;
+      }
+
+      const assistantWithTools = [...result.messages]
+        .reverse()
+        .find((m) => m.role === 'assistant' && m.toolCalls?.some((tc) => tc.name === 'route_to_skill'));
+      if (assistantWithTools?.toolCalls?.length) {
+        for (const tc of assistantWithTools.toolCalls) {
           if (tc.name === 'route_to_skill') {
-            const skill = this.skillRegistry.getSkill(tc.args.skillId);
+            const skillId = String(tc.args.skillId ?? '');
+            const skill = this.skillRegistry.getSkill(skillId);
             if (skill?.enabled) {
               console.log(`[ReAct Agent] Routing to skill: ${skill.name}`);
-              const skillGraph = this.agentFactory.getAgent(skill);
-              const skillResult = await skillGraph.invoke({
-                messages: [new SystemMessage(skill.systemPrompt), new HumanMessage({ content: tc.args.query })],
-              });
-              const skillResponse = skillResult.messages[skillResult.messages.length - 1].content.toString();
+              let skillResponse = '';
+              for await (const ev of this.agentFactory.runStream(skill, String(tc.args.query ?? ''))) {
+                if (ev.type === 'text_done') skillResponse = ev.data;
+              }
               await this.appendToHistory(chatId, input, skillResponse);
               return skillResponse;
             }
@@ -1174,13 +1120,13 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
         console.log(`[ReAct Agent] Macro matched: ${macro.name}`);
         yield { type: 'thinking', data: `Executing learned Macro shortcut: ${macro.name}…` };
 
-        const allCoreTools = [...(this.lastTools || []), ...this.getSystemTools()];
+        const allCoreTools = this.runtimeTools;
         for (const step of macro.steps) {
           const tool = allCoreTools.find(t => t.name === step.tool);
           if (tool) {
             yield { type: 'thinking', data: `Macro executing step: [${step.tool}]…` };
             try {
-              await tool.invoke(step.args);
+              await tool.execute(step.args as Record<string, unknown>);
             } catch (e: any) {
               console.warn(`[Macro Execution] Step failed: ${e.message}`);
             }
@@ -1277,110 +1223,77 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
           symbolsRequested: symStats.requested || undefined,
         });
 
-        const inputMessages = {
-          messages: [
-            new SystemMessage(sysForRun),
-            ...contextMessages,
-            new HumanMessage({ content: processedInput }),
-          ],
-        };
+        const loopMessages: Message[] = [
+          systemMessage(sysForRun),
+          ...contextMessages,
+          userMessage(userContentFromInput(processedInput)),
+        ];
 
         let fullText = '';
-        let inThinkingBlock = false;
-        let thinkingBuffer = '';
-        const toolTrace: Array<{ tool: string; args: any }> = [];
-
-        debugLogPromptMessages('Input messages', inputMessages.messages);
+        const toolTrace: Array<{ tool: string; args?: Record<string, unknown> }> = [];
         let toolWasCalled = false;
-        const stream = this.graph.streamEvents(inputMessages, { version: 'v2', recursionLimit: 100 });
+
+        if (debugPromptDumpEnabled()) {
+          console.log('[ReAct Agent] Input messages:', { count: loopMessages.length });
+        }
 
         agentEvents.emit('model:inference_start', { chatId, agentId, modelId: this.activeModelId });
 
-        for await (const event of consumeGraphStreamEvents<{ event?: string; name?: string; data?: any }>(stream, { signal })) {
-          if (event.event === 'on_chat_model_stream') {
-            const chunk = event.data?.chunk;
-
-            if (chunk?.additional_kwargs?.reasoning_content) {
-              const thought = chunk.additional_kwargs.reasoning_content.toString();
-              if (thought) {
-                // agentEvents.emit('agent:thinking', { chatId, agentId, message: thought.substring(0, 100) });
-                yield { type: 'thinking', data: thought };
-              }
+        for await (const event of streamTaoLoop({
+          client: this.llm!,
+          plainClient: this.llm!,
+          tools: this.runtimeTools,
+          messages: loopMessages,
+          label: 'react-agent',
+          modelId: this.activeModelId,
+          signal,
+          scopeId,
+        })) {
+          if (event.type === 'thinking') {
+            if (event.data !== 'Processing…') {
+              yield { type: 'thinking', data: event.data };
             }
-
-            const hasToolCallChunks = chunk?.tool_call_chunks?.length > 0;
-            if (chunk?.content && !hasToolCallChunks) {
-              let token = chunk.content.toString();
-
-              if (token.includes('<think>')) {
-                inThinkingBlock = true;
-                token = token.replace('<think>', '');
-              }
-
-              if (inThinkingBlock) {
-                if (token.includes('</think>')) {
-                  inThinkingBlock = false;
-                  const parts = token.split('</think>');
-                  thinkingBuffer += parts[0];
-                  // agentEvents.emit('agent:thinking', { chatId, agentId, message: thinkingBuffer.substring(0, 100) });
-                  yield { type: 'thinking', data: thinkingBuffer.trim() };
-                  thinkingBuffer = '';
-                  if (parts[1]) {
-                    fullText += parts[1];
-                    // agentEvents.emit('model:token', { chatId, agentId, token: parts[1] });
-                    yield { type: 'token', data: parts[1] };
-                  }
-                } else {
-                  thinkingBuffer += token;
-                  if (thinkingBuffer.length % 20 === 0) {
-                    yield { type: 'thinking', data: thinkingBuffer.substring(Math.max(0, thinkingBuffer.length - 80)).trim() + '...' };
-                  }
-                }
+          } else if (event.type === 'token') {
+            for (const streamEv of this.parseAssistantToken(event.data)) {
+              if (streamEv.type === 'thinking') {
+                yield streamEv;
               } else {
-                if (token) {
-                  fullText += token;
-                  // agentEvents.emit('model:token', { chatId, agentId, token: token.substring(0, 20) });
-                  yield { type: 'token', data: token };
-                }
+                fullText += streamEv.data;
+                yield streamEv;
               }
             }
-          } else if (event.event === 'on_tool_start') {
-            const modelId = this.activeModelId;
-            const toolName = event.name || 'unknown';
-            const toolStartTime = Date.now();
-            console.log(`[Agent: ReAct] [Model: ${modelId}] Tool call: ${toolName}`);
-
-            agentEvents.emit('tool:started', {
-              chatId,
-              agentId,
-              toolName,
-              toolArgs: event.data?.input,
-            });
-
-            toolTrace.push({ tool: toolName, args: event.data?.input });
-            if (event.name === 'route_to_skill') {
-              const toolInput = event.data?.input;
-              const skill = this.skillRegistry.getSkill(toolInput?.skillId);
-              if (skill?.enabled) {
-                console.log(`[Agent: Skill (${skill.name})] Routing to specialized skill natively...`);
-                agentEvents.emit('skill:routing', { chatId, agentId, skillId: skill.id, skillName: skill.name });
-                yield { type: 'thinking', data: `Delegating to Sub-Agent: ${skill.name}…` };
-              }
+          } else if (event.type === 'tool_call') {
+            const toolName = event.data;
+            console.log(`[Agent: ReAct] [Model: ${this.activeModelId}] Tool call: ${toolName}`);
+            agentEvents.emit('tool:started', { chatId, agentId, toolName });
+            toolTrace.push({ tool: toolName, args: {} });
+            if (toolName === 'route_to_skill') {
+              yield { type: 'thinking', data: 'Delegating to specialized skill…' };
             }
-
-            if (fullText) fullText = '';
+            fullText = '';
             yield { type: 'tool_call', data: toolName };
             toolWasCalled = true;
-          } else if (event.event === 'on_tool_end') {
-            const toolName = event.name || 'unknown';
+          } else if (event.type === 'tool_result') {
             agentEvents.emit('tool:completed', {
               chatId,
               agentId,
-              toolName,
-              toolResult: (event.data?.output || '').toString().substring(0, 200),
+              toolName: event.data.name,
+              toolResult: event.data.output,
             });
+          } else if (event.type === 'done') {
+            if (event.data.finalText && !fullText.trim()) {
+              for (const streamEv of this.parseAssistantToken(event.data.finalText)) {
+                if (streamEv.type === 'token') {
+                  fullText += streamEv.data;
+                  yield streamEv;
+                } else {
+                  yield streamEv;
+                }
+              }
+            }
+          } else if (event.type === 'error') {
+            throw new Error(event.data);
           }
-
         }
 
         if (signal?.aborted) {
@@ -1514,7 +1427,10 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
             }
             if (cfg.autoMacroCreate && toolTrace.length > 0) {
               const inputStr = typeof input === 'string' ? input : '[audio input]';
-              learningEngine.extractMacroFromSuccess(inputStr, toolTrace).catch((e: any) => {
+              learningEngine.extractMacroFromSuccess(
+                inputStr,
+                toolTrace.map((t) => ({ tool: t.tool, args: t.args ?? {} })),
+              ).catch((e: any) => {
                 console.error('[React Agent] Macro extraction failed:', e);
               });
             }
@@ -1527,17 +1443,18 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
                     : Array.isArray(input)
                       ? String((input as Array<{ text?: string }>).find((p) => p.text)?.text ?? '[audio]')
                       : '[audio]';
-                const res = await fastModel.invoke([
-                  new SystemMessage(
-                    'Write one dense paragraph (max 800 chars) of session memory: facts, preferences, open threads.',
-                  ),
-                  new HumanMessage({
-                    content: `User: ${humanContent}\nAssistant: ${removeSpokenSummaryBlock(fullText)}`,
-                  }),
-                ]);
+                const res = await fastModel.complete({
+                  messages: [
+                    systemMessage(
+                      'Write one dense paragraph (max 800 chars) of session memory: facts, preferences, open threads.',
+                    ),
+                    userMessage(`User: ${humanContent}\nAssistant: ${removeSpokenSummaryBlock(fullText)}`),
+                  ],
+                  label: 'react-agent:session-memory',
+                });
                 await sessionContextService.saveMemoryState(
                   runContext.scopeId,
-                  res.content.toString().trim(),
+                  res.content.trim(),
                 );
               } catch {
                 /* non-critical */
@@ -1574,7 +1491,7 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
 
   private async resolveRunModel(
     modelId: string,
-  ): Promise<{ llm: BaseChatModel; resolvedModelId: string }> {
+  ): Promise<{ llm: LlmClient; resolvedModelId: string }> {
     const id = modelId || DEFAULT_ORG_MODEL_ID;
     if (id === DEFAULT_ORG_MODEL_ID) {
       const master = modelRegistry.getMaster();
@@ -1627,7 +1544,6 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     }
     let fullText = '';
     let orchestrationComplete = false;
-    let skillRouteActive = false;
     try {
       const resolved = await this.resolveRunModel(modelId);
       resolvedModelId = resolved.resolvedModelId;
@@ -1650,12 +1566,17 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
             await import('../skills/tool-resolver')
           ).resolveToolsByIds(['deliver_to_channel', 'list_channels'])
         : [];
-      const runTools = options.orgTaskId
+      const extraTools = options.orgTaskId
         ? [...orgTools, ...fileTools, ...channelTools]
-        : [...this.lastTools, ...orgTools, ...fileTools];
-      const runGraph = this.compileGraph(runTools, resolved.llm, skillAllowlist);
-      if (!runGraph) {
-        yield { type: 'error', data: 'Agent graph not ready for orchestration run.' };
+        : [...orgTools, ...fileTools];
+      const loopTools = options.orgTaskId
+        ? softenTools([
+            ...extraTools,
+            ...this.getSystemTools(skillAllowlist),
+          ])
+        : this.buildRunTools([...this.lastTools, ...extraTools], skillAllowlist);
+      if (!resolved.llm) {
+        yield { type: 'error', data: 'Agent not ready for orchestration run.' };
         return;
       }
       const inputStr = typeof input === 'string' ? input : '[orchestration input]';
@@ -1672,63 +1593,70 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
       }
       if (signal?.aborted) return;
       await historyManager.loadChat(chatId);
-      const inputMessages = {
-        messages: [
-          new SystemMessage(systemPrompt),
-          new HumanMessage({ content: input }),
-        ],
-      };
+      const scopeId = platformRunCtx?.scopeId ?? buildOrgScopeId(
+        options.orgRootTaskId ?? options.orgTaskId!,
+        options.orgTaskId!,
+      );
       agentEvents.emit('model:inference_start', { chatId, agentId, modelId: resolvedModelId });
-      const stream = runGraph.streamEvents(inputMessages, {
-        version: 'v2',
-        recursionLimit: 100,
+      const streamGen = streamTaoLoop({
+        client: resolved.llm,
+        plainClient: resolved.llm,
+        tools: loopTools,
+        messages: [
+          systemMessage(systemPrompt),
+          userMessage(userContentFromInput(input)),
+        ],
+        label: 'react-agent:orchestration',
+        modelId: resolvedModelId,
+        signal,
+        scopeId,
+        orgTaskId: options.orgTaskId,
       });
       const als = getAgentRunStorage();
-      const streamIterator = stream[Symbol.asyncIterator]();
-      try {
       let streamStep = runCtx
-        ? await als.run(runCtx, () => streamIterator.next())
-        : await streamIterator.next();
+        ? await als.run(runCtx, () => streamGen.next())
+        : await streamGen.next();
       while (!streamStep.done) {
         const event = streamStep.value;
         if (signal?.aborted) return;
-        if (event.event === 'on_chat_model_stream') {
-          const chunk = event.data?.chunk;
-          const hasToolCallChunks = chunk?.tool_call_chunks?.length > 0;
-          if (chunk?.content && !hasToolCallChunks) {
-            const token = chunk.content.toString();
-            if (token) {
-              fullText += token;
-              yield { type: 'token', data: token };
+        if (event.type === 'thinking') {
+          if (event.data !== 'Processing…') {
+            yield { type: 'thinking', data: event.data };
+          }
+        } else if (event.type === 'token') {
+          fullText += event.data;
+          yield { type: 'token', data: event.data };
+        } else if (event.type === 'tool_call' && options.orgTaskId) {
+          yield { type: 'tool_call', data: event.data };
+          agentEvents.emit('tool:started', { chatId, agentId, toolName: event.data });
+          console.log(`[Orchestration] Tool: ${event.data}`);
+        } else if (event.type === 'tool_result' && options.orgTaskId) {
+          const toolName = event.data.name;
+          const toolOutput = event.data.output.trim();
+          if (toolName !== 'route_to_skill' && toolOutput && runCtx) {
+            persistTaskResponse({
+              task: toTaskArtifactScope(runCtx),
+              responderId: toolName,
+              responderType: 'tool',
+              content: toolOutput,
+              agentId: runCtx.orgAgentId,
+              success: true,
+            });
+            agentEvents.emit('tool:completed', {
+              chatId,
+              agentId,
+              toolName,
+              toolResult: toolOutput.substring(0, 200),
+            });
+            if (toolName === 'web_search' || toolName === 'web_fetch') {
+              console.log(
+                `[Orchestration] Saved ${toolName} output (${toolOutput.length} chars) to task artifacts`,
+              );
             }
           }
-        } else if (event.event === 'on_tool_start' && options.orgTaskId) {
-          const toolName = event.name || 'unknown';
-          if (toolName === 'route_to_skill') {
-            skillRouteActive = true;
-          }
-          yield { type: 'tool_call', data: toolName };
-          agentEvents.emit('tool:started', { chatId, agentId, toolName });
-          console.log(`[Orchestration] Tool: ${toolName}`);
-        } else if (event.event === 'on_tool_end' && options.orgTaskId) {
-          const toolName = event.name || 'unknown';
-          const toolOutput = extractToolOutputFromEvent(event.data).trim();
-          if (toolName === 'route_to_skill') {
-            // Nested skill web_search/web_fetch bubble as on_tool_end with parent name route_to_skill.
-            // Only finish when the tool actually returned its handoff envelope.
-            const isSkillHandoff = toolOutput.includes('[Sub-Agent Result from');
-            if (!isSkillHandoff) {
-              if (skillRouteActive && toolOutput) {
-                console.log(
-                  `[Orchestration] Ignoring bubbled tool output during route_to_skill (${toolOutput.length} chars)`,
-                );
-              }
-              streamStep = runCtx
-                ? await als.run(runCtx, () => streamIterator.next())
-                : await streamIterator.next();
-              continue;
-            }
-            skillRouteActive = false;
+        } else if (event.type === 'done') {
+          if (event.data.endedReason === 'skill_handoff' && event.data.finalText.trim()) {
+            const toolOutput = event.data.finalText.trim();
             const incomplete = toolOutput.includes(SKILL_RUN_INCOMPLETE_MARKER);
             const failed =
               !incomplete &&
@@ -1758,7 +1686,7 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
               agentEvents.emit('tool:completed', {
                 chatId,
                 agentId,
-                toolName,
+                toolName: 'route_to_skill',
                 toolResult: toolOutput.substring(0, 200),
               });
               agentEvents.emit('system:log', {
@@ -1771,61 +1699,23 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
                 `[Orchestration] route_to_skill handoff (${toolOutput.length} chars) — ending run`,
               );
             }
-          } else if (toolOutput && runCtx) {
-            persistTaskResponse({
-              task: toTaskArtifactScope(runCtx),
-              responderId: toolName,
-              responderType: 'tool',
-              content: toolOutput,
-              agentId: runCtx.orgAgentId,
-              success: true,
-            });
-            agentEvents.emit('tool:completed', {
-              chatId,
-              agentId,
-              toolName,
-              toolResult: toolOutput.substring(0, 200),
-            });
-            if (toolName === 'web_search' || toolName === 'web_fetch') {
-              console.log(
-                `[Orchestration] Saved ${toolName} output (${toolOutput.length} chars) to task artifacts`,
-              );
-            }
+          } else if (event.data.finalText.trim() && !orchestrationComplete) {
+            fullText = event.data.finalText;
           }
-        } else if (event.event === 'on_chain_end' && event.name === 'agent' && !skillRouteActive) {
-          const messages = event.data?.output?.messages as Array<{ content?: unknown }> | undefined;
-          if (messages?.length) {
-            for (let i = messages.length - 1; i >= 0; i--) {
-              const content = messages[i]?.content;
-              const text =
-                typeof content === 'string'
-                  ? content
-                  : Array.isArray(content)
-                    ? content
-                        .map((block: { text?: string }) => block?.text ?? '')
-                        .join('')
-                    : '';
-              if (text.trim()) {
-                fullText = text;
-                break;
-              }
-            }
-          }
+        } else if (event.type === 'error') {
+          throw new Error(event.data);
         }
         if (orchestrationComplete) {
           break;
         }
         try {
           streamStep = runCtx
-            ? await als.run(runCtx, () => streamIterator.next())
-            : await streamIterator.next();
+            ? await als.run(runCtx, () => streamGen.next())
+            : await streamGen.next();
         } catch (streamErr: unknown) {
           if (orchestrationComplete || isInferenceInterruptError(streamErr)) break;
           throw streamErr;
         }
-      }
-      } finally {
-        await closeGraphStream(streamIterator);
       }
       agentEvents.emit('model:inference_end', { chatId, agentId, modelId: resolvedModelId });
       agentEvents.emit('agent:completed', {
@@ -1874,6 +1764,19 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
 
   // ── Error handling ─────────────────────────────────────────────────────────
 
+  private *parseAssistantToken(text: string): Generator<StreamEvent> {
+    if (!text) return;
+    if (text.includes('<think>') && text.includes('</think>')) {
+      const afterOpen = text.split('<think>');
+      if (afterOpen[0]) yield { type: 'token', data: afterOpen[0] };
+      const innerParts = afterOpen[1]?.split('</think>');
+      if (innerParts?.[0]?.trim()) yield { type: 'thinking', data: innerParts[0].trim() };
+      if (innerParts?.[1]) yield { type: 'token', data: innerParts[1] };
+      return;
+    }
+    yield { type: 'token', data: text };
+  }
+
   private handleError(error: any): string {
     const isAbort =
       error?.name === 'AbortError' ||
@@ -1886,7 +1789,7 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     console.error('[ReAct Agent] Processing failed:', error);
 
     // Check for recursion limits caused by massive loops
-    if (error.name === 'GraphRecursionError' || error.message?.includes('Recursion limit')) {
+    if (error.message?.includes('max_turns') || error.message?.includes('max turns')) {
       return "I thought very deeply about this, but I hit my multi-step processing limit. Could you simplify the request or ask me to focus on a smaller part?";
     }
 
@@ -1895,6 +1798,18 @@ Do NOT call yahoo_ohlcv, web_search, or route_to_skill for fresh data unless the
     }
     if (typeof error.message === 'string' && /XML syntax error/i.test(error.message)) {
       return 'The model emitted a malformed tool call (Ollama XML parse error). The heartbeat will retry; if this persists, try a different model or shorten prior tool output.';
+    }
+    if (
+      typeof error.message === 'string' &&
+      (/can't find closing '\}' symbol/i.test(error.message) ||
+        /can't find closing "}" symbol/i.test(error.message) ||
+        /unexpected end of JSON input/i.test(error.message))
+    ) {
+      return (
+        'Ollama could not parse a tool call (nested JSON or unescaped braces). ' +
+        'The heartbeat will retry. For workflow.json use save_default_pipeline_workflow; ' +
+        'for other JSON files use write_file with contentBase64 instead of content.'
+      );
     }
     if (
       error.message?.includes('Unsupported content type') ||

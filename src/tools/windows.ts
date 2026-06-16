@@ -1,10 +1,10 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs/promises';
-import { HumanMessage } from '@langchain/core/messages';
+import { userMessage } from '../runtime/messages';
 import { modelRouter } from '../models/model-router';
 import {
   ensureDir,
@@ -62,8 +62,16 @@ function runPowerShell(script: string, timeoutMs = 30000): Promise<string> {
   });
 }
 
-export const windowsOpenAppTool = tool(
-  async ({ appName, args }) => {
+export const windowsOpenAppTool = defineTool({
+  name: 'windows_open_app',
+    description:
+      'Open an application or file on Windows by executable name or full path. ' +
+      'For opening URLs in a browser use windows_open_url instead.',
+    schema: z.object({
+      appName: z.string().describe('Executable name (e.g. notepad, calc, explorer) or full path to the exe'),
+      args: z.string().optional().describe('Optional command-line arguments to pass to the application'),
+    }),
+  execute: async ({ appName, args }) => {
     const argsPart = args ? `-ArgumentList "${args.replace(/"/g, '`"')}"` : '';
     const script = `
       try {
@@ -75,20 +83,17 @@ export const windowsOpenAppTool = tool(
     `;
     return await runPowerShell(script, 10000);
   },
-  {
-    name: 'windows_open_app',
-    description:
-      'Open an application or file on Windows by executable name or full path. ' +
-      'For opening URLs in a browser use windows_open_url instead.',
-    schema: z.object({
-      appName: z.string().describe('Executable name (e.g. notepad, calc, explorer) or full path to the exe'),
-      args: z.string().optional().describe('Optional command-line arguments to pass to the application'),
-    }),
-  }
-);
+});
 
-export const windowsOpenUrlTool = tool(
-  async ({ url, browser, newTab }) => {
+export const windowsOpenUrlTool = defineTool({
+  name: 'windows_open_url',
+  description: 'Open a URL in a web browser on Windows.',
+  schema: z.object({
+    url: z.string().describe('The full URL to open'),
+    browser: z.enum(['chrome', 'firefox', 'edge', 'default']).optional().default('default'),
+    newTab: z.boolean().optional().default(true),
+  }),
+  execute: async ({ url, browser, newTab }) => {
     const browserMap: Record<string, string> = {
       chrome: 'chrome.exe',
       firefox: 'firefox.exe',
@@ -129,19 +134,15 @@ export const windowsOpenUrlTool = tool(
     }
     return await runPowerShell(script, 15000);
   },
-  {
-    name: 'windows_open_url',
-    description: 'Open a URL in a web browser on Windows.',
-    schema: z.object({
-      url: z.string().describe('The full URL to open'),
-      browser: z.enum(['chrome', 'firefox', 'edge', 'default']).optional().default('default'),
-      newTab: z.boolean().optional().default(true),
-    }),
-  }
-);
+});
 
-export const windowsFocusWindowTool = tool(
-  async ({ titleContains }) => {
+export const windowsFocusWindowTool = defineTool({
+  name: 'windows_focus_window',
+  description: 'Bring an open window to the foreground.',
+  schema: z.object({
+    titleContains: z.string().describe('Partial window title to search for'),
+  }),
+  execute: async ({ titleContains }) => {
     const safe = titleContains.replace(/'/g, "''");
     const script = `
       Add-Type @"
@@ -164,17 +165,15 @@ export const windowsFocusWindowTool = tool(
     `;
     return await runPowerShell(script, 10000);
   },
-  {
-    name: 'windows_focus_window',
-    description: 'Bring an open window to the foreground.',
-    schema: z.object({
-      titleContains: z.string().describe('Partial window title to search for'),
-    }),
-  }
-);
+});
 
-export const windowsPressKeyTool = tool(
-  async ({ keys }) => {
+export const windowsPressKeyTool = defineTool({
+  name: 'windows_press_key',
+  description: 'Simulate pressing keys on the Windows keyboard.',
+  schema: z.object({
+    keys: z.string().describe('Key string to send (SendKeys format)'),
+  }),
+  execute: async ({ keys }) => {
     const script = `
       Add-Type -AssemblyName System.Windows.Forms
       [System.Windows.Forms.SendKeys]::SendWait('${keys}')
@@ -182,17 +181,13 @@ export const windowsPressKeyTool = tool(
     `;
     return await runPowerShell(script, 5000);
   },
-  {
-    name: 'windows_press_key',
-    description: 'Simulate pressing keys on the Windows keyboard.',
-    schema: z.object({
-      keys: z.string().describe('Key string to send (SendKeys format)'),
-    }),
-  }
-);
+});
 
-export const windowsTakeScreenshotTool = tool(
-  async () => {
+export const windowsTakeScreenshotTool = defineTool({
+  name: 'windows_take_screenshot',
+  description: 'Take a screenshot of the main Windows display. Saves to workspace/outputs/screenshots/.',
+  schema: z.object({}),
+  execute: async () => {
     await ensureDir(SCREENSHOTS_DIR);
     const filename = `screenshot_${Date.now()}.png`;
     const filepath = path.join(SCREENSHOTS_DIR, filename);
@@ -214,16 +209,17 @@ export const windowsTakeScreenshotTool = tool(
     `;
     return await runPowerShell(script, 15000);
   },
-  {
-    name: 'windows_take_screenshot',
-    description: 'Take a screenshot of the main Windows display. Saves to workspace/outputs/screenshots/.',
-    schema: z.object({}),
-  }
-);
+});
 
 
-export const windowsReadScreenTool = tool(
-  async ({ query, expectedFormat }) => {
+export const windowsReadScreenTool = defineTool({
+  name: 'windows_read_screen',
+  description: 'Intercept and analyze the current Windows screen using Vision AI.',
+  schema: z.object({
+    query: z.string().optional().describe('Specific instruction (e.g. "Get exact X,Y coordinates of the Submit button")'),
+    expectedFormat: z.enum(['text', 'json', 'html', 'markdown', 'xml', 'summary']).optional().default('text').describe('The desired output structure from the Vision AI.'),
+  }),
+  execute: async ({ query, expectedFormat }) => {
     await ensureDir(TEMP_DIR);
     const filename = `read_screen_${Date.now()}.jpg`;
     const filepath = path.join(TEMP_DIR, filename);
@@ -265,32 +261,28 @@ export const windowsReadScreenTool = tool(
         formatInstruction = " Provide a brief, high-level summary of the screen state. Ignore exact coordinates and ignore minor details.";
       }
 
-      const response = await visionModel.invoke([
-        new HumanMessage({
-          content: [
+      const response = await visionModel.complete({
+        messages: [
+          userMessage([
             { type: 'text', text: baseQuery + formatInstruction },
-            { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}` } }
-          ]
-        })
-      ]);
+            { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64}` } },
+          ]),
+        ],
+        label: 'windows:vision-screen',
+      });
       await fs.unlink(filepath).catch(() => {});
-      return response.content.toString();
+      return response.content;
     } catch (e: any) {
       return `Vision interpretation failed: ${e.message}`;
     }
   },
-  {
-    name: 'windows_read_screen',
-    description: 'Intercept and analyze the current Windows screen using Vision AI.',
-    schema: z.object({
-      query: z.string().optional().describe('Specific instruction (e.g. "Get exact X,Y coordinates of the Submit button")'),
-      expectedFormat: z.enum(['text', 'json', 'html', 'markdown', 'xml', 'summary']).optional().default('text').describe('The desired output structure from the Vision AI.'),
-    }),
-  }
-);
+});
 
-export const windowsGetActiveWindowTool = tool(
-  async () => {
+export const windowsGetActiveWindowTool = defineTool({
+  name: 'windows_get_active_window',
+  description: 'Get the title of the foreground window.',
+  schema: z.object({}),
+  execute: async () => {
     const script = `
       Add-Type @"
         using System;
@@ -310,15 +302,13 @@ export const windowsGetActiveWindowTool = tool(
     `;
     return await runPowerShell(script, 10000);
   },
-  {
-    name: 'windows_get_active_window',
-    description: 'Get the title of the foreground window.',
-    schema: z.object({}),
-  }
-);
+});
 
-export const windowsTypeTool = tool(
-  async ({ text }) => {
+export const windowsTypeTool = defineTool({
+  name: 'windows_type_text',
+  description: 'Type plain text exactly as provided. Safely escapes all special characters.',
+  schema: z.object({ text: z.string() }),
+  execute: async ({ text }) => {
     // Correctly escape +, ^, %, ~, (, ), {, and } for SendKeys
     const escaped = text.replace(/([+^%~(){}\[\]])/g, '{$1}');
     const script = `
@@ -328,15 +318,13 @@ export const windowsTypeTool = tool(
     `;
     return await runPowerShell(script, 10000);
   },
-  {
-    name: 'windows_type_text',
-    description: 'Type plain text exactly as provided. Safely escapes all special characters.',
-    schema: z.object({ text: z.string() }),
-  }
-);
+});
 
-export const windowsMouseMoveTool = tool(
-  async ({ x, y }) => {
+export const windowsMouseMoveTool = defineTool({
+  name: 'windows_mouse_move',
+  description: 'Move mouse to X/Y coordinates.',
+  schema: z.object({ x: z.number(), y: z.number() }),
+  execute: async ({ x, y }) => {
     const script = `
       Add-Type @"
         using System;
@@ -350,15 +338,19 @@ export const windowsMouseMoveTool = tool(
     `;
     return await runPowerShell(script, 5000);
   },
-  {
-    name: 'windows_mouse_move',
-    description: 'Move mouse to X/Y coordinates.',
-    schema: z.object({ x: z.number(), y: z.number() }),
-  }
-);
+});
 
-export const windowsMouseClickTool = tool(
-  async ({ button, doubleClick, x, y, verifyVisualChange }) => {
+export const windowsMouseClickTool = defineTool({
+  name: 'windows_mouse_click',
+  description: 'Click at a specific screen position (or current position if x/y omitted).',
+  schema: z.object({ 
+    button: z.enum(['left', 'right']).optional().default('left'), 
+    doubleClick: z.boolean().optional().default(false),
+    x: z.number().optional().describe('X coordinate to click on'),
+    y: z.number().optional().describe('Y coordinate to click on'),
+    verifyVisualChange: z.boolean().optional().default(false).describe('Set true to verify if UI changed after clicking. Returns Action_Failed if static.')
+  }),
+  execute: async ({ button, doubleClick, x, y, verifyVisualChange }) => {
     const script = `
       Add-Type @"
         using System;
@@ -421,21 +413,13 @@ export const windowsMouseClickTool = tool(
     `;
     return await runPowerShell(script, 5000);
   },
-  {
-    name: 'windows_mouse_click',
-    description: 'Click at a specific screen position (or current position if x/y omitted).',
-    schema: z.object({ 
-      button: z.enum(['left', 'right']).optional().default('left'), 
-      doubleClick: z.boolean().optional().default(false),
-      x: z.number().optional().describe('X coordinate to click on'),
-      y: z.number().optional().describe('Y coordinate to click on'),
-      verifyVisualChange: z.boolean().optional().default(false).describe('Set true to verify if UI changed after clicking. Returns Action_Failed if static.')
-    }),
-  }
-);
+});
 
-export const windowsMousePositionTool = tool(
-  async () => {
+export const windowsMousePositionTool = defineTool({
+  name: 'windows_get_mouse_position',
+  description: 'Get current mouse position.',
+  schema: z.object({}),
+  execute: async () => {
     const script = `
       Add-Type -AssemblyName System.Windows.Forms
       $pos = [System.Windows.Forms.Cursor]::Position
@@ -443,41 +427,35 @@ export const windowsMousePositionTool = tool(
     `;
     return await runPowerShell(script, 5000);
   },
-  {
-    name: 'windows_get_mouse_position',
-    description: 'Get current mouse position.',
-    schema: z.object({}),
-  }
-);
+});
 
-export const windowsListDirectoryTool = tool(
-  async ({ dirPath }) => {
+export const windowsListDirectoryTool = defineTool({
+  name: 'windows_list_directory',
+  description: 'List files in a directory.',
+  schema: z.object({ dirPath: z.string() }),
+  execute: async ({ dirPath }) => {
     try {
       const files = await fs.readdir(dirPath, { withFileTypes: true });
       return files.map(f => `${f.isDirectory() ? '[DIR]' : '[FILE]'} ${f.name}`).join('\n') || 'Empty.';
     } catch (e: any) { return `Error: ${e.message}`; }
   },
-  {
-    name: 'windows_list_directory',
-    description: 'List files in a directory.',
-    schema: z.object({ dirPath: z.string() }),
-  }
-);
+});
 
-export const windowsReadFileTool = tool(
-  async ({ filePath }) => {
+export const windowsReadFileTool = defineTool({
+  name: 'windows_read_file',
+  description: 'Read a file.',
+  schema: z.object({ filePath: z.string() }),
+  execute: async ({ filePath }) => {
     try { return await fs.readFile(filePath, 'utf-8'); }
     catch (e: any) { return `Error: ${e.message}`; }
   },
-  {
-    name: 'windows_read_file',
-    description: 'Read a file.',
-    schema: z.object({ filePath: z.string() }),
-  }
-);
+});
 
-export const windowsWriteFileTool = tool(
-  async ({ filePath, content }) => {
+export const windowsWriteFileTool = defineTool({
+  name: 'windows_write_file',
+  description: 'Write to a file.',
+  schema: z.object({ filePath: z.string(), content: z.string() }),
+  execute: async ({ filePath, content }) => {
     try {
       await ensureParentDir(filePath);
       await fs.writeFile(filePath, content, 'utf-8');
@@ -485,15 +463,13 @@ export const windowsWriteFileTool = tool(
     }
     catch (e: any) { return `Error: ${e.message}`; }
   },
-  {
-    name: 'windows_write_file',
-    description: 'Write to a file.',
-    schema: z.object({ filePath: z.string(), content: z.string() }),
-  }
-);
+});
 
-export const windowsCheckProcessTool = tool(
-  async ({ processName }) => {
+export const windowsCheckProcessTool = defineTool({
+  name: 'windows_check_process',
+  description: 'Check if a process is running.',
+  schema: z.object({ processName: z.string() }),
+  execute: async ({ processName }) => {
     const script = `
       $p = Get-Process -Name "${processName}" -ErrorAction SilentlyContinue
       if ($p) { Write-Output (ConvertTo-Json @{ running=$true; processes=@($p | Select-Object Id, Name, MainWindowTitle) } -Compress) }
@@ -501,15 +477,13 @@ export const windowsCheckProcessTool = tool(
     `;
     return await runPowerShell(script, 8000);
   },
-  {
-    name: 'windows_check_process',
-    description: 'Check if a process is running.',
-    schema: z.object({ processName: z.string() }),
-  }
-);
+});
 
-export const windowsListWindowsTool = tool(
-  async ({ filter }) => {
+export const windowsListWindowsTool = defineTool({
+  name: 'windows_list_windows',
+  description: 'List open windows.',
+  schema: z.object({ filter: z.string().optional() }),
+  execute: async ({ filter }) => {
     const script = `
       $w = Get-Process | Where-Object { $_.MainWindowTitle -ne '' }
       if ("${filter}") { $w = $w | Where-Object { $_.MainWindowTitle -like '*${filter}*' } }
@@ -517,15 +491,13 @@ export const windowsListWindowsTool = tool(
     `;
     return await runPowerShell(script, 8000);
   },
-  {
-    name: 'windows_list_windows',
-    description: 'List open windows.',
-    schema: z.object({ filter: z.string().optional() }),
-  }
-);
+});
 
-export const windowsBrowserStatusTool = tool(
-  async ({ browser }) => {
+export const windowsBrowserStatusTool = defineTool({
+  name: 'windows_browser_status',
+  description: 'Check browser status.',
+  schema: z.object({ browser: z.enum(['chrome', 'edge']) }),
+  execute: async ({ browser }) => {
     const proc = browser === 'edge' ? 'msedge' : 'chrome';
     const script = `
       $p = Get-Process -Name "${proc}" -ErrorAction SilentlyContinue
@@ -534,52 +506,44 @@ export const windowsBrowserStatusTool = tool(
     `;
     return await runPowerShell(script, 10000);
   },
-  {
-    name: 'windows_browser_status',
-    description: 'Check browser status.',
-    schema: z.object({ browser: z.enum(['chrome', 'edge']) }),
-  }
-);
+});
 
-export const windowsBrowserNavigateTool = tool(
-  async ({ url, browser }) => {
+export const windowsBrowserNavigateTool = defineTool({
+  name: 'windows_browser_navigate',
+  description: 'Navigate to a URL.',
+  schema: z.object({ url: z.string(), browser: z.enum(['chrome', 'edge']) }),
+  execute: async ({ url, browser }) => {
     const exe = browser === 'edge' ? 'msedge.exe' : 'chrome.exe';
     const script = `Start-Process "${exe}" -ArgumentList "${url}"; Write-Output "Navigated."`;
     return await runPowerShell(script, 10000);
   },
-  {
-    name: 'windows_browser_navigate',
-    description: 'Navigate to a URL.',
-    schema: z.object({ url: z.string(), browser: z.enum(['chrome', 'edge']) }),
-  }
-);
+});
 
-export const windowsFindAppTool = tool(
-  async ({ name }) => {
+export const windowsFindAppTool = defineTool({
+  name: 'windows_find_app',
+  description: 'Find an app by name.',
+  schema: z.object({ name: z.string() }),
+  execute: async ({ name }) => {
     const script = `Get-StartApps | Where-Object { $_.Name -like "*${name}*" } | Select-Object Name, AppID | ConvertTo-Json -Compress`;
     return await runPowerShell(script, 10000);
   },
-  {
-    name: 'windows_find_app',
-    description: 'Find an app by name.',
-    schema: z.object({ name: z.string() }),
-  }
-);
+});
 
-export const windowsListAppsTool = tool(
-  async ({ filter }) => {
+export const windowsListAppsTool = defineTool({
+  name: 'windows_list_apps',
+  description: 'List installed apps.',
+  schema: z.object({ filter: z.string().optional() }),
+  execute: async ({ filter }) => {
     const script = `Get-StartApps | Where-Object { $_.Name -like "*${filter}*" } | Select-Object Name | ConvertTo-Json -Compress`;
     return await runPowerShell(script, 10000);
   },
-  {
-    name: 'windows_list_apps',
-    description: 'List installed apps.',
-    schema: z.object({ filter: z.string().optional() }),
-  }
-);
+});
 
-export const windowsSmartOpenTool = tool(
-  async ({ name }) => {
+export const windowsSmartOpenTool = defineTool({
+  name: 'windows_smart_open',
+  description: 'Intelligently open an app by name.',
+  schema: z.object({ name: z.string() }),
+  execute: async ({ name }) => {
     const script = `
       $app = Get-StartApps | Where-Object { $_.Name -like "*${name}*" } | Select-Object -First 1
       if ($app) { Start-Process "shell:AppsFolder\\$($app.AppID)"; Write-Output "Opened $($app.Name)" }
@@ -587,15 +551,13 @@ export const windowsSmartOpenTool = tool(
     `;
     return await runPowerShell(script, 10000);
   },
-  {
-    name: 'windows_smart_open',
-    description: 'Intelligently open an app by name.',
-    schema: z.object({ name: z.string() }),
-  }
-);
+});
 
-export const windowsSemanticSearchTool = tool(
-  async ({ elementName }) => {
+export const windowsSemanticSearchTool = defineTool({
+  name: 'windows_semantic_search',
+  description: 'Fallback search: Query the Windows UI tree directly for an exact element Name/Label to get valid X,Y coordinates. Use if vision clicks fail.',
+  schema: z.object({ elementName: z.string().describe('Exact or partial name of the UI element') }),
+  execute: async ({ elementName }) => {
     const script = `
       Add-Type -AssemblyName UIAutomationClient
       Add-Type -AssemblyName UIAutomationTypes
@@ -617,15 +579,13 @@ export const windowsSemanticSearchTool = tool(
     `;
     return await runPowerShell(script, 15000);
   },
-  {
-    name: 'windows_semantic_search',
-    description: 'Fallback search: Query the Windows UI tree directly for an exact element Name/Label to get valid X,Y coordinates. Use if vision clicks fail.',
-    schema: z.object({ elementName: z.string().describe('Exact or partial name of the UI element') }),
-  }
-);
+});
 
-export const windowsJanitorTool = tool(
-  async () => {
+export const windowsJanitorTool = defineTool({
+  name: 'windows_close_obstruction',
+  description: 'The Janitor Protocol: Close an unexpected or obstructive pop-up/window by sending Alt+F4.',
+  schema: z.object({}),
+  execute: async () => {
     const script = `
       Add-Type -AssemblyName System.Windows.Forms
       [System.Windows.Forms.SendKeys]::SendWait('%{F4}')
@@ -633,12 +593,7 @@ export const windowsJanitorTool = tool(
     `;
     return await runPowerShell(script, 5000);
   },
-  {
-    name: 'windows_close_obstruction',
-    description: 'The Janitor Protocol: Close an unexpected or obstructive pop-up/window by sending Alt+F4.',
-    schema: z.object({}),
-  }
-);
+});
 
 export const allWindowsTools: any[] = [
   windowsOpenAppTool,

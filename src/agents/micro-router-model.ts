@@ -1,4 +1,4 @@
-import { HumanMessage } from '@langchain/core/messages';
+import { userMessage } from '../runtime/messages';
 import { configManager } from '../config/index';
 import { isLocalProvider, warmLocalModel } from '../models/local-model-lifecycle';
 import { modelRouter } from '../models/model-router';
@@ -49,7 +49,7 @@ export async function warmMicroRouterModel(force = false): Promise<boolean> {
     }
     const llm =
       (await modelRouter.getById(config.id)) ?? (await modelRouter.getModel('summarize'));
-    await llm.invoke([new HumanMessage({ content: 'hi' })]);
+    await llm.complete({ messages: [userMessage('hi')], label: 'micro-router:warmup' });
     lastWarmedModelId = config.id;
     console.log(`[MicroRouter] Route model warm: ${config.id} (keep_alive)`);
     return true;

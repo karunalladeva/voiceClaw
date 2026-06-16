@@ -1,44 +1,43 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import * as os from 'os';
 import { BaseSkill, SkillDefinition } from './base-skill';
 
 // ── Tools ──────────────────────────────────────────────────────────────────
 
-const listEnvTool = tool(
-  async () => {
+const listEnvTool = defineTool({
+  name: 'list_env_vars',
+    description: 'List all OS environment variables available to the server process.',
+    schema: z.object({}),
+  execute: async () => {
     const env = process.env;
     const lines = Object.entries(env)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([k, v]) => `${k}=${v}`);
     return `Found ${lines.length} environment variables:\n${lines.join('\n')}`;
   },
-  {
-    name: 'list_env_vars',
-    description: 'List all OS environment variables available to the server process.',
-    schema: z.object({}),
-  }
-);
+});
 
-const getEnvTool = tool(
-  async ({ name }) => {
+const getEnvTool = defineTool({
+  name: 'get_env_var',
+    description: 'Get the value of a specific environment variable by name.',
+    schema: z.object({
+      name: z.string().describe('The environment variable name (case-sensitive on Linux/macOS)'),
+    }),
+  execute: async ({ name }) => {
     const value = process.env[name];
     if (value === undefined) {
       return `Environment variable "${name}" is not set.`;
     }
     return `${name}=${value}`;
   },
-  {
-    name: 'get_env_var',
-    description: 'Get the value of a specific environment variable by name.',
-    schema: z.object({
-      name: z.string().describe('The environment variable name (case-sensitive on Linux/macOS)'),
-    }),
-  }
-);
+});
 
-const getSystemInfoTool = tool(
-  async () => {
+const getSystemInfoTool = defineTool({
+  name: 'get_system_info',
+    description: 'Get general OS and system information: platform, architecture, memory, CPU count, uptime.',
+    schema: z.object({}),
+  execute: async () => {
     return JSON.stringify({
       platform: os.platform(),
       arch: os.arch(),
@@ -54,15 +53,15 @@ const getSystemInfoTool = tool(
       cwd: process.cwd(),
     }, null, 2);
   },
-  {
-    name: 'get_system_info',
-    description: 'Get general OS and system information: platform, architecture, memory, CPU count, uptime.',
-    schema: z.object({}),
-  }
-);
+});
 
-const searchEnvTool = tool(
-  async ({ query }) => {
+const searchEnvTool = defineTool({
+  name: 'search_env_vars',
+    description: 'Search environment variables by name or value substring.',
+    schema: z.object({
+      query: z.string().describe('Case-insensitive search term to match against variable names or values'),
+    }),
+  execute: async ({ query }) => {
     const q = query.toLowerCase();
     const matches = Object.entries(process.env)
       .filter(([k, v]) => k.toLowerCase().includes(q) || (v ?? '').toLowerCase().includes(q))
@@ -71,14 +70,7 @@ const searchEnvTool = tool(
     if (matches.length === 0) return `No environment variables matching "${query}" found.`;
     return `Found ${matches.length} match(es) for "${query}":\n${matches.join('\n')}`;
   },
-  {
-    name: 'search_env_vars',
-    description: 'Search environment variables by name or value substring.',
-    schema: z.object({
-      query: z.string().describe('Case-insensitive search term to match against variable names or values'),
-    }),
-  }
-);
+});
 
 // ── Skill ──────────────────────────────────────────────────────────────────
 

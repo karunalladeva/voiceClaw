@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import { withSharedStealthPage } from '../utils/playwright-pool';
 import { cache } from '../utils/cache';
@@ -392,8 +392,16 @@ function rememberSessionSearch(query: string, result: string): void {
 
 const timeRangeSchema = z.enum(['day', 'week', 'month', 'year']).optional();
 
-export const webSearchTool = tool(
-  async ({ query, timeRange }) => {
+export const webSearchTool = defineTool({
+  name: 'web_search',
+    description:
+      'Search the internet (local SearXNG when available, else configured fallbacks). ' +
+      'Returns titles, scores, dates, snippets, and URLs. Follow with web_fetch (part/focus for long pages).',
+    schema: z.object({
+      query: z.string().describe('The search query to look up on the internet.'),
+      timeRange: timeRangeSchema.describe('Optional recency filter: day, week, month, or year.'),
+    }),
+  execute: async ({ query, timeRange }) => {
     if (isSkillToolCancelled()) {
       return 'Search skipped — skill run already ended (tool limit or timeout).';
     }
@@ -438,14 +446,4 @@ export const webSearchTool = tool(
       return `Failed to search the internet: ${msg}`;
     }
   },
-  {
-    name: 'web_search',
-    description:
-      'Search the internet (local SearXNG when available, else configured fallbacks). ' +
-      'Returns titles, scores, dates, snippets, and URLs. Follow with web_fetch (part/focus for long pages).',
-    schema: z.object({
-      query: z.string().describe('The search query to look up on the internet.'),
-      timeRange: timeRangeSchema.describe('Optional recency filter: day, week, month, or year.'),
-    }),
-  },
-);
+});

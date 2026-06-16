@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import { cache } from '../utils/cache';
 import { getAgentRunContext } from '../agents/agent-run-context';
@@ -235,8 +235,21 @@ export async function runWebFetch(
   return result;
 }
 
-export const webFetchTool = tool(
-  async ({ url, part = 0, focus, query }) => {
+export const webFetchTool = defineTool({
+  name: 'web_fetch',
+    description:
+      'Fetch readable markdown from an HTML page URL (from web_search). Uses stealth HTTP + Readability. ' +
+      'For long pages use part=1,2,… or focus/query for BM25-ranked sections. Does not support PDF/binary.',
+    schema: z.object({
+      url: z.string().describe('Full HTML page URL from web_search (not .pdf or binary).'),
+      part: z.number().optional().default(0).describe('Chunk window index for long pages (0, 1, 2, …).'),
+      focus: z.string().optional().describe('Optional sub-topic for BM25 chunk ranking on this URL.'),
+      query: z
+        .string()
+        .optional()
+        .describe('Optional BM25 query override (defaults to last search or user question).'),
+    }),
+  execute: async ({ url, part = 0, focus, query }) => {
     if (isSkillToolCancelled()) {
       return 'Fetch skipped — skill run already ended (tool limit or timeout).';
     }
@@ -264,19 +277,4 @@ export const webFetchTool = tool(
       return `Failed to read the webpage. Error: ${msg}. Try the next URL from web_search results.`;
     }
   },
-  {
-    name: 'web_fetch',
-    description:
-      'Fetch readable markdown from an HTML page URL (from web_search). Uses stealth HTTP + Readability. ' +
-      'For long pages use part=1,2,… or focus/query for BM25-ranked sections. Does not support PDF/binary.',
-    schema: z.object({
-      url: z.string().describe('Full HTML page URL from web_search (not .pdf or binary).'),
-      part: z.number().optional().default(0).describe('Chunk window index for long pages (0, 1, 2, …).'),
-      focus: z.string().optional().describe('Optional sub-topic for BM25 chunk ranking on this URL.'),
-      query: z
-        .string()
-        .optional()
-        .describe('Optional BM25 query override (defaults to last search or user question).'),
-    }),
-  },
-);
+});

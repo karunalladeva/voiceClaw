@@ -1,4 +1,4 @@
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import { defineTool, type ToolDefinition } from '../../runtime/tools';
 import { z } from 'zod';
 import { configManager } from '../../config/index';
 import { readOrgArtifactAuditStamp } from '../context/artifact-audit-read';
@@ -6,8 +6,8 @@ import { sessionContextService, PointerScopeError } from '../context/session-con
 import { sessionRagIndex } from '../context/session-rag';
 import type { RunContext } from '../contracts';
 
-export function createReadPointerTool(getRunContext: () => RunContext | undefined): DynamicStructuredTool {
-  return new DynamicStructuredTool({
+export function createReadPointerTool(getRunContext: () => RunContext | undefined): ToolDefinition {
+  return defineTool({
     name: 'read_pointer',
     description:
       'Load full payload for a HandoffPointer id (UUID from pointer:… in context). ' +
@@ -16,7 +16,7 @@ export function createReadPointerTool(getRunContext: () => RunContext | undefine
       pointerId: z.string().describe('HandoffPointer UUID from pointer:… in task context'),
       maxChars: z.number().optional().describe('Optional read cap (default 120000)'),
     }),
-    func: async ({ pointerId, maxChars }) => {
+    execute: async ({ pointerId, maxChars }) => {
       const ctx = getRunContext();
       if (!ctx) return 'No active run context.';
       if (configManager.getConfig().agent?.context?.pointers?.enabled !== true) {
@@ -45,15 +45,15 @@ export function createReadPointerTool(getRunContext: () => RunContext | undefine
   });
 }
 
-export function createSearchSessionOutputsTool(getRunContext: () => RunContext | undefined): DynamicStructuredTool {
-  return new DynamicStructuredTool({
+export function createSearchSessionOutputsTool(getRunContext: () => RunContext | undefined): ToolDefinition {
+  return defineTool({
     name: 'search_session_outputs',
     description: 'BM25 search over indexed session tool/skill outputs in the current scope.',
     schema: z.object({
       query: z.string(),
       k: z.number().optional(),
     }),
-    func: async ({ query, k }) => {
+    execute: async ({ query, k }) => {
       const ctx = getRunContext();
       if (!ctx) return 'No active run context.';
       if (configManager.getConfig().agent?.context?.sessionRag?.enabled !== true) {
@@ -68,9 +68,9 @@ export function createSearchSessionOutputsTool(getRunContext: () => RunContext |
   });
 }
 
-export function buildPlatformTools(getRunContext: () => RunContext | undefined): DynamicStructuredTool[] {
+export function buildPlatformTools(getRunContext: () => RunContext | undefined): ToolDefinition[] {
   const cfg = configManager.getConfig().agent?.context;
-  const tools: DynamicStructuredTool[] = [];
+  const tools: ToolDefinition[] = [];
   if (cfg?.pointers?.enabled) tools.push(createReadPointerTool(getRunContext));
   if (cfg?.sessionRag?.enabled) tools.push(createSearchSessionOutputsTool(getRunContext));
   return tools;

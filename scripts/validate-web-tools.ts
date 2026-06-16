@@ -46,7 +46,7 @@ async function main(): Promise<void> {
   const searchStart = Date.now();
   let searchOut: string;
   try {
-    searchOut = String(await webSearchTool.invoke({ query: SEARCH_QUERY }));
+    searchOut = String(await webSearchTool.execute({ query: SEARCH_QUERY }));
   } catch (e: unknown) {
     console.error('\n[FAIL] web_search threw:', e instanceof Error ? e.message : e);
     process.exit(1);
@@ -89,7 +89,7 @@ async function main(): Promise<void> {
   const fetchStart = Date.now();
   let fetchOut: string;
   try {
-    fetchOut = String(await webFetchTool.invoke({ url: fetchUrl, part: 0 }));
+    fetchOut = String(await webFetchTool.execute({ url: fetchUrl, part: 0 }));
   } catch (e: unknown) {
     console.error('\n[FAIL] web_fetch threw:', e instanceof Error ? e.message : e);
     process.exit(1);

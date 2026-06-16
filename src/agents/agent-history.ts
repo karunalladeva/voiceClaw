@@ -1,7 +1,13 @@
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
-import { BaseMessage, HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages';
+import type { Message } from '../runtime/messages';
+import {
+  assistantMessage,
+  messageContentToString,
+  systemMessage,
+  userMessage,
+} from '../runtime/messages';
 import {
   getHistoryContextConfig,
   selectHistoryIndices,
@@ -11,6 +17,12 @@ import { removeSpokenSummaryBlock } from '../utils/speech-for-tts';
 
 function messageContentForDisplay(role: string, content: string): string {
   return role === 'ai' ? removeSpokenSummaryBlock(content) : content;
+}
+
+function recordRoleFromMessage(msg: Message): 'user' | 'ai' | 'system' {
+  if (msg.role === 'user') return 'user';
+  if (msg.role === 'system') return 'system';
+  return 'ai';
 }
 
 export interface ChatSummaryRecord {
@@ -59,7 +71,7 @@ function newSummaryId(): string {
 
 export class AgentHistoryManager {
   private chatsDir: string;
-  private activeThreads: Record<string, BaseMessage[]> = {};
+  private activeThreads: Record<string, Message[]> = {};
   private threadMeta: Record<string, ThreadMeta> = {};
 
   constructor() {
@@ -132,12 +144,12 @@ export class AgentHistoryManager {
     return { ...raw, summaries, messages };
   }
 
-  private applyThreadFromDoc(chatId: string, doc: ChatThread): BaseMessage[] {
-    const msgs: BaseMessage[] = [];
+  private applyThreadFromDoc(chatId: string, doc: ChatThread): Message[] {
+    const msgs: Message[] = [];
     for (const m of doc.messages) {
-      if (m.role === 'user') msgs.push(new HumanMessage({ content: m.content }));
-      if (m.role === 'ai') msgs.push(new AIMessage({ content: m.content }));
-      if (m.role === 'system') msgs.push(new SystemMessage({ content: m.content }));
+      if (m.role === 'user') msgs.push(userMessage(m.content));
+      if (m.role === 'ai') msgs.push(assistantMessage(m.content));
+      if (m.role === 'system') msgs.push(systemMessage(m.content));
     }
     this.activeThreads[chatId] = msgs;
     this.threadMeta[chatId] = {
@@ -166,7 +178,7 @@ export class AgentHistoryManager {
     }
   }
 
-  async loadChat(chatId: string): Promise<BaseMessage[]> {
+  async loadChat(chatId: string): Promise<Message[]> {
     if (this.activeThreads[chatId]) return this.activeThreads[chatId];
     try {
       const p = path.join(this.chatsDir, `${chatId}.json`);
@@ -195,10 +207,10 @@ export class AgentHistoryManager {
       updatedAt: Date.now(),
       summaries: meta.summaries,
       messages: thread.map((m, i) => {
-        const role = m.getType() === 'human' ? 'user' : m.getType() === 'system' ? 'system' : 'ai';
+        const role = recordRoleFromMessage(m);
         return {
           role,
-          content: messageContentForDisplay(role, m.content.toString()),
+          content: messageContentForDisplay(role, messageContentToString(m.content)),
           isSummarized: meta.isSummarized[i] ?? false,
         };
       }),
@@ -210,8 +222,10 @@ export class AgentHistoryManager {
     if (!thread) return;
     const meta = this.ensureMeta(chatId, thread.length);
     if (!title) {
-      const firstUser = thread.find((m) => m.getType() === 'human');
-      title = firstUser ? `${(firstUser.content as string).substring(0, 40)}...` : 'New Chat';
+      const firstUser = thread.find((m) => m.role === 'user');
+      title = firstUser
+        ? `${messageContentToString(firstUser.content).substring(0, 40)}...`
+        : 'New Chat';
     }
     const doc: ChatThread = {
       id: chatId,
@@ -219,10 +233,10 @@ export class AgentHistoryManager {
       updatedAt: Date.now(),
       summaries: meta.summaries,
       messages: thread.map((m, i) => {
-        const role = m.getType() === 'human' ? 'user' : m.getType() === 'system' ? 'system' : 'ai';
+        const role = recordRoleFromMessage(m);
         return {
           role,
-          content: messageContentForDisplay(role, m.content.toString()),
+          content: messageContentForDisplay(role, messageContentToString(m.content)),
           isSummarized: meta.isSummarized[i] ?? false,
         };
       }),
@@ -234,7 +248,7 @@ export class AgentHistoryManager {
     }
   }
 
-  getThread(chatId: string): BaseMessage[] {
+  getThread(chatId: string): Message[] {
     if (!this.activeThreads[chatId]) {
       this.activeThreads[chatId] = [];
       this.threadMeta[chatId] = { isSummarized: [], summaries: [] };
@@ -242,38 +256,38 @@ export class AgentHistoryManager {
     return this.activeThreads[chatId];
   }
 
-  setThread(chatId: string, msgs: BaseMessage[]) {
+  setThread(chatId: string, msgs: Message[]) {
     this.activeThreads[chatId] = msgs;
     this.ensureMeta(chatId, msgs.length);
   }
 
-  /** Keep isSummarized flags aligned after pushing to the in-memory thread. */
+  appendTurn(chatId: string, humanContent: string, aiContent: string): void {
+    const thread = this.getThread(chatId);
+    thread.push(userMessage(humanContent));
+    thread.push(assistantMessage(aiContent));
+    this.syncMessageMeta(chatId);
+  }
+
   syncMessageMeta(chatId: string): void {
     const thread = this.getThread(chatId);
     this.ensureMeta(chatId, thread.length);
   }
 
-  /**
-   * Messages for the LLM: latest summary + non-summarized turns within budget.
-   * With ranking=bm25|embedding, older turns are query-ranked; recent turns stay pinned.
-   */
   async buildLlmContextMessages(
     chatId: string,
     maxChars: number,
     query = '',
-  ): Promise<BaseMessage[]> {
+  ): Promise<Message[]> {
     await this.loadChat(chatId);
     const thread = this.getThread(chatId);
     const meta = this.ensureMeta(chatId, thread.length);
-    const selected: BaseMessage[] = [];
+    const selected: Message[] = [];
     let used = 0;
     const latest = meta.summaries[meta.summaries.length - 1];
     if (latest?.content?.trim()) {
-      const summaryMsg = new SystemMessage({
-        content: `${LEGACY_SUMMARY_PREFIX}\n${latest.content}`,
-      });
+      const summaryMsg = systemMessage(`${LEGACY_SUMMARY_PREFIX}\n${latest.content}`);
       selected.push(summaryMsg);
-      used += summaryMsg.content.toString().length;
+      used += messageContentToString(summaryMsg.content).length;
     }
     const messageBudget = maxChars - used;
     if (messageBudget <= 0) return selected;
@@ -282,10 +296,10 @@ export class AgentHistoryManager {
     for (let i = 0; i < thread.length; i++) {
       if (meta.isSummarized[i]) continue;
       const msg = thread[i];
-      if (msg.getType() === 'system' && isLegacySummaryContent(msg.content.toString())) {
+      const content = messageContentToString(msg.content);
+      if (msg.role === 'system' && isLegacySummaryContent(content)) {
         continue;
       }
-      const content = msg.content?.toString?.() ?? '';
       if (!content) continue;
       candidates.push({ index: i, message: msg, text: content, chars: content.length });
     }
@@ -297,14 +311,14 @@ export class AgentHistoryManager {
 
     if (!useSemantic || totalCandidateChars <= messageBudget) {
       let budgetUsed = 0;
-      const recencySelected: BaseMessage[] = [];
+      const recencySelected: Message[] = [];
       for (let i = thread.length - 1; i >= 0; i--) {
         if (meta.isSummarized[i]) continue;
         const msg = thread[i];
-        if (msg.getType() === 'system' && isLegacySummaryContent(msg.content.toString())) {
+        const content = messageContentToString(msg.content);
+        if (msg.role === 'system' && isLegacySummaryContent(content)) {
           continue;
         }
-        const content = msg.content?.toString?.() ?? '';
         if (!content) continue;
         if (budgetUsed + content.length > messageBudget) break;
         recencySelected.unshift(msg);
@@ -323,26 +337,25 @@ export class AgentHistoryManager {
     return [...selected, ...rankedMessages];
   }
 
-  /** History prune: pin last N turn pairs; rank older turns when over char budget. */
   async buildPrunedContextMessages(
     chatId: string,
     maxChars: number,
     query = '',
     minRecentTurns = 5,
-  ): Promise<BaseMessage[]> {
+  ): Promise<Message[]> {
     await this.loadChat(chatId);
     const thread = this.getThread(chatId);
     const pairs = minRecentTurns * 2;
     const tail = thread.slice(-pairs);
-    let used = tail.reduce((s, m) => s + (m.content?.toString?.().length ?? 0), 0);
+    let used = tail.reduce((s, m) => s + messageContentToString(m.content).length, 0);
     if (used <= maxChars) return tail;
     const head = thread.slice(0, Math.max(0, thread.length - pairs));
     if (head.length === 0 || !query.trim()) return tail.slice(-Math.max(2, pairs - 2));
     const candidates: HistoryCandidate[] = head.map((m, i) => ({
       index: i,
       message: m,
-      text: m.content?.toString?.() ?? '',
-      chars: m.content?.toString?.().length ?? 0,
+      text: messageContentToString(m.content),
+      chars: messageContentToString(m.content).length,
     }));
     const budget = Math.max(0, maxChars - used);
     const rankedIdx = await selectHistoryIndices(candidates, budget, query);
@@ -374,7 +387,6 @@ export class AgentHistoryManager {
     return summaries[summaries.length - 1];
   }
 
-  /** All prior summaries for chained compaction. */
   getCombinedSummariesText(chatId: string): string {
     const summaries = this.getSummaries(chatId);
     if (summaries.length === 0) return '';
@@ -399,7 +411,7 @@ export class AgentHistoryManager {
     if (!meta) return Math.floor(thread.length / 2);
     let humanCount = 0;
     for (let i = 0; i < thread.length; i++) {
-      if (thread[i].getType() !== 'human') continue;
+      if (thread[i].role !== 'user') continue;
       if (!meta.isSummarized[i]) humanCount++;
     }
     return humanCount;
@@ -420,7 +432,6 @@ export class AgentHistoryManager {
     }
   }
 
-  /** Delete every saved conversation file and in-memory threads. */
   async clearAllChats(): Promise<number> {
     let deleted = 0;
     try {

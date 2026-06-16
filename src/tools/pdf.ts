@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from '../runtime/tools';
 import { z } from 'zod';
 import * as path from 'path';
 import { getAgentRunContext, toTaskArtifactScope } from '../agents/agent-run-context';
@@ -48,10 +48,21 @@ function formatPdfResult(result: { relPath: string; bytes: number; sourceFiles?:
   return lines.join('\n');
 }
 
-export const pdfGenerateTool = tool(
-  async ({ markdown, title, subtitle, outputFilename, pageFormat, marginMm }) => {
+export const pdfGenerateTool = defineTool({
+  name: 'pdf_generate',
+    description:
+      'Generate a formatted PDF from markdown content. Saves to the current task artifact folder during org tasks, otherwise workspace/outputs/documents/.',
+    schema: z.object({
+      markdown: z.string().describe('Full markdown body (headings, lists, paragraphs). Title can be separate.'),
+      title: z.string().optional().describe('Document title shown on cover'),
+      subtitle: z.string().optional().describe('Optional subtitle under the title'),
+      outputFilename: z.string().default('document.pdf').describe('Output PDF filename, e.g. digital-product.pdf'),
+      pageFormat: z.enum(['A4', 'Letter']).optional().describe('Page size (default A4)'),
+      marginMm: z.number().optional().describe('Page margin in mm (default 18)'),
+    }),
+  execute: async ({ markdown, title, subtitle, outputFilename, pageFormat, marginMm }) => {
     try {
-      const { absPath, relPath } = resolveOutputPath(outputFilename);
+      const { absPath, relPath } = resolveOutputPath(outputFilename ?? 'output.pdf');
       await ensureTaskArtifactDirIfNeeded();
       const result = await generatePdfFromMarkdown(markdown, absPath, {
         title,
@@ -64,28 +75,26 @@ export const pdfGenerateTool = tool(
       return `PDF generation failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   },
-  {
-    name: 'pdf_generate',
-    description:
-      'Generate a formatted PDF from markdown content. Saves to the current task artifact folder during org tasks, otherwise workspace/outputs/documents/.',
-    schema: z.object({
-      markdown: z.string().describe('Full markdown body (headings, lists, paragraphs). Title can be separate.'),
-      title: z.string().optional().describe('Document title shown on cover'),
-      subtitle: z.string().optional().describe('Optional subtitle under the title'),
-      outputFilename: z.string().default('document.pdf').describe('Output PDF filename, e.g. digital-product.pdf'),
-      pageFormat: z.enum(['A4', 'Letter']).optional().describe('Page size (default A4)'),
-      marginMm: z.number().optional().describe('Page margin in mm (default 18)'),
-    }),
-  },
-);
+});
 
-export const pdfMergeFilesTool = tool(
-  async ({ inputFiles, title, subtitle, outputFilename, pageFormat, marginMm }) => {
+export const pdfMergeFilesTool = defineTool({
+  name: 'pdf_merge_files',
+    description:
+      'Merge multiple markdown files (chapters, sections) into one formatted PDF. Paths relative to workspace/ or project root.',
+    schema: z.object({
+      inputFiles: z.array(z.string()).describe('Ordered list of markdown file paths to merge'),
+      title: z.string().optional().describe('Document title'),
+      subtitle: z.string().optional().describe('Optional subtitle'),
+      outputFilename: z.string().default('document.pdf'),
+      pageFormat: z.enum(['A4', 'Letter']).optional(),
+      marginMm: z.number().optional(),
+    }),
+  execute: async ({ inputFiles, title, subtitle, outputFilename, pageFormat, marginMm }) => {
     try {
       if (inputFiles.length === 0) {
         return 'inputFiles must include at least one markdown file path.';
       }
-      const { absPath, relPath } = resolveOutputPath(outputFilename);
+      const { absPath, relPath } = resolveOutputPath(outputFilename ?? 'merged.pdf');
       await ensureTaskArtifactDirIfNeeded();
       const result = await generatePdfFromFiles(inputFiles, absPath, {
         title,
@@ -98,23 +107,25 @@ export const pdfMergeFilesTool = tool(
       return `PDF merge failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   },
-  {
-    name: 'pdf_merge_files',
+});
+
+export const pdfMergePipelineTool = defineTool({
+  name: 'pdf_merge_pipeline',
     description:
-      'Merge multiple markdown files (chapters, sections) into one formatted PDF. Paths relative to workspace/ or project root.',
+      'Merge markdown from orchestration pipeline subtask artifact folders into one PDF. Provide rootTaskId and optional ordered subtaskIds.',
     schema: z.object({
-      inputFiles: z.array(z.string()).describe('Ordered list of markdown file paths to merge'),
-      title: z.string().optional().describe('Document title'),
-      subtitle: z.string().optional().describe('Optional subtitle'),
-      outputFilename: z.string().default('document.pdf'),
+      rootTaskId: z.string().optional().describe('Pipeline root task id (defaults to current org root task)'),
+      subtaskIds: z
+        .array(z.string())
+        .optional()
+        .describe('Ordered subtask ids to include; omit to scan all subfolders'),
+      title: z.string().optional(),
+      subtitle: z.string().optional(),
+      outputFilename: z.string().default('digital-product.pdf'),
       pageFormat: z.enum(['A4', 'Letter']).optional(),
       marginMm: z.number().optional(),
     }),
-  },
-);
-
-export const pdfMergePipelineTool = tool(
-  async ({ rootTaskId, subtaskIds, title, subtitle, outputFilename, pageFormat, marginMm }) => {
+  execute: async ({ rootTaskId, subtaskIds, title, subtitle, outputFilename, pageFormat, marginMm }) => {
     try {
       const ctx = getAgentRunContext();
       const root = rootTaskId || ctx?.orgRootTaskId || ctx?.orgTaskId;
@@ -147,7 +158,7 @@ export const pdfMergePipelineTool = tool(
       if (uniqueSorted.length === 0) {
         return `No markdown sources found under pipeline ${root}.`;
       }
-      const { absPath, relPath } = resolveOutputPath(outputFilename);
+      const { absPath, relPath } = resolveOutputPath(outputFilename ?? 'merged.pdf');
       await ensureTaskArtifactDirIfNeeded();
       const result = await generatePdfFromFiles(
         uniqueSorted.map((f) => path.relative(process.cwd(), f).replace(/\\/g, '/')),
@@ -159,24 +170,7 @@ export const pdfMergePipelineTool = tool(
       return `Pipeline PDF merge failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   },
-  {
-    name: 'pdf_merge_pipeline',
-    description:
-      'Merge markdown from orchestration pipeline subtask artifact folders into one PDF. Provide rootTaskId and optional ordered subtaskIds.',
-    schema: z.object({
-      rootTaskId: z.string().optional().describe('Pipeline root task id (defaults to current org root task)'),
-      subtaskIds: z
-        .array(z.string())
-        .optional()
-        .describe('Ordered subtask ids to include; omit to scan all subfolders'),
-      title: z.string().optional(),
-      subtitle: z.string().optional(),
-      outputFilename: z.string().default('digital-product.pdf'),
-      pageFormat: z.enum(['A4', 'Letter']).optional(),
-      marginMm: z.number().optional(),
-    }),
-  },
-);
+});
 
 async function ensureTaskArtifactDirIfNeeded(): Promise<void> {
   const ctx = getAgentRunContext();

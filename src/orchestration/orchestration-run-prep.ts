@@ -135,8 +135,8 @@ export async function formatRunPrepPromptSections(
   if (prep.requireWorkflowBeforeDelegate && prep.isManager && !prep.workflow) {
     parts.push(
       `\n--- PIPELINE CHECKLIST (required) ---\n` +
-        `1. Write \`pipeline/workflow.json\` to your task artifact folder (use write_file).\n` +
-        `2. Delegate subtasks matching each workflow phase (create_subtask).\n` +
+        `1. Call \`save_default_pipeline_workflow\` with empty args {} (do NOT write_file workflow JSON).\n` +
+        `2. Delegate subtasks matching each workflow phase (delegate_from_workflow or create_subtask).\n` +
         `3. Monitor progress — do not complete until subtasks exist and finish.\n` +
         `Do NOT call route_to_skill or create_subtask until workflow.json exists and validates.`,
     );

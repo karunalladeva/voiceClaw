@@ -1,6 +1,7 @@
-import { HumanMessage } from '@langchain/core/messages';
+import { userMessage } from '../runtime/messages';
 import { ModelCapabilities, ModelConfig } from './types';
 import { createProvider } from './provider-factory';
+import { tool } from '../runtime/tools';
 
 // ── Known capabilities for popular model families ─────────────────────────────
 // Keys are lowercase substrings that match model names.  More specific keys
@@ -93,7 +94,7 @@ function inferFromName(modelName: string): Partial<ModelCapabilities> {
 // ── Layer 3: live probing ─────────────────────────────────────────────────────
 async function probe(config: ModelConfig): Promise<Partial<ModelCapabilities>> {
   const probed: Partial<ModelCapabilities> = {};
-  let llm: any;
+  let llm;
   try {
     llm = await createProvider(config);
   } catch (err: any) {
@@ -101,41 +102,44 @@ async function probe(config: ModelConfig): Promise<Partial<ModelCapabilities>> {
     return probed;
   }
 
-  // Basic text
   try {
-    await llm.invoke([new HumanMessage({ content: 'Reply with the single word: ok' })]);
+    await llm.complete({
+      messages: [userMessage('Reply with the single word: ok')],
+      label: 'capability-probe:text',
+    });
     probed.text = true;
   } catch {
     probed.text = false;
-    return probed; // Model unreachable; skip remaining probes
+    return probed;
   }
 
-  // Function calling
   try {
     const { z } = await import('zod');
-    const { tool } = await import('@langchain/core/tools');
     const dummy = tool(async () => 'x', {
       name: 'noop',
       description: 'noop',
       schema: z.object({ q: z.string() }),
     });
-    const bound = llm.bindTools([dummy]);
-    await bound.invoke([new HumanMessage({ content: 'Say hi.' })]);
+    await llm.complete({
+      messages: [userMessage('Say hi.')],
+      tools: [dummy],
+      label: 'capability-probe:tools',
+    });
     probed.functionCalling = true;
   } catch {
     probed.functionCalling = false;
   }
 
-  // Vision — send a 1×1 PNG
   try {
-    await llm.invoke([
-      new HumanMessage({
-        content: [
+    await llm.complete({
+      messages: [
+        userMessage([
           { type: 'text', text: 'What colour is this image? One word.' },
           { type: 'image_url', image_url: { url: `data:image/png;base64,${PROBE_IMAGE_B64}` } },
-        ],
-      }),
-    ]);
+        ]),
+      ],
+      label: 'capability-probe:vision',
+    });
     probed.vision = true;
   } catch {
     probed.vision = false;

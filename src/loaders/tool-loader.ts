@@ -1,18 +1,18 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import type { ToolDefinition } from '../runtime/tools';
 import { ModelConfig } from '../models/types';
 
 /**
  * Dynamically scans the src/tools directory and safely loads all exported
- * LangChain DynamicStructuredTools. It automatically filters by OS to prevent
+ * native ToolDefinition values. It automatically filters by OS to prevent
  * conflicts (e.g. loading Mac AppleScript tools on Windows).
  */
 export async function loadNativeTools(
   enableInternet: boolean = true
-): Promise<DynamicStructuredTool[]> {
-  const tools: DynamicStructuredTool[] = [];
+): Promise<ToolDefinition[]> {
+  const tools: ToolDefinition[] = [];
   const toolsDir = path.join(process.cwd(), 'src', 'tools');
 
   try {
@@ -62,7 +62,7 @@ export async function loadNativeTools(
 }
 
 /** Prefer a single `all*Tools` export to avoid duplicate registration from named exports. */
-function extractAggregateTools(module: Record<string, unknown>): DynamicStructuredTool[] | null {
+function extractAggregateTools(module: Record<string, unknown>): ToolDefinition[] | null {
   for (const key of Object.keys(module)) {
     if (!/^all\w+Tools$/i.test(key)) continue;
     const exported = module[key];
@@ -73,15 +73,21 @@ function extractAggregateTools(module: Record<string, unknown>): DynamicStructur
   return null;
 }
 
-/** Check if an object structurally looks like a LangChain DynamicStructuredTool */
-function isValidTool(obj: any): obj is DynamicStructuredTool {
-  return obj && typeof obj === 'object' && obj.name && typeof obj.name === 'string' && obj.schema;
+/** Check if an object structurally looks like a ToolDefinition */
+function isValidTool(obj: any): obj is ToolDefinition {
+  return (
+    obj &&
+    typeof obj === 'object' &&
+    typeof obj.name === 'string' &&
+    obj.schema &&
+    typeof obj.execute === 'function'
+  );
 }
 
 /** Prevent exact name collisions when dynamically loading */
 function addToolSafely(
-  tool: DynamicStructuredTool, 
-  bucket: DynamicStructuredTool[], 
+  tool: ToolDefinition, 
+  bucket: ToolDefinition[], 
   nameSet: Set<string>, 
   sourceFile: string
 ) {

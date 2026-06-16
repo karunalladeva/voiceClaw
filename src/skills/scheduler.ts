@@ -1,5 +1,6 @@
-import { DynamicStructuredTool } from '@langchain/core/tools';
+import { defineTool, type ToolDefinition } from '../runtime/tools';
 import { z } from 'zod';
+import { systemMessage, messageContentToString } from '../runtime/messages';
 import { BaseSkill, SkillDefinition } from './base-skill';
 import { historyManager } from '../agents/agent-history';
 import {
@@ -37,11 +38,11 @@ function describeSchedule(schedule: string): string {
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
-function makeTools(): DynamicStructuredTool[] {
+function makeTools(): ToolDefinition[] {
 
   // ── Pipeline CRUD ──
 
-  const createPipeline = new DynamicStructuredTool({
+  const createPipeline = defineTool({
     name: 'create_pipeline',
     description:
       'Create an automated pipeline. A pipeline is a chain of steps that execute sequentially. ' +
@@ -68,7 +69,7 @@ function makeTools(): DynamicStructuredTool[] {
         ),
       })).describe('Ordered list of pipeline steps'),
     }),
-    func: async ({ name, trigger, schedule, steps }) => {
+    execute: async ({ name, trigger, schedule, steps }) => {
       const pipelines = await loadPipelines();
       const pipeline: Pipeline = {
         id: `pipe_${Date.now()}`,
@@ -92,14 +93,14 @@ function makeTools(): DynamicStructuredTool[] {
     },
   });
 
-  const setMultiReminder = new DynamicStructuredTool({
+  const setMultiReminder = defineTool({
     name: 'set_multi_reminder',
     description: 'Set multiple one-time reminders for different times. Example: "Remind me in 5 mins, 1 hour, and 3 hours".',
     schema: z.object({
       message: z.string().describe('The reminder text.'),
       delaysMinutes: z.array(z.number()).describe('An array of minutes from now for each reminder. e.g. [5, 60, 180]'),
     }),
-    func: async ({ message, delaysMinutes }) => {
+    execute: async ({ message, delaysMinutes }) => {
       const pipelines = await loadPipelines();
       const results: string[] = [];
       const now = Date.now();
@@ -127,11 +128,11 @@ function makeTools(): DynamicStructuredTool[] {
     }
   });
 
-  const listPipelines = new DynamicStructuredTool({
+  const listPipelines = defineTool({
     name: 'list_pipelines',
     description: 'List all pipelines with their status, schedule, and steps.',
     schema: z.object({}),
-    func: async () => {
+    execute: async () => {
       const pipelines = await loadPipelines();
       if (pipelines.length === 0) return 'No pipelines configured.';
       return pipelines.map(p => {
@@ -145,13 +146,13 @@ function makeTools(): DynamicStructuredTool[] {
     },
   });
 
-  const runPipelineNow = new DynamicStructuredTool({
+  const runPipelineNow = defineTool({
     name: 'run_pipeline_now',
     description: 'Immediately execute a pipeline by its ID.',
     schema: z.object({
       id: z.string().describe('Pipeline ID to run'),
     }),
-    func: async ({ id }) => {
+    execute: async ({ id }) => {
       const pipelines = await loadPipelines();
       const pipeline = pipelines.find(p => p.id === id);
       if (!pipeline) return `❌ Pipeline "${id}" not found.`;
@@ -164,13 +165,13 @@ function makeTools(): DynamicStructuredTool[] {
     },
   });
 
-  const deletePipeline = new DynamicStructuredTool({
+  const deletePipeline = defineTool({
     name: 'delete_pipeline',
     description: 'Delete a pipeline by ID.',
     schema: z.object({
       id: z.string().describe('Pipeline ID to delete'),
     }),
-    func: async ({ id }) => {
+    execute: async ({ id }) => {
       const pipelines = await loadPipelines();
       const filtered = pipelines.filter(p => p.id !== id);
       if (filtered.length === pipelines.length) return `❌ No pipeline "${id}" found.`;
@@ -179,14 +180,14 @@ function makeTools(): DynamicStructuredTool[] {
     },
   });
 
-  const togglePipeline = new DynamicStructuredTool({
+  const togglePipeline = defineTool({
     name: 'toggle_pipeline',
     description: 'Enable or disable a pipeline.',
     schema: z.object({
       id: z.string().describe('Pipeline ID'),
       enabled: z.boolean().describe('true to enable, false to disable'),
     }),
-    func: async ({ id, enabled }) => {
+    execute: async ({ id, enabled }) => {
       const pipelines = await loadPipelines();
       const p = pipelines.find(p => p.id === id);
       if (!p) return `❌ Pipeline "${id}" not found.`;
@@ -201,7 +202,7 @@ function makeTools(): DynamicStructuredTool[] {
 
   // ── Channel Configuration ──
 
-  const configureChannel = new DynamicStructuredTool({
+  const configureChannel = defineTool({
     name: 'configure_channel',
     description:
       'Save or update a delivery channel configuration. ' +
@@ -214,7 +215,7 @@ function makeTools(): DynamicStructuredTool[] {
       name: z.string().describe('Display name for this channel config'),
       settings: z.record(z.string()).describe('Channel-specific key-value settings'),
     }),
-    func: async ({ type, name, settings }) => {
+    execute: async ({ type, name, settings }) => {
       const channels = await loadChannels();
       const existing = channels.findIndex(c => c.type === type);
       const config: ChannelConfig = { type, name, settings, enabled: true };
@@ -228,11 +229,11 @@ function makeTools(): DynamicStructuredTool[] {
     },
   });
 
-  const listChannels = new DynamicStructuredTool({
+  const listChannels = defineTool({
     name: 'list_channels',
     description: 'List all configured delivery channels.',
     schema: z.object({}),
-    func: async () => {
+    execute: async () => {
       const channels = await loadChannels();
       if (channels.length === 0) {
         return `No channels configured.\nSupported: ${getSupportedChannels().join(', ')}`;
@@ -245,14 +246,14 @@ function makeTools(): DynamicStructuredTool[] {
 
   // ── Simple Reminders (for small models) ──
 
-  const setReminder = new DynamicStructuredTool({
+  const setReminder = defineTool({
     name: 'set_reminder',
     description: 'Set a simple delayed reminder. Use this instead of create_pipeline when the user just wants a reminder in a few minutes or hours. Example: "Remind me in 5 minutes".',
     schema: z.object({
       message: z.string().describe('The reminder text to present to the user.'),
       delayMinutes: z.number().describe('How many minutes from now to trigger the reminder. Example: 5 for 5 minutes, 60 for 1 hour.'),
     }),
-    func: async ({ message, delayMinutes }) => {
+    execute: async ({ message, delayMinutes }) => {
       const pipelines = await loadPipelines();
       const delayMs = delayMinutes * 60_000;
       const targetTime = Date.now() + delayMs;
@@ -278,7 +279,7 @@ function makeTools(): DynamicStructuredTool[] {
 
   // ── Memory / History ──
 
-  const saveToHistory = new DynamicStructuredTool({
+  const saveToHistory = defineTool({
     name: 'save_to_history',
     description:
       'Save notes/preferences/information to chat memory for recall later. ' +
@@ -288,37 +289,38 @@ function makeTools(): DynamicStructuredTool[] {
       note: z.string().describe('The note to save'),
       tag: z.string().optional().describe('Tag: preference, reminder, fact, etc.'),
     }),
-    func: async ({ chatId, note, tag }) => {
-      const { SystemMessage } = await import('@langchain/core/messages');
-      const thread = historyManager.getThread(chatId);
+    execute: async ({ chatId, note, tag }) => {
+      const resolvedChatId = chatId ?? 'default';
       const content = tag ? `[Memory:${tag}] ${note}` : `[Memory] ${note}`;
-      thread.push(new SystemMessage({ content }));
-      historyManager.setThread(chatId, thread);
-      await historyManager.saveChat(chatId);
+      const thread = historyManager.getThread(resolvedChatId);
+      thread.push(systemMessage(content));
+      historyManager.syncMessageMeta(resolvedChatId);
+      await historyManager.saveChat(resolvedChatId);
       return `✅ Saved: "${content}"`;
     },
   });
 
-  const getHistory = new DynamicStructuredTool({
+  const getHistory = defineTool({
     name: 'get_history_summary',
     description: 'Retrieve conversation history / saved memories.',
     schema: z.object({
       chatId: z.string().describe('Chat ID').default('default'),
     }),
-    func: async ({ chatId }) => {
-      await historyManager.loadChat(chatId);
-      const summaries = historyManager.getSummaries(chatId);
-      const active = await historyManager.buildLlmContextMessages(chatId, 12000);
+    execute: async ({ chatId }) => {
+      const resolvedChatId = chatId ?? 'default';
+      await historyManager.loadChat(resolvedChatId);
+      const summaries = historyManager.getSummaries(resolvedChatId);
+      const active = await historyManager.buildLlmContextMessages(resolvedChatId, 12000);
       if (active.length === 0 && summaries.length === 0) {
         return 'No history for this conversation.';
       }
       const parts: string[] = [];
       if (summaries.length > 0) {
-        parts.push(`Summaries (${summaries.length}): ${historyManager.getCombinedSummariesText(chatId).substring(0, 800)}`);
+        parts.push(`Summaries (${summaries.length}): ${historyManager.getCombinedSummariesText(resolvedChatId).substring(0, 800)}`);
       }
       parts.push(
         'Active turns (isSummarized=false):',
-        ...active.map((m, i) => `[${i + 1}] (${m.getType()}): ${m.content.toString().substring(0, 200)}`),
+        ...active.map((m, i) => `[${i + 1}] (${m.role}): ${messageContentToString(m.content).substring(0, 200)}`),
       );
       return parts.join('\n');
     },

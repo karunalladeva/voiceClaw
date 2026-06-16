@@ -7,6 +7,7 @@
 import { registerStep, StepResult } from './pipeline-engine';
 import { deliverToChannel } from './channels';
 import { historyManager } from '../agents/agent-history';
+import { systemMessage } from '../runtime/messages';
 import { configManager } from '../config';
 import {
   packPipelineMarketContext,
@@ -54,8 +55,8 @@ async function fetchMarketResearchFallback(query: string, symbol?: string): Prom
     const sections: string[] = [];
     for (const ticker of tickers.slice(0, 12)) {
       const [ohlcv, news] = await Promise.all([
-        yahooOhlcvTool.invoke({ symbol: ticker, period: '1mo', interval: '1d', limit: 30 }),
-        yahooNewsTool.invoke({ symbol: ticker, limit: 8 }),
+        yahooOhlcvTool.execute({ symbol: ticker, period: '1mo', interval: '1d', limit: 30 }),
+        yahooNewsTool.execute({ symbol: ticker, limit: 8 }),
       ]);
       sections.push(
         [
@@ -420,9 +421,8 @@ registerStep('save_history', async (config, context): Promise<StepResult> => {
     : 'Pipeline Execution');
   
   const tag = config.tag || 'pipeline';
-  const { SystemMessage } = await import('@langchain/core/messages');
   const thread = historyManager.getThread(chatId);
-  thread.push(new SystemMessage({ content: `[${tag}] ${context || 'Empty pipeline output.'}` }));
+  thread.push(systemMessage(`[${tag}] ${context || 'Empty pipeline output.'}`));
   historyManager.setThread(chatId, thread);
   await historyManager.saveChat(chatId, chatTitle);
   return { success: true, output: `✅ Saved to history (${chatId}).` };

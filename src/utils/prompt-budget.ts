@@ -1,4 +1,5 @@
-import { BaseMessage } from '@langchain/core/messages';
+import type { Message } from '../runtime/messages';
+import { messageContentToString } from '../runtime/messages';
 import { isLlmIoDebugEnabled } from './debug-logger';
 import { packMarkdownToCharBudget } from './query-aware-truncate';
 import {
@@ -99,7 +100,7 @@ export function debugPromptDumpEnabled(): boolean {
   return isLlmIoDebugEnabled();
 }
 
-export function debugLogPromptMessages(label: string, messages: BaseMessage[]): void {
+export function debugLogPromptMessages(label: string, messages: Message[]): void {
   if (!debugPromptDumpEnabled()) return;
   console.log(`[ReAct Agent] ${label}:`, { messages });
 }

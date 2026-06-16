@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { DynamicStructuredTool } from "@langchain/core/tools";
+import { defineTool, type ToolDefinition } from '../runtime/tools';
 import { z } from "zod";
 import * as path from "path";
 
@@ -9,7 +9,7 @@ import { isPipeClosedError } from '../utils/pipe-errors';
 
 export class MCPClientManager {
   private clients: Map<string, Client> = new Map();
-  private tools: DynamicStructuredTool[] = [];
+  private tools: ToolDefinition[] = [];
   private memoryServerId: string | null | undefined = undefined; // undefined = not yet discovered
   private stats = {
     totalToolCalls: 0,
@@ -95,7 +95,7 @@ export class MCPClientManager {
     ].join('\n');
   }
 
-  async loadTools(): Promise<DynamicStructuredTool[]> {
+  async loadTools(): Promise<ToolDefinition[]> {
     this.tools = [];
     const loadedNames: string[] = [];
 
@@ -107,11 +107,11 @@ export class MCPClientManager {
           const schema = this.buildZodFromJsonSchema(mcpTool.inputSchema || { type: 'object', properties: {} });
 
           // Create the LangChain tool
-          const lcTool = new DynamicStructuredTool({
+          const lcTool = defineTool({
             name: `${serverId}_${mcpTool.name}`,
             description: mcpTool.description || `Execute ${mcpTool.name} on ${serverId}`,
             schema,
-            func: async (input: any) => {
+            execute: async (input: any) => {
               console.log(`[MCP Execution] Calling ${mcpTool.name} on ${serverId} with args:`, input);
               this.stats.totalToolCalls += 1;
               this.stats.lastToolCallAt = Date.now();
